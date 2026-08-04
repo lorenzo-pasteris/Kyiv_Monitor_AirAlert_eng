@@ -1,9 +1,9 @@
 """
-Kyiv Alert Monitor
-- Trigger-based: ТРИВОГА starts alert mode, ВІДБІЙ ends it
-- Alert mode: every message translated to English and sent immediately
-- Normal mode: messages buffered, summary every 2 hours
-- Ad filter: pure ads removed, promo tails cleaned, security messages always pass
+Kyiv Alert Monitor v2
+- Trigger: @kyiv_airraid_alert (reliable English alerts)
+- Alert mode: instant translation, clean output
+- Normal mode: 2h summaries, Kyiv-filtered for @monitorwarr
+- Manual override: /alert and /normal
 """
 import asyncio
 import os
@@ -21,25 +21,31 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 TARGET_CHAT_ID = os.environ["TARGET_CHAT_ID"]
 
-CHANNELS = [c.strip() for c in os.environ.get("CHANNELS", "kievinfo_kyiv").split(",")]
+# --- Channels ---
+TRIGGER_CHANNEL = "kyiv_airraid_alert"
+CONTENT_CHANNELS = [c.strip() for c in os.environ.get("CHANNELS", "kievinfo_kyiv,monitorwarr").split(",")]
+ALL_CHANNELS = [TRIGGER_CHANNEL] + CONTENT_CHANNELS
 
 SUMMARY_INTERVAL = int(os.environ.get("SUMMARY_INTERVAL", "7200"))  # 2 hours
 
-# --- Trigger words ---
-ALERT_START_TRIGGERS = ["ТРИВОГА", "тривога"]
-ALERT_END_TRIGGERS = ["ВІДБІЙ", "відбій"]
-
-# --- Security keywords: messages containing these ALWAYS pass the ad filter ---
+# --- Filters ---
 SECURITY_KEYWORDS = [
     "тривога", "відбій", "балістика", "ракета", "шахед", "шахеди",
     "бпла", "вибух", "вибухи", "ппо", "повітряна ціль", "укриття",
-    "загроза", "обстріл", "приліт", "дрон", "дрони", "mig", "міг"
+    "загроза", "обстріл", "приліт", "дрон", "дрони", "mig", "міг",
+    "siren", "raid", "missile", "drone", "explosion", "alert", "attack",
+    "ballistic", "shahed", "interception", "strike"
 ]
 
-# --- Ad indicators: messages with these (and no security keywords) are dropped ---
 AD_INDICATORS = [
     "#реклама", "реклама", "знижк", "розпродаж", "промокод",
     "купуй", "придбай", "акція", "магазин", "замовляй", "доставка"
+]
+
+KYIV_KEYWORDS = [
+    "київ", "kyiv", "киев", "києва", "київський", "київська",
+    "kyivskyi", "kyivsky", "kiev", "kyeva", "podil", "obolon",
+    "pechersk", "solomyanka", "holosiiv", "dnipro", "darnytsia"
 ]
 
 # --- State ---
@@ -48,33 +54,53 @@ alert_active = False
 
 
 def contains_any(text, keywords):
-    text_lower = text.lower()
-    return any(k.lower() in text_lower for k in keywords)
+    return any(k.lower() in text.lower() for k in keywords)
 
 
 def is_pure_ad(text):
-    """True if message is advertising and contains no security content."""
     if contains_any(text, SECURITY_KEYWORDS):
         return False
     return contains_any(text, AD_INDICATORS)
 
 
-def check_triggers(text):
-    """Update alert state based on trigger words. Returns 'start', 'end' or None."""
+def mentions_kyiv(text):
+    return any(k in text.lower() for k in KYIV_KEYWORDS)
+
+
+def clean_text(text):
+    """Remove channel hashtags, promo tags, fix spacing."""
+    # Strip leading hashtags like #theywrote
+    text = re.sub(r'^\s*#\w+\s*', '', text)
+    # Remove any other hashtags mid-text
+    text = re.sub(r'\s*#\w+\s*', ' ', text)
+    # Collapse excessive newlines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def check_alert_trigger(text):
+    """Check @kyiv_airraid_alert messages. Returns (action, extra_info)."""
     global alert_active
-    if contains_any(text, ALERT_END_TRIGGERS):
+    t = text.lower()
+
+    # END: "🟢 Air siren in Kyiv clear 🟢 Duration: 47 minutes"
+    if re.search(r'air\s+siren\s+in\s+kyiv\s+clear', t):
         if alert_active:
             alert_active = False
-            return "end"
-    elif contains_any(text, ALERT_START_TRIGGERS):
+            m = re.search(r'Duration:\s*(.+)', text, re.IGNORECASE)
+            duration = m.group(1).strip() if m else "unknown"
+            return "end", duration
+
+    # START: "🔴 ATTENTION! 🔴 Air raid sirens in Kyiv!"
+    elif re.search(r'air\s+raid\s+sirens?\s+in\s+kyiv', t):
         if not alert_active:
             alert_active = True
-            return "start"
-    return None
+            return "start", None
+
+    return None, None
 
 
 def translate_message(text):
-    """Translate to English and remove promo tails via Claude Haiku."""
     try:
         response = httpx.post(
             "https://api.anthropic.com/v1/messages",
@@ -84,15 +110,15 @@ def translate_message(text):
                 "content-type": "application/json"
             },
             json={
-                "model": "claude-haiku-4-5",
+                "model": "claude-3-5-haiku-20241022",
                 "max_tokens": 1000,
                 "messages": [{
                     "role": "user",
                     "content": (
-                        "Translate the following Ukrainian message into clear and concise English. "
+                        "Translate the following Ukrainian/Russian message into clear English. "
                         "Preserve locations, times, quantities and uncertainty. "
                         "Do not add information. "
-                        "REMOVE any promotional content (subscribe links, 'send news to bot', channel ads, LIVE tags). "
+                        "REMOVE any promotional content, subscribe links, channel ads, LIVE tags. "
                         "Reply ONLY with the cleaned translation:\n\n" + text
                     )
                 }]
@@ -106,7 +132,6 @@ def translate_message(text):
 
 
 def summarize_messages(messages):
-    """Summarize buffered messages in English."""
     if not messages:
         return None
     try:
@@ -119,7 +144,7 @@ def summarize_messages(messages):
                 "content-type": "application/json"
             },
             json={
-                "model": "claude-haiku-4-5",
+                "model": "claude-3-5-haiku-20241022",
                 "max_tokens": 1500,
                 "messages": [{
                     "role": "user",
@@ -174,12 +199,16 @@ async def main():
     client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
     await client.start()
 
-    print(f"✅ Connected. Monitoring: {CHANNELS}")
-    send_to_group(f"🟢 <b>Kyiv Monitor started</b>\nChannels: {', '.join('@' + c for c in CHANNELS)}\nMode: NORMAL (2h summaries)")
+    print(f"✅ Connected. Trigger: @{TRIGGER_CHANNEL} | Sources: {CONTENT_CHANNELS}")
+    send_to_group(
+        f"🟢 <b>Kyiv Monitor started</b>\n"
+        f"Trigger: @{TRIGGER_CHANNEL}\n"
+        f"Sources: {', '.join('@' + c for c in CONTENT_CHANNELS)}\n"
+        f"Mode: NORMAL (2h summaries)"
+    )
 
     @client.on(events.NewMessage(chats=int(TARGET_CHAT_ID)))
     async def command_handler(event):
-        """Manual commands from the target group: /alert and /normal."""
         global alert_active
         text = (event.message.text or "").strip().lower()
         if text == "/alert":
@@ -189,52 +218,63 @@ async def main():
             alert_active = False
             send_to_group("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode (2h summaries)")
 
-    @client.on(events.NewMessage(chats=CHANNELS))
+    @client.on(events.NewMessage(chats=ALL_CHANNELS))
     async def handler(event):
         global message_buffer
-        text = event.message.text
-        if not text or len(text.strip()) < 10:
+        raw_text = event.message.text or ""
+        if not raw_text or len(raw_text.strip()) < 5:
+            return
+
+        channel = event.chat.username if event.chat and event.chat.username else "?"
+        clean = clean_text(raw_text)
+
+        # ========== TRIGGER CHANNEL ==========
+        if channel == TRIGGER_CHANNEL:
+            action, extra = check_alert_trigger(clean)
+            if action == "start":
+                send_to_group(
+                    f"🚨 <b>AIR ALERT — KYIV</b>\n\n"
+                    f"{clean}\n\n"
+                    f"⚡ Switching to REAL-TIME mode"
+                )
+                return
+            elif action == "end":
+                send_to_group(
+                    f"✅ <b>ALL CLEAR — KYIV</b>\n\n"
+                    f"Duration: {extra}\n\n"
+                    f"📋 Back to NORMAL mode (2h summaries)"
+                )
+                return
+            # Non-trigger messages from this channel are ignored
+            return
+
+        # ========== CONTENT CHANNELS ==========
+        # Ad filter
+        if is_pure_ad(clean):
+            print(f"[FILTERED AD] @{channel}: {clean[:100]}")
+            return
+
+        # --- ALERT MODE ---
+        if alert_active:
+            # monitorwarr filter: skip non-Kyiv noise unless security-related
+            if channel == "monitorwarr" and not mentions_kyiv(clean) and not contains_any(clean, SECURITY_KEYWORDS):
+                print(f"[FILTERED NON-KYIV] @{channel}: {clean[:80]}")
+                return
+
+            translation = translate_message(clean[:1500])
+            if translation:
+                # CLEAN OUTPUT: just the text, no header, no timestamp, no @channel
+                send_to_group(translation)
+            return
+
+        # --- NORMAL MODE ---
+        # monitorwarr: only Kyiv-related
+        if channel == "monitorwarr" and not mentions_kyiv(clean):
+            print(f"[FILTERED NON-KYIV] @{channel}: {clean[:80]}")
             return
 
         time_str = datetime.now().strftime("%H:%M")
-        channel = event.chat.username if event.chat and event.chat.username else "?"
-
-        # --- Check alert triggers first ---
-        trigger = check_triggers(text)
-
-        if trigger == "start":
-            translation = translate_message(text[:1500])
-            send_to_group(
-                f"🚨 <b>AIR ALERT — KYIV</b>\n\n"
-                f"{translation or text}\n\n"
-                f"⚡ Switching to REAL-TIME mode"
-            )
-            return
-
-        if trigger == "end":
-            translation = translate_message(text[:1500])
-            send_to_group(
-                f"✅ <b>ALERT OVER — KYIV</b>\n\n"
-                f"{translation or text}\n\n"
-                f"📋 Back to NORMAL mode (2h summaries)"
-            )
-            return
-
-        # --- Ad filter ---
-        if is_pure_ad(text):
-            print(f"[FILTERED AD] @{channel}: {text[:100]}")
-            return
-
-        # --- Route by mode ---
-        if alert_active:
-            translation = translate_message(text[:1500])
-            if translation:
-                send_to_group(
-                    f"🔔 <b>[{time_str}] @{channel}</b>\n\n"
-                    f"{translation}"
-                )
-        else:
-            message_buffer.append({"time": time_str, "text": text[:500]})
+        message_buffer.append({"time": time_str, "text": clean[:500]})
 
     asyncio.create_task(summary_loop())
     await client.run_until_disconnected()
