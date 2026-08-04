@@ -1,5 +1,5 @@
 """
-Kyiv Alert Monitor v4
+Kyiv Alert Monitor v5 — low-latency async pipeline
 - Trigger: @kyiv_airraid_alert (English) + Ukrainian ТРИВОГА/ВІДБІЙ as backup
 - Normal mode: hourly analysis of 3 channels with per-channel filters
 - Alert mode (24/7): only @monitorwarr in real-time, with translation fallback
@@ -7,6 +7,7 @@ Kyiv Alert Monitor v4
 - Health check every 12h: private warning to owner if channels go silent
 """
 import asyncio
+import html
 import os
 import re
 import time
@@ -91,6 +92,11 @@ last_send_time = 0
 last_message_time = time.time()
 MIN_SEND_INTERVAL = 0.2
 
+# Created in main(); one shared connection pool avoids a new TLS handshake per message.
+http_client = None
+send_lock = None
+translation_slots = None
+
 
 def contains_any(text, keywords):
     return any(k.lower() in text.lower() for k in keywords)
@@ -150,9 +156,10 @@ def check_ua_trigger(text):
     return None
 
 
-def translate_message(text):
+async def translate_message(text):
     try:
-        r = httpx.post(
+        async with translation_slots:
+            r = await http_client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={"model": MODEL, "max_tokens": 1000, "messages": [{"role": "user", "content": (
@@ -163,74 +170,109 @@ def translate_message(text):
                 "Obukhiv, Fastiv, Bila Tserkva, Kharkiv, Dnipro, Odesa, Lviv, Zaporizhzhia. "
                 "Remove promo/subscribe/LIVE tags. Keep locations, times, quantities, and uncertainty. "
                 "Translation only:\n\n" + text)}]},
-            timeout=30
-        )
+            timeout=httpx.Timeout(15.0, connect=5.0)
+            )
+        r.raise_for_status()
         return r.json()["content"][0]["text"].strip()
     except Exception as e:
         print(f"Translation error: {e}")
         return None
 
-def analyze_channel(messages, prompt):
+async def analyze_channel(messages, prompt):
     if not messages:
         return None
     try:
         msgs_text = "\n\n---\n\n".join([f"[{m['time']}] {m['text']}" for m in messages])
-        r = httpx.post(
+        r = await http_client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={"model": MODEL, "max_tokens": 1500, "messages": [{"role": "user", "content": prompt + "\n\nMessages:\n\n" + msgs_text}]},
-            timeout=60
+            timeout=httpx.Timeout(45.0, connect=5.0)
         )
+        r.raise_for_status()
         return r.json()["content"][0]["text"].strip()
     except Exception as e:
         print(f"Analysis error: {e}")
         return None
 
 
-def send_message(chat_id, text):
+async def telegram_request(method, payload):
+    """Telegram Bot API request with one retry for flood control."""
     try:
-        r = httpx.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=30
+        r = await http_client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
+            json=payload,
+            timeout=httpx.Timeout(10.0, connect=3.0),
         )
-        if r.status_code != 200:
-            print(f"Send error: {r.text}")
+        data = r.json()
+        if r.status_code == 429:
+            retry_after = min(data.get("parameters", {}).get("retry_after", 1), 5)
+            await asyncio.sleep(retry_after)
+            r = await http_client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
+                json=payload,
+                timeout=httpx.Timeout(10.0, connect=3.0),
+            )
+            data = r.json()
+        if not data.get("ok"):
+            print(f"Telegram {method} error: {data}")
+            return None
+        return data.get("result")
     except Exception as e:
-        print(f"Telegram send error: {e}")
+        print(f"Telegram {method} error: {e}")
+        return None
 
-def send_to_channel(text):
-    send_message(TARGET_CHAT_ID, text)
+async def send_message(chat_id, text):
+    return await telegram_request("sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    })
 
-def send_to_owner(text):
-    send_message(OWNER_CHAT_ID, text)
+async def edit_message(chat_id, message_id, text):
+    return await telegram_request("editMessageText", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    })
+
+async def send_to_channel(text):
+    return await send_message(TARGET_CHAT_ID, text)
+
+async def send_to_owner(text):
+    return await send_message(OWNER_CHAT_ID, text)
 
 
 async def safe_send(text):
     global last_send_time
-    now = time.time()
-    wait = MIN_SEND_INTERVAL - (now - last_send_time)
-    if wait > 0:
-        await asyncio.sleep(wait)
-    send_to_channel(text)
-    last_send_time = time.time()
+    async with send_lock:
+        now = time.monotonic()
+        wait = MIN_SEND_INTERVAL - (now - last_send_time)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        result = await send_to_channel(text)
+        last_send_time = time.monotonic()
+        return result
 
 
-def build_summary(night_recap=False):
+async def build_summary(night_recap=False):
     sections = []
     for channel in ALL_CONTENT_CHANNELS:
         msgs = buffers[channel]
         if not msgs:
             continue
         buffers[channel] = []
-        result = analyze_channel(msgs, CHANNEL_PROMPTS[channel])
+        result = await analyze_channel(msgs, CHANNEL_PROMPTS[channel])
         if result and "NO_RELEVANT_INFO" not in result:
             sections.append(f"{CHANNEL_ICONS[channel]} <b>{CHANNEL_NAMES[channel]}</b>\n{result}")
     if sections:
         now = datetime.now(TZ).strftime("%H:%M")
         title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>Hourly Update"
         header = f"{title} — {now} CET</b>\n\n"
-        send_to_channel(header + "\n\n".join(sections))
+        await send_to_channel(header + "\n\n".join(sections))
 
 
 async def summary_loop():
@@ -244,7 +286,7 @@ async def summary_loop():
 
         # Just exited the night window -> big recap
         if was_night and not night_now:
-            build_summary(night_recap=True)
+            await build_summary(night_recap=True)
             was_night = False
             continue
 
@@ -254,7 +296,7 @@ async def summary_loop():
         if night_now:
             continue
 
-        build_summary(night_recap=False)
+        await build_summary(night_recap=False)
 
 
 async def health_loop():
@@ -263,30 +305,42 @@ async def health_loop():
         silence = time.time() - last_message_time
         if silence > SILENCE_THRESHOLD:
             hours = int(silence // 3600)
-            send_to_owner(f"⚠️ <b>Kyiv Monitor warning</b>\nNo messages received from any channel in ~{hours}h. Connection may be down — check Railway.")
+            await send_to_owner(f"⚠️ <b>Kyiv Monitor warning</b>\nNo messages received from any channel in ~{hours}h. Connection may be down — check Railway.")
 
-
-
-async def translate_async(text):
-    """Non-blocking translation via thread (httpx call is sync)."""
-    return await asyncio.to_thread(translate_message, text)
 
 
 async def handle_alert_message(clean):
-    """Translate one alert message and send immediately, preserving speed under load."""
-    translation = await translate_async(clean[:1500])
+    """Publish instantly, then replace the same post with its translation."""
+    original = html.escape(clean[:1500])
+    sent = await safe_send(f"🔴 <b>Incoming alert — translating…</b>\n\n{original}")
+    if not sent:
+        return
+
+    translation = await translate_message(clean[:1500])
     if translation:
-        await safe_send(f"\U0001F534 {translation}")
+        await edit_message(TARGET_CHAT_ID, sent["message_id"], f"🔴 {html.escape(translation)}")
     else:
-        await safe_send(f"\U0001F534 \u26A0\uFE0F (translation failed)\n\n{clean[:1000]}")
+        await edit_message(
+            TARGET_CHAT_ID,
+            sent["message_id"],
+            f"🔴 ⚠️ Translation unavailable\n\n{html.escape(clean[:1000])}",
+        )
 
 
 async def main():
+    global http_client, send_lock, translation_slots
+    http_client = httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
+        http2=False,
+    )
+    send_lock = asyncio.Lock()
+    translation_slots = asyncio.Semaphore(8)
+
     client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
     await client.start()
 
     print(f"✅ Connected. Trigger: @{TRIGGER_CHANNEL}, sources: {ALL_CONTENT_CHANNELS}")
-    send_to_channel(
+    await send_to_channel(
         f"🟢 <b>Kyiv Monitor started</b>\n"
         f"Mode: NORMAL (hourly summaries)\n"
         f"Night pause: 01:00–06:00 CET\n"
@@ -301,10 +355,10 @@ async def main():
             alert_active = True
             for c in ALL_CONTENT_CHANNELS:
                 buffers[c].clear()
-            send_to_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
+            await send_to_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
         elif text == "/normal":
             alert_active = False
-            send_to_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
+            await send_to_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
 
     @client.on(events.NewMessage(chats=ALL_CHANNELS))
     async def handler(event):
@@ -324,10 +378,10 @@ async def main():
             if action == "start":
                 for c in ALL_CONTENT_CHANNELS:
                     buffers[c].clear()
-                send_to_channel(f"🚨 <b>AIR ALERT — KYIV</b>\n\n{clean}\n\n⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded.")
+                await send_to_channel(f"🚨 <b>AIR ALERT — KYIV</b>\n\n{html.escape(clean)}\n\n⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded.")
                 return
             elif action == "end":
-                send_to_channel(f"✅ <b>ALL CLEAR — KYIV</b>\n\nDuration: {extra}\n\n📋 Back to NORMAL mode")
+                await send_to_channel(f"✅ <b>ALL CLEAR — KYIV</b>\n\nDuration: {html.escape(str(extra))}\n\n📋 Back to NORMAL mode")
                 return
             return
 
@@ -336,10 +390,10 @@ async def main():
         if ua == "start":
             for c in ALL_CONTENT_CHANNELS:
                 buffers[c].clear()
-            send_to_channel(f"🚨 <b>AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded.")
+            await send_to_channel(f"🚨 <b>AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded.")
             # fall through: this same message may also be content
         elif ua == "end":
-            send_to_channel("✅ <b>ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL mode")
+            await send_to_channel("✅ <b>ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL mode")
             return
 
         # ===== AD FILTER =====
@@ -365,7 +419,10 @@ async def main():
 
     asyncio.create_task(summary_loop())
     asyncio.create_task(health_loop())
-    await client.run_until_disconnected()
+    try:
+        await client.run_until_disconnected()
+    finally:
+        await http_client.aclose()
 
 
 if __name__ == "__main__":
