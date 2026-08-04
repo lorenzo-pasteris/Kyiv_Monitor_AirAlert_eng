@@ -89,7 +89,7 @@ buffers = {ch: [] for ch in ALL_CONTENT_CHANNELS}
 alert_active = False
 last_send_time = 0
 last_message_time = time.time()
-MIN_SEND_INTERVAL = 3
+MIN_SEND_INTERVAL = 0.2
 
 
 def contains_any(text, keywords):
@@ -156,10 +156,13 @@ def translate_message(text):
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={"model": MODEL, "max_tokens": 1000, "messages": [{"role": "user", "content": (
-                "Translate the following Ukrainian/Russian message into clear English. "
-                "Preserve locations, times, quantities and uncertainty. Do not add information. "
-                "REMOVE promotional content, subscribe links, channel ads, LIVE tags. "
-                "Reply ONLY with the cleaned translation:\n\n" + text)}]},
+                "Translate this Ukrainian/Russian military-alert message into English. "
+                "Output ONLY the translation. Never add notes, disclaimers, explanations, alternative "
+                "readings, or comments about OCR/ambiguity. If a word is a place name, keep it as the "
+                "place name. Known place names include: Brovary, Bucha, Irpin, Vyshhorod, Boryspil, "
+                "Obukhiv, Fastiv, Bila Tserkva, Kharkiv, Dnipro, Odesa, Lviv, Zaporizhzhia. "
+                "Remove promo/subscribe/LIVE tags. Keep locations, times, quantities, and uncertainty. "
+                "Translation only:\n\n" + text)}]},
             timeout=30
         )
         return r.json()["content"][0]["text"].strip()
@@ -263,6 +266,21 @@ async def health_loop():
             send_to_owner(f"⚠️ <b>Kyiv Monitor warning</b>\nNo messages received from any channel in ~{hours}h. Connection may be down — check Railway.")
 
 
+
+async def translate_async(text):
+    """Non-blocking translation via thread (httpx call is sync)."""
+    return await asyncio.to_thread(translate_message, text)
+
+
+async def handle_alert_message(clean):
+    """Translate one alert message and send immediately, preserving speed under load."""
+    translation = await translate_async(clean[:1500])
+    if translation:
+        await safe_send(f"\U0001F534 {translation}")
+    else:
+        await safe_send(f"\U0001F534 \u26A0\uFE0F (translation failed)\n\n{clean[:1000]}")
+
+
 async def main():
     client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
     await client.start()
@@ -333,12 +351,8 @@ async def main():
         if alert_active:
             if channel != MONITOR_CHANNEL:
                 return
-            translation = translate_message(clean[:1500])
-            if translation:
-                await safe_send(f"🔴 {translation}")
-            else:
-                # Fallback: send original so nothing is lost during a real attack
-                await safe_send(f"🔴 ⚠️ (translation failed)\n\n{clean[:1000]}")
+            # Translate + send in parallel so a burst of messages doesn't queue up.
+            asyncio.create_task(handle_alert_message(clean))
             return
 
         # ===== NORMAL MODE =====
