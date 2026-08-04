@@ -21,7 +21,7 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 TARGET_CHAT_ID = os.environ["TARGET_CHAT_ID"]
 
-CHANNELS = [c.strip() for c in os.environ.get("CHANNELS", "kyiv_alerts,monitorwarr,kievinfo_kyiv").split(",")]
+CHANNELS = [c.strip() for c in os.environ.get("CHANNELS", "kievinfo_kyiv").split(",")]
 
 SUMMARY_INTERVAL = int(os.environ.get("SUMMARY_INTERVAL", "7200"))  # 2 hours
 
