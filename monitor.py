@@ -177,6 +177,18 @@ async def main():
     print(f"✅ Connected. Monitoring: {CHANNELS}")
     send_to_group(f"🟢 <b>Kyiv Monitor started</b>\nChannels: {', '.join('@' + c for c in CHANNELS)}\nMode: NORMAL (2h summaries)")
 
+    @client.on(events.NewMessage(chats=int(TARGET_CHAT_ID)))
+    async def command_handler(event):
+        """Manual commands from the target group: /alert and /normal."""
+        global alert_active
+        text = (event.message.text or "").strip().lower()
+        if text == "/alert":
+            alert_active = True
+            send_to_group("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
+        elif text == "/normal":
+            alert_active = False
+            send_to_group("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode (2h summaries)")
+
     @client.on(events.NewMessage(chats=CHANNELS))
     async def handler(event):
         global message_buffer
