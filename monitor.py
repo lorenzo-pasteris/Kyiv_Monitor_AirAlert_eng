@@ -183,6 +183,13 @@ def is_night():
     h = datetime.now(TZ).hour
     return NIGHT_START <= h < NIGHT_END
 
+
+def seconds_until_next_hour():
+    """Return the delay to the next exact Europe/Kyiv clock hour."""
+    now = datetime.now(TZ)
+    elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
+    return max(0.1, 3600 - elapsed)
+
 def check_alert_trigger(text):
     """Classify Kyiv alert-channel messages without depending on one exact phrase."""
     global alert_active
@@ -750,7 +757,12 @@ async def build_summary(night_recap=False, trigger="scheduled"):
 
 async def summary_loop():
     was_night = False
-    next_run = time.monotonic() + SUMMARY_INTERVAL
+    first_delay = SUMMARY_INTERVAL if TEST_MODE else seconds_until_next_hour()
+    next_run = time.monotonic() + first_delay
+    print(
+        f"[SUMMARY SCHEDULE] first_run_in={first_delay:.1f}s "
+        f"interval={SUMMARY_INTERVAL}s timezone={TZ.key}"
+    )
     while True:
         await asyncio.sleep(max(0, next_run - time.monotonic()))
         next_run += SUMMARY_INTERVAL
