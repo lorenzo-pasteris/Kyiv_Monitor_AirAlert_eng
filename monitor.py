@@ -101,6 +101,7 @@ MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
 # Created in main(); one shared connection pool avoids a new TLS handshake per message.
 http_client = None
 send_lock = None
+test_command_lock = None
 translation_slots = None
 bot_output_message_ids = set()
 simulator_processed_message_ids = set()
@@ -398,12 +399,13 @@ async def publish_test_source(client, text):
 
 
 async def main():
-    global http_client, send_lock, translation_slots
+    global http_client, send_lock, test_command_lock, translation_slots
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
         http2=False,
     )
     send_lock = asyncio.Lock()
+    test_command_lock = asyncio.Lock()
     translation_slots = asyncio.Semaphore(8)
 
     client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
@@ -426,35 +428,40 @@ async def main():
                 return
 
             if command == "/test_start":
-                alert_active = True
-                for channel_name in ALL_CONTENT_CHANNELS:
-                    buffers[channel_name].clear()
-                await send_to_channel("🚨 <b>TEST AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME test mode active")
+                async with test_command_lock:
+                    alert_active = True
+                    for channel_name in ALL_CONTENT_CHANNELS:
+                        buffers[channel_name].clear()
+                    await send_to_channel("🚨 <b>TEST AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME test mode active")
                 return
 
             if command == "/test_message":
-                await publish_test_source(client, TEST_SAMPLE_MESSAGES[0])
+                async with test_command_lock:
+                    await publish_test_source(client, TEST_SAMPLE_MESSAGES[0])
                 return
 
             burst_match = re.fullmatch(r"/test_burst(?:\s+(\d+))?", command)
             if burst_match:
-                count = int(burst_match.group(1) or "1")
-                count = max(1, min(count, 100))
-                for index in range(count):
-                    sample = TEST_SAMPLE_MESSAGES[index % len(TEST_SAMPLE_MESSAGES)]
-                    await publish_test_source(client, f"[burst {index + 1}/{count}] {sample}")
+                async with test_command_lock:
+                    count = int(burst_match.group(1) or "1")
+                    count = max(1, min(count, 100))
+                    for index in range(count):
+                        sample = TEST_SAMPLE_MESSAGES[index % len(TEST_SAMPLE_MESSAGES)]
+                        await publish_test_source(client, f"[burst {index + 1}/{count}] {sample}")
                 return
 
             if command == "/test_end":
-                alert_active = False
-                await send_to_channel("✅ <b>TEST ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL test mode")
+                async with test_command_lock:
+                    alert_active = False
+                    await send_to_channel("✅ <b>TEST ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL test mode")
                 return
 
             if command == "/test_summary":
-                if alert_active:
-                    await send_to_channel("⚠️ End the test alert with /test_end before requesting a summary.")
-                else:
-                    await build_summary()
+                async with test_command_lock:
+                    if alert_active:
+                        await send_to_channel("⚠️ End the test alert with /test_end before requesting a summary.")
+                    else:
+                        await build_summary()
                 return
 
         @client.on(events.NewMessage(chats=int(TEST_CHAT_ID)))
