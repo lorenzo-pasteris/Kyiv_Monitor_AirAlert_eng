@@ -1,6 +1,6 @@
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
-- Production trigger: official UkraineAlarm API (Kyiv City)
+- Production trigger: @kyiv_airraid_alert
 - Normal mode: hourly analysis of 4 channels with per-channel filters
 - Alert mode (24/7): only @Nashee_PPO in real-time, with translation fallback
 - Night pause: no hourly summaries 01:00-06:00 Europe/Kyiv, one big recap at 06:00
@@ -33,20 +33,12 @@ if TEST_MODE and not TEST_CHAT_ID:
     raise RuntimeError("TEST_CHAT_ID is required when TEST_MODE=true")
 OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else PRODUCTION_CHAT_ID
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "392256147")  # private warnings go here
-UKRAINE_ALARM_API_KEY = os.environ.get("UKRAINE_ALARM_API_KEY")
-UKRAINE_ALARM_REGION_ID = os.environ.get("UKRAINE_ALARM_REGION_ID", "31")  # Kyiv City
-UKRAINE_ALARM_POLL_INTERVAL = max(5, int(os.environ.get("UKRAINE_ALARM_POLL_INTERVAL", "10")))
-if not TEST_MODE and not UKRAINE_ALARM_API_KEY:
-    raise RuntimeError("UKRAINE_ALARM_API_KEY is required when TEST_MODE=false")
-
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
 MONITOR_CHANNEL = "Nashee_PPO"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
-API_FALLBACK_AFTER = 45
-
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
 
 SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in production
@@ -117,11 +109,11 @@ ALERT_END_UA = ["відбій"]
 buffers = {ch: [] for ch in ALL_CONTENT_CHANNELS}
 alert_active = False
 alert_started_at = None
-api_alert_state = None
 telegram_alert_state = None
 last_send_time = 0
 last_message_time = time.time()
-last_api_success_time = 0
+last_summary_success_time = time.monotonic()
+summary_watchdog_attempts = set()
 stats_db_ready = False
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
 
@@ -130,6 +122,7 @@ http_client = None
 send_lock = None
 test_command_lock = None
 translation_slots = None
+summary_lock = None
 bot_output_message_ids = set()
 simulator_processed_message_ids = set()
 TEST_SOURCE_PREFIX = "[TEST_SOURCE:Nashee_PPO]"
@@ -210,25 +203,16 @@ def classify_telegram_alert(text):
 
 
 async def reconcile_alert_state(source):
-    """Fail-safe fusion: alert if either valid source says alert; clear only on safe consensus."""
+    """Use the explicit Kyiv state published by @kyiv_airraid_alert."""
     global alert_active, alert_started_at
-    api_available = api_alert_state is not None and time.time() - last_api_success_time <= API_FALLBACK_AFTER
-    telegram_available = telegram_alert_state is not None
-
-    if api_available and telegram_available:
-        desired = api_alert_state or telegram_alert_state
-        if api_alert_state != telegram_alert_state:
-            print(f"⚠️ Alert-source conflict: API={api_alert_state}, Telegram={telegram_alert_state}; keeping ALERT")
-    elif api_available:
-        desired = api_alert_state
-    elif telegram_available:
-        desired = telegram_alert_state
-    else:
-        print("⚠️ No valid alert source; preserving last known state")
+    if telegram_alert_state is None:
+        print("⚠️ No valid Telegram alert state; preserving last known state")
         return
 
+    desired = telegram_alert_state
     if desired == alert_active:
         return
+
     alert_active = desired
     if desired:
         alert_started_at = time.monotonic()
@@ -240,61 +224,6 @@ async def reconcile_alert_state(source):
         alert_started_at = None
         await send_to_channel("✅ <b>ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL mode")
         print(f"✅ Effective alert state ended via {source}")
-
-
-def ukraine_alarm_air_active(payload):
-    """Return the Kyiv City air-alert state from one regional API response."""
-    regions = payload if isinstance(payload, list) else [payload]
-    if not regions or not isinstance(regions[0], dict):
-        raise ValueError("unexpected UkraineAlarm response shape")
-    active_alerts = regions[0].get("activeAlerts") or []
-    return any(
-        isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "air"
-        for item in active_alerts
-    )
-
-
-async def ukraine_alarm_loop():
-    """Poll UkraineAlarm while preserving state and throttling repeated outage logs."""
-    global api_alert_state, last_api_success_time
-    initialized = False
-    consecutive_errors = 0
-    last_error_log_time = 0.0
-    endpoint = f"https://api.ukrainealarm.com/api/v3/alerts/{UKRAINE_ALARM_REGION_ID}"
-    while True:
-        try:
-            response = await http_client.get(
-                endpoint,
-                headers={"Authorization": UKRAINE_ALARM_API_KEY},
-                timeout=httpx.Timeout(10.0, connect=4.0),
-            )
-            response.raise_for_status()
-            current_active = ukraine_alarm_air_active(response.json())
-            last_api_success_time = time.time()
-            api_alert_state = current_active
-            consecutive_errors = 0
-
-            if not initialized:
-                initialized = True
-                print(
-                    f"✅ UkraineAlarm API connected: Kyiv City region={UKRAINE_ALARM_REGION_ID}, "
-                    f"air_alert={'ACTIVE' if current_active else 'CLEAR'}, poll={UKRAINE_ALARM_POLL_INTERVAL}s"
-                )
-            await reconcile_alert_state("UkraineAlarm API")
-        except Exception as exc:
-            # Preserve the last known state: an API outage must never create a false transition.
-            consecutive_errors += 1
-            now_mono = time.monotonic()
-            if consecutive_errors == 1 or now_mono - last_error_log_time >= 300:
-                print(
-                    "UkraineAlarm API error; Telegram fallback active "
-                    f"(state preserved, consecutive_errors={consecutive_errors}): "
-                    f"{type(exc).__name__}: {exc}"
-                )
-                last_error_log_time = now_mono
-            await reconcile_alert_state("Telegram fallback")
-
-        await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
 
 
 async def translate_message(text):
@@ -389,13 +318,56 @@ def persist_category_stats(run_at, snapshots, category_results):
         print(f"[STATS DB ERROR] write failed: {type(exc).__name__}: {exc}")
 
 
+def parse_first_json_object(raw):
+    """Decode the first complete JSON object and ignore harmless trailing model text."""
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^\x60\x60\x60(?:json)?\\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\\s*\x60\x60\x60$", "", cleaned)
+    object_start = cleaned.find("{")
+    if object_start < 0:
+        raise json.JSONDecodeError("No JSON object found", cleaned, 0)
+    parsed, _ = json.JSONDecoder().raw_decode(cleaned[object_start:])
+    if not isinstance(parsed, dict):
+        raise ValueError("AI response root must be a JSON object")
+    return parsed
+
+
+def normalize_category_result(parsed, messages):
+    supplied = parsed.get("categories", {})
+    if not isinstance(supplied, dict):
+        raise ValueError("categories must be an object")
+    valid_ids = {item["id"] for item in messages}
+    normalized = {}
+    for category_key in CATEGORIES:
+        category_data = supplied.get(category_key, {})
+        if not isinstance(category_data, dict):
+            category_data = {}
+        selected_ids = [
+            message_id for message_id in category_data.get("selected_ids", [])
+            if message_id in valid_ids
+        ]
+        bullets = [
+            str(bullet).strip().lstrip("•- ").strip()
+            for bullet in category_data.get("bullets", [])
+            if str(bullet).strip()
+        ][:5]
+        normalized[category_key] = {
+            "selected_ids": list(dict.fromkeys(selected_ids)),
+            "bullets": bullets,
+        }
+    return normalized
+
+
 async def analyze_hourly_matrix(messages):
-    """Classify every message against every category in one model call."""
+    """Analyze all messages with immediate retries and an increasing output budget."""
     if not messages:
-        return {key: {"selected_ids": [], "bullets": []} for key in CATEGORIES}
+        return {
+            category_key: {"selected_ids": [], "bullets": []}
+            for category_key in CATEGORIES
+        }
 
     category_text = "\n".join(
-        f"- {key}: {data['criteria']}" for key, data in CATEGORIES.items()
+        f"- {key}: {meta['criteria']}" for key, meta in CATEGORIES.items()
     )
     message_text = "\n\n".join(
         f"ID={item['id']} SOURCE=@{item['channel']} TIME={item['time']}\n{item['text']}"
@@ -407,56 +379,69 @@ async def analyze_hourly_matrix(messages):
         "Do not favor or exclude a message because of its source channel. Reject advertising, clickbait, "
         "routine statements without a concrete development, and unrelated material.\n\n"
         f"Categories:\n{category_text}\n\n"
-        "Return ONLY valid JSON using exactly this shape:\n"
+        "Return ONLY one valid JSON object using exactly this shape:\n"
         '{"categories":{"kyiv_city":{"selected_ids":[],"bullets":[]},'
         '"ukraine_national":{"selected_ids":[],"bullets":[]},'
         '"military":{"selected_ids":[],"bullets":[]},'
         '"air_defence":{"selected_ids":[],"bullets":[]}}}\n'
         "selected_ids must contain the exact message IDs that qualify. bullets must contain at most five "
         "concise English summary strings per category. Preserve stated locations, uncertainty, times and "
-        "quantities. Do not wrap JSON in markdown.\n\nMessages:\n" + message_text
+        "quantities. Do not wrap JSON in markdown and do not repeat the JSON object.\n\nMessages:\n" + message_text
     )
-    try:
-        response = await http_client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": MODEL,
-                "max_tokens": 4000,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=httpx.Timeout(60.0, connect=5.0),
-        )
-        response.raise_for_status()
-        raw = response.json()["content"][0]["text"].strip()
-        raw = re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", raw, flags=re.IGNORECASE)
-        parsed = json.loads(raw)
-        supplied = parsed.get("categories", {})
-        valid_ids = {item["id"] for item in messages}
-        normalized = {}
-        for category_key in CATEGORIES:
-            category_data = supplied.get(category_key, {})
-            selected_ids = [
-                message_id for message_id in category_data.get("selected_ids", [])
-                if message_id in valid_ids
-            ]
-            bullets = [
-                str(bullet).strip().lstrip("•- ").strip()
-                for bullet in category_data.get("bullets", [])
-                if str(bullet).strip()
-            ][:5]
-            normalized[category_key] = {
-                "selected_ids": list(dict.fromkeys(selected_ids)),
-                "bullets": bullets,
-            }
-        return normalized
-    except Exception as exc:
-        print(f"[CATEGORY ANALYSIS ERROR] {type(exc).__name__}: {exc}")
-        return None
+
+    token_budgets = (4000, 6000, 8000)
+    for attempt, max_tokens in enumerate(token_budgets, start=1):
+        try:
+            response = await http_client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": MODEL,
+                    "max_tokens": max_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=httpx.Timeout(60.0, connect=5.0),
+            )
+            response.raise_for_status()
+            raw = response.json()["content"][0]["text"].strip()
+            parsed = parse_first_json_object(raw)
+            return normalize_category_result(parsed, messages)
+        except Exception as exc:
+            print(
+                f"[CATEGORY ANALYSIS ERROR] attempt={attempt}/3 max_tokens={max_tokens} "
+                f"{type(exc).__name__}: {exc}"
+            )
+            if attempt < len(token_budgets):
+                await asyncio.sleep(attempt * 2)
+
+    return None
+
+
+def build_emergency_category_result(messages):
+    """Deterministic last-resort summary: publish retained source text without AI."""
+    result = {
+        category_key: {"selected_ids": [], "bullets": []}
+        for category_key in CATEGORIES
+    }
+    for item in messages:
+        lowered = item["text"].lower()
+        if contains_any(lowered, SECURITY_KEYWORDS):
+            category_key = "air_defence"
+        elif item["channel"] == KYIV_INFO_CHANNEL:
+            category_key = "kyiv_city"
+        elif item["channel"] == UKRAINE_NEWS_CHANNEL:
+            category_key = "ukraine_national"
+        else:
+            category_key = "military"
+        result[category_key]["selected_ids"].append(item["id"])
+        if len(result[category_key]["bullets"]) < 5:
+            compact = re.sub(r"\\s+", " ", item["text"]).strip()[:320]
+            result[category_key]["bullets"].append(f"@{item['channel']}: {compact}")
+    return result
 
 
 async def telegram_request(method, payload):
@@ -525,79 +510,101 @@ async def safe_send(text):
         return result
 
 
-async def build_summary(night_recap=False):
-    snapshots = []
-    snapshot_lengths = {}
-    received_by_channel = {}
+async def build_summary(night_recap=False, trigger="scheduled"):
+    """Build and publish one summary; retain buffers until Telegram confirms delivery."""
+    global last_summary_success_time, summary_watchdog_attempts
+    async with summary_lock:
+        snapshots = []
+        snapshot_lengths = {}
+        received_by_channel = {}
 
-    for channel in ALL_CONTENT_CHANNELS:
-        pending = list(buffers[channel])
-        snapshot_lengths[channel] = len(pending)
-        received_by_channel[channel] = len(pending)
-        print(f"[SUMMARY INPUT] @{channel}: messages={len(pending)}")
-        for index, message in enumerate(pending):
-            snapshots.append({
-                "id": f"{channel}:{index}",
-                "channel": channel,
-                "time": message["time"],
-                "text": message["text"],
-            })
-
-    category_results = await analyze_hourly_matrix(snapshots)
-    if category_results is None:
-        await send_to_owner(
-            "⚠️ <b>Hourly summary analysis delayed</b>\n"
-            "Cross-source category analysis failed. All messages were retained for the next retry."
-        )
-        return
-
-    by_id = {item["id"]: item for item in snapshots}
-    run_at = datetime.now(TZ).isoformat(timespec="seconds")
-    sections = []
-
-    print(f"[HOURLY CATEGORY STATS] run_at={run_at}")
-    for category_key, category_meta in CATEGORIES.items():
-        category_data = category_results[category_key]
-        selected_ids = set(category_data["selected_ids"])
         for channel in ALL_CONTENT_CHANNELS:
-            valid = sum(
-                1 for message_id in selected_ids
-                if message_id in by_id and by_id[message_id]["channel"] == channel
-            )
-            print(
-                f"[CATEGORY STATS] category={category_key} @{channel}: "
-                f"valid={valid} received={received_by_channel[channel]}"
-            )
-        for message_id in category_data["selected_ids"]:
-            item = by_id.get(message_id)
-            if item:
-                print(
-                    f"[CATEGORY ITEM] category={category_key} @{item['channel']} "
-                    f"id={message_id} text={item['text'][:100]}"
-                )
-        if category_data["bullets"]:
-            bullets = "\n".join(
-                f"• {html.escape(bullet)}" for bullet in category_data["bullets"]
-            )
-            sections.append(
-                f"{category_meta['icon']} <b>{category_meta['name']}</b>\n{bullets}"
+            pending = list(buffers[channel])
+            snapshot_lengths[channel] = len(pending)
+            received_by_channel[channel] = len(pending)
+            print(f"[SUMMARY INPUT] @{channel}: messages={len(pending)} trigger={trigger}")
+            for index, message in enumerate(pending):
+                snapshots.append({
+                    "id": f"{channel}:{index}",
+                    "channel": channel,
+                    "time": message["time"],
+                    "text": message["text"],
+                })
+
+        category_results = await analyze_hourly_matrix(snapshots)
+        used_emergency_fallback = category_results is None
+        if used_emergency_fallback:
+            category_results = build_emergency_category_result(snapshots)
+            await send_to_owner(
+                "⚠️ <b>Hourly summary AI fallback used</b>\n"
+                "All AI retries failed; a deterministic source-text summary was generated."
             )
 
-    persist_category_stats(run_at, snapshots, category_results)
+        by_id = {item["id"]: item for item in snapshots}
+        run_at = datetime.now(TZ).isoformat(timespec="seconds")
+        sections = []
 
-    # Clear only the analyzed snapshots. Messages received during the API call remain queued.
-    for channel, length in snapshot_lengths.items():
-        del buffers[channel][:length]
-
-    time_label = datetime.now(TZ).strftime("%H:%M %Z")
-    if sections:
-        title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>Hourly Update"
-        await send_to_channel(f"{title} — {time_label}</b>\n\n" + "\n\n".join(sections))
-    elif not night_recap:
-        await send_to_channel(
-            f"📋 <b>Hourly Update — {time_label}</b>\n\n"
-            "No relevant updates in the last hour."
+        print(
+            f"[HOURLY CATEGORY STATS] run_at={run_at} trigger={trigger} "
+            f"emergency_fallback={used_emergency_fallback}"
         )
+        for category_key, category_meta in CATEGORIES.items():
+            category_data = category_results[category_key]
+            selected_ids = set(category_data["selected_ids"])
+            for channel in ALL_CONTENT_CHANNELS:
+                valid = sum(
+                    1 for message_id in selected_ids
+                    if message_id in by_id and by_id[message_id]["channel"] == channel
+                )
+                print(
+                    f"[CATEGORY STATS] category={category_key} @{channel}: "
+                    f"valid={valid} received={received_by_channel[channel]}"
+                )
+            for message_id in category_data["selected_ids"]:
+                item = by_id.get(message_id)
+                if item:
+                    print(
+                        f"[CATEGORY ITEM] category={category_key} @{item['channel']} "
+                        f"id={message_id} text={item['text'][:100]}"
+                    )
+            if category_data["bullets"]:
+                bullets = "\n".join(
+                    f"• {html.escape(bullet)}" for bullet in category_data["bullets"]
+                )
+                sections.append(
+                    f"{category_meta['icon']} <b>{category_meta['name']}</b>\n{bullets}"
+                )
+
+        time_label = datetime.now(TZ).strftime("%H:%M %Z")
+        if sections:
+            title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>Hourly Update"
+            result = await send_to_channel(
+                f"{title} — {time_label}</b>\n\n" + "\n\n".join(sections)
+            )
+        elif not night_recap:
+            result = await send_to_channel(
+                f"📋 <b>Hourly Update — {time_label}</b>\n\n"
+                "No relevant updates in the last hour."
+            )
+        else:
+            result = True
+
+        if not result:
+            print(f"[SUMMARY SEND ERROR] trigger={trigger}; buffers retained")
+            await send_to_owner(
+                "🚨 <b>Hourly summary delivery failed</b>\n"
+                "Telegram did not confirm delivery. Buffers were retained for retry."
+            )
+            return False
+
+        persist_category_stats(run_at, snapshots, category_results)
+        for channel, length in snapshot_lengths.items():
+            del buffers[channel][:length]
+
+        last_summary_success_time = time.monotonic()
+        summary_watchdog_attempts.clear()
+        print(f"[SUMMARY DELIVERED] trigger={trigger} messages={len(snapshots)}")
+        return True
 
 
 async def summary_loop():
@@ -606,24 +613,56 @@ async def summary_loop():
     while True:
         await asyncio.sleep(max(0, next_run - time.monotonic()))
         next_run += SUMMARY_INTERVAL
-        if alert_active:
+        try:
+            if alert_active:
+                continue
+
+            night_now = is_night()
+            if was_night and not night_now:
+                await build_summary(night_recap=True, trigger="night_recap")
+                was_night = False
+                continue
+
+            was_night = night_now
+            if night_now:
+                continue
+
+            await build_summary(night_recap=False, trigger="scheduled")
+        except Exception as exc:
+            print(f"[SUMMARY LOOP ERROR] {type(exc).__name__}: {exc}")
+            await send_to_owner(
+                f"🚨 <b>Summary loop recovered</b>\n{html.escape(type(exc).__name__ + ': ' + str(exc))}"
+            )
+
+
+async def summary_watchdog_loop():
+    """Retry missing production summaries at 62, 65, 67 and 70 minutes."""
+    thresholds = (62, 65, 67, 70)
+    while True:
+        await asyncio.sleep(20 if TEST_MODE else 30)
+        if alert_active or is_night():
             continue
-
-        night_now = is_night()
-
-        # Just exited the night window -> big recap
-        if was_night and not night_now:
-            await build_summary(night_recap=True)
-            was_night = False
-            continue
-
-        was_night = night_now
-
-        # Skip hourly summaries during the night
-        if night_now:
-            continue
-
-        await build_summary(night_recap=False)
+        age_minutes = (time.monotonic() - last_summary_success_time) / 60
+        for threshold in thresholds:
+            if age_minutes >= threshold and threshold not in summary_watchdog_attempts:
+                summary_watchdog_attempts.add(threshold)
+                print(f"[SUMMARY WATCHDOG] no confirmed summary for {age_minutes:.1f}m; retry={threshold}m")
+                await send_to_owner(
+                    f"⚠️ <b>Summary watchdog retry</b>\n"
+                    f"No confirmed delivery for {age_minutes:.1f} minutes. Running retry {threshold}m."
+                )
+                try:
+                    success = await build_summary(trigger=f"watchdog_{threshold}m")
+                except Exception as exc:
+                    success = False
+                    print(f"[SUMMARY WATCHDOG ERROR] {type(exc).__name__}: {exc}")
+                if success:
+                    break
+                if threshold == 70:
+                    await send_to_owner(
+                        "🚨 <b>Summary watchdog critical</b>\n"
+                        "Retries at 62, 65, 67 and 70 minutes failed; buffers remain retained."
+                    )
 
 
 async def health_loop():
@@ -690,7 +729,7 @@ async def publish_test_source(client, text):
 
 
 async def main():
-    global http_client, send_lock, test_command_lock, translation_slots, telegram_alert_state, stats_db_ready
+    global http_client, send_lock, test_command_lock, translation_slots, summary_lock, telegram_alert_state, stats_db_ready
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
         http2=False,
@@ -698,6 +737,7 @@ async def main():
     send_lock = asyncio.Lock()
     test_command_lock = asyncio.Lock()
     translation_slots = asyncio.Semaphore(8)
+    summary_lock = asyncio.Lock()
     stats_db_ready = initialize_stats_db()
 
     client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
@@ -789,7 +829,7 @@ async def main():
                 break
 
         print(
-            f"✅ Connected in production. Trigger: UkraineAlarm API; backup: @{BACKUP_TRIGGER_CHANNEL}; "
+            f"✅ Connected in production. Alert trigger: @{BACKUP_TRIGGER_CHANNEL}; "
             f"content sources: {ALL_CONTENT_CHANNELS}"
         )
         await send_to_channel(
@@ -852,9 +892,9 @@ async def main():
             print(f"[BUFFERED] @{channel}: pending={len(channel_buffer)} text={clean[:80]}")
 
     asyncio.create_task(summary_loop())
+    asyncio.create_task(summary_watchdog_loop())
     if not TEST_MODE:
         asyncio.create_task(health_loop())
-        asyncio.create_task(ukraine_alarm_loop())
 
     try:
         await client.run_until_disconnected()
