@@ -77,9 +77,11 @@ CHANNEL_PROMPTS = {
         "If nothing about Ukraine, reply exactly 'NO_RELEVANT_INFO'."
     ),
     MONITOR_CHANNEL: (
-        "You analyze Russian military-monitoring messages. Extract ONLY: troop movements/concentrations, "
-        "equipment transfers, offensive preparations, missile/drone launch activity, border or Belarus military "
-        "activity, fortification work. "
+        "You analyze Ukrainian air-defence monitoring messages from Nashee_PPO. PRIORITIZE overnight or daily "
+        "recap posts that report the total number of attacks. Preserve every stated count and distinguish attack "
+        "types (Shahed/other UAVs, cruise missiles, ballistic missiles, hypersonic missiles, guided bombs), plus "
+        "interceptions, impacts, affected areas, casualties, and damage when explicitly reported. Also extract "
+        "concrete missile/drone launch activity and major military developments. Never invent or combine counts. "
         "Format: max 5 bullets, each '•', one line, English. No preamble. "
         "If nothing qualifies, reply exactly 'NO_RELEVANT_INFO'."
     )
@@ -139,7 +141,7 @@ def pre_filter(channel, text):
             return False
         return contains_any(text, MILITARY_KEYWORDS)
     elif channel == MONITOR_CHANNEL:
-        return contains_any(text, MILITARY_KEYWORDS)
+        return contains_any(text, MILITARY_KEYWORDS) or contains_any(text, SECURITY_KEYWORDS)
     return True
 
 def is_night():
