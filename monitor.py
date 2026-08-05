@@ -103,6 +103,7 @@ http_client = None
 send_lock = None
 translation_slots = None
 bot_output_message_ids = set()
+simulator_processed_message_ids = set()
 TEST_SOURCE_PREFIX = "[TEST_SOURCE:monitorwarr]"
 TEST_SAMPLE_MESSAGES = [
     "⚠️ Київщина: зафіксовано рух ударних БпЛА Shahed drone у напрямку Києва.",
@@ -357,8 +358,34 @@ async def handle_alert_message(clean):
         )
 
 
+async def process_test_source_text(clean):
+    global last_message_time
+    clean = clean_text(clean)
+    if not clean:
+        return
+    last_message_time = time.time()
+
+    if is_pure_ad(clean):
+        print(f"[TEST FILTERED AD] {clean[:80]}")
+        return
+
+    if alert_active:
+        asyncio.create_task(handle_alert_message(clean))
+        return
+
+    if not pre_filter(MONITOR_CHANNEL, clean):
+        print(f"[TEST FILTERED] @{MONITOR_CHANNEL}: {clean[:60]}")
+        return
+
+    time_str = datetime.now(TZ).strftime("%H:%M")
+    buffers[MONITOR_CHANNEL].append({"time": time_str, "text": clean[:800]})
+
+
 async def publish_test_source(client, text):
-    await client.send_message(int(TEST_CHAT_ID), f"{TEST_SOURCE_PREFIX}\n{text}")
+    sent = await client.send_message(int(TEST_CHAT_ID), f"{TEST_SOURCE_PREFIX}\n{text}")
+    simulator_processed_message_ids.add(sent.id)
+    await process_test_source_text(text)
+    return sent
 
 
 async def main():
@@ -430,25 +457,10 @@ async def main():
             if not raw_text.startswith(TEST_SOURCE_PREFIX):
                 return
 
-            clean = clean_text(raw_text[len(TEST_SOURCE_PREFIX):].lstrip())
-            if not clean:
+            if event.message.id in simulator_processed_message_ids:
                 return
-            last_message_time = time.time()
-
-            if is_pure_ad(clean):
-                print(f"[TEST FILTERED AD] {clean[:80]}")
-                return
-
-            if alert_active:
-                asyncio.create_task(handle_alert_message(clean))
-                return
-
-            if not pre_filter(MONITOR_CHANNEL, clean):
-                print(f"[TEST FILTERED] @{MONITOR_CHANNEL}: {clean[:60]}")
-                return
-
-            time_str = datetime.now(TZ).strftime("%H:%M")
-            buffers[MONITOR_CHANNEL].append({"time": time_str, "text": clean[:800]})
+            clean = raw_text[len(TEST_SOURCE_PREFIX):].lstrip()
+            await process_test_source_text(clean)
 
     else:
         source_entities = {}
