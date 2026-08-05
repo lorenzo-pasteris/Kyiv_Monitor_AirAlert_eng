@@ -92,6 +92,38 @@ CATEGORIES = {
     },
 }
 
+CATEGORY_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "categories": {
+            "type": "object",
+            "properties": {
+                key: {
+                    "type": "object",
+                    "properties": {
+                        "selected_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "bullets": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["selected_ids", "bullets"],
+                    "additionalProperties": False,
+                }
+                for key in CATEGORIES
+            },
+            "required": list(CATEGORIES.keys()),
+            "additionalProperties": False,
+        }
+    },
+    "required": ["categories"],
+    "additionalProperties": False,
+}
+
+
 CATEGORY_STATS_DB_PATH = os.environ.get(
     "CATEGORY_STATS_DB_PATH", "/data/kyiv_monitor_category_stats.sqlite3"
 )
@@ -319,47 +351,78 @@ def persist_category_stats(run_at, snapshots, category_results):
 
 
 def parse_first_json_object(raw):
-    """Decode the first complete JSON object and ignore harmless trailing model text."""
+    """Legacy fallback: decode the first JSON object and report trailing anomalies."""
     cleaned = raw.strip()
     cleaned = re.sub(r"^\x60\x60\x60(?:json)?\\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\\s*\x60\x60\x60$", "", cleaned)
     object_start = cleaned.find("{")
     if object_start < 0:
         raise json.JSONDecodeError("No JSON object found", cleaned, 0)
-    parsed, _ = json.JSONDecoder().raw_decode(cleaned[object_start:])
+    parsed, end_index = json.JSONDecoder().raw_decode(cleaned[object_start:])
+    trailing = cleaned[object_start + end_index:].strip()
+    print(
+        "[STRUCTURED OUTPUT LEGACY PARSER] primary json.loads failed; "
+        f"first object extracted trailing_data={bool(trailing)}"
+    )
     if not isinstance(parsed, dict):
         raise ValueError("AI response root must be a JSON object")
     return parsed
 
 
 def normalize_category_result(parsed, messages):
-    supplied = parsed.get("categories", {})
-    if not isinstance(supplied, dict):
-        raise ValueError("categories must be an object")
+    """Strictly validate categories, value types and selected message IDs."""
+    if set(parsed.keys()) != {"categories"}:
+        raise ValueError("structured result must contain only categories")
+    supplied = parsed["categories"]
+    if not isinstance(supplied, dict) or set(supplied.keys()) != set(CATEGORIES.keys()):
+        raise ValueError("structured result must contain every configured category exactly once")
+
     valid_ids = {item["id"] for item in messages}
     normalized = {}
     for category_key in CATEGORIES:
-        category_data = supplied.get(category_key, {})
+        category_data = supplied[category_key]
         if not isinstance(category_data, dict):
-            category_data = {}
-        selected_ids = [
-            message_id for message_id in category_data.get("selected_ids", [])
-            if message_id in valid_ids
-        ]
-        bullets = [
-            str(bullet).strip().lstrip("•- ").strip()
-            for bullet in category_data.get("bullets", [])
-            if str(bullet).strip()
-        ][:5]
+            raise TypeError(f"{category_key} must be an object")
+        if set(category_data.keys()) != {"selected_ids", "bullets"}:
+            raise ValueError(f"{category_key} must contain only selected_ids and bullets")
+
+        selected_ids = category_data["selected_ids"]
+        bullets = category_data["bullets"]
+        if not isinstance(selected_ids, list) or not all(
+            isinstance(message_id, str) for message_id in selected_ids
+        ):
+            raise TypeError(f"{category_key}.selected_ids must be an array of strings")
+        if not isinstance(bullets, list) or not all(
+            isinstance(bullet, str) for bullet in bullets
+        ):
+            raise TypeError(f"{category_key}.bullets must be an array of strings")
+
+        unknown_ids = [message_id for message_id in selected_ids if message_id not in valid_ids]
+        if unknown_ids:
+            raise ValueError(f"{category_key} returned unknown IDs: {unknown_ids[:5]}")
+
         normalized[category_key] = {
             "selected_ids": list(dict.fromkeys(selected_ids)),
-            "bullets": bullets,
+            "bullets": [
+                bullet.strip().lstrip("•- ").strip()
+                for bullet in bullets
+                if bullet.strip()
+            ][:5],
         }
     return normalized
 
 
+def retry_after_seconds(response, default):
+    """Honor a numeric Retry-After header, bounded to protect the worker."""
+    raw = response.headers.get("Retry-After")
+    try:
+        return max(1, min(int(raw), 60))
+    except (TypeError, ValueError):
+        return default
+
+
 async def analyze_hourly_matrix(messages):
-    """Analyze all messages with immediate retries and an increasing output budget."""
+    """Use Anthropic Structured Outputs with error-specific retry policies."""
     if not messages:
         return {
             category_key: {"selected_ids": [], "bullets": []}
@@ -379,50 +442,119 @@ async def analyze_hourly_matrix(messages):
         "Do not favor or exclude a message because of its source channel. Reject advertising, clickbait, "
         "routine statements without a concrete development, and unrelated material.\n\n"
         f"Categories:\n{category_text}\n\n"
-        "Return ONLY one valid JSON object using exactly this shape:\n"
-        '{"categories":{"kyiv_city":{"selected_ids":[],"bullets":[]},'
-        '"ukraine_national":{"selected_ids":[],"bullets":[]},'
-        '"military":{"selected_ids":[],"bullets":[]},'
-        '"air_defence":{"selected_ids":[],"bullets":[]}}}\n'
-        "selected_ids must contain the exact message IDs that qualify. bullets must contain at most five "
-        "concise English summary strings per category. Preserve stated locations, uncertainty, times and "
-        "quantities. Do not wrap JSON in markdown and do not repeat the JSON object.\n\nMessages:\n" + message_text
+        "Use the required structured output schema. selected_ids must contain exact message IDs that qualify. "
+        "bullets must contain at most five concise English summary strings per category. Preserve stated "
+        "locations, uncertainty, times and quantities.\n\nMessages:\n" + message_text
     )
 
     token_budgets = (4000, 6000, 8000)
-    for attempt, max_tokens in enumerate(token_budgets, start=1):
-        try:
-            response = await http_client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": MODEL,
-                    "max_tokens": max_tokens,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=httpx.Timeout(60.0, connect=5.0),
-            )
-            response.raise_for_status()
-            raw = response.json()["content"][0]["text"].strip()
-            parsed = parse_first_json_object(raw)
-            return normalize_category_result(parsed, messages)
-        except Exception as exc:
-            print(
-                f"[CATEGORY ANALYSIS ERROR] attempt={attempt}/3 max_tokens={max_tokens} "
-                f"{type(exc).__name__}: {exc}"
-            )
-            if attempt < len(token_budgets):
-                await asyncio.sleep(attempt * 2)
+    for token_attempt, max_tokens in enumerate(token_budgets, start=1):
+        reached_token_limit = False
+        for transient_attempt in range(1, 4):
+            try:
+                response = await http_client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": ANTHROPIC_API_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": MODEL,
+                        "max_tokens": max_tokens,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "output_config": {
+                            "format": {
+                                "type": "json_schema",
+                                "schema": CATEGORY_RESULT_SCHEMA,
+                            }
+                        },
+                    },
+                    timeout=httpx.Timeout(60.0, connect=5.0),
+                )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                if transient_attempt < 3:
+                    wait_seconds = 2 ** (transient_attempt - 1)
+                    print(
+                        f"[CATEGORY API RETRY] transport attempt={transient_attempt}/3 "
+                        f"wait={wait_seconds}s {type(exc).__name__}: {exc}"
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                print(f"[CATEGORY ANALYSIS ERROR] transport exhausted: {type(exc).__name__}: {exc}")
+                return None
 
+            if response.status_code == 429 or response.status_code >= 500:
+                if transient_attempt < 3:
+                    wait_seconds = retry_after_seconds(
+                        response, min(2 ** (transient_attempt - 1), 30)
+                    )
+                    print(
+                        f"[CATEGORY API RETRY] status={response.status_code} "
+                        f"attempt={transient_attempt}/3 wait={wait_seconds}s"
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                print(
+                    f"[CATEGORY ANALYSIS ERROR] transient HTTP {response.status_code} exhausted"
+                )
+                return None
+
+            if 400 <= response.status_code < 500:
+                print(
+                    f"[CATEGORY ANALYSIS ERROR] non-retryable HTTP {response.status_code}: "
+                    f"{response.text[:500]}"
+                )
+                return None
+
+            try:
+                response_data = response.json()
+                stop_reason = response_data.get("stop_reason")
+
+                if stop_reason == "max_tokens":
+                    reached_token_limit = True
+                    print(
+                        f"[CATEGORY TOKEN RETRY] max_tokens reached at {max_tokens}; "
+                        f"next_budget={token_budgets[token_attempt] if token_attempt < len(token_budgets) else 'none'}"
+                    )
+                    break
+
+                if stop_reason == "refusal":
+                    print("[CATEGORY ANALYSIS ERROR] non-retryable refusal")
+                    return None
+
+                text_blocks = [
+                    block.get("text")
+                    for block in response_data.get("content", [])
+                    if block.get("type") == "text" and isinstance(block.get("text"), str)
+                ]
+                if not text_blocks:
+                    raise ValueError("structured response contains no text block")
+                raw = text_blocks[0].strip()
+
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    parsed = parse_first_json_object(raw)
+
+                return normalize_category_result(parsed, messages)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                print(
+                    f"[CATEGORY ANALYSIS ERROR] non-retryable structured output "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return None
+
+        if reached_token_limit:
+            continue
+        return None
+
+    print("[CATEGORY ANALYSIS ERROR] max_tokens exhausted at 8000")
     return None
 
 
 def build_emergency_category_result(messages):
-    """Deterministic last-resort summary: publish retained source text without AI."""
+    """Last resort: publish only original source excerpts, without AI synthesis."""
     result = {
         category_key: {"selected_ids": [], "bullets": []}
         for category_key in CATEGORIES
@@ -439,8 +571,10 @@ def build_emergency_category_result(messages):
             category_key = "military"
         result[category_key]["selected_ids"].append(item["id"])
         if len(result[category_key]["bullets"]) < 5:
-            compact = re.sub(r"\\s+", " ", item["text"]).strip()[:320]
-            result[category_key]["bullets"].append(f"@{item['channel']}: {compact}")
+            original_excerpt = re.sub(r"\\s+", " ", item["text"]).strip()[:160]
+            result[category_key]["bullets"].append(
+                f"Original source excerpt from @{item['channel']}: {original_excerpt}"
+            )
     return result
 
 
@@ -574,6 +708,13 @@ async def build_summary(night_recap=False, trigger="scheduled"):
                 sections.append(
                     f"{category_meta['icon']} <b>{category_meta['name']}</b>\n{bullets}"
                 )
+
+        if used_emergency_fallback:
+            sections.insert(
+                0,
+                "⚠️ <b>AI synthesis unavailable</b>\n"
+                "The entries below are unchanged original-source excerpts, not an AI summary.",
+            )
 
         time_label = datetime.now(TZ).strftime("%H:%M %Z")
         if sections:
