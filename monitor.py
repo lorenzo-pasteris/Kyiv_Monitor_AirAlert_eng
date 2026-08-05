@@ -25,7 +25,7 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USER_ID = int(BOT_TOKEN.split(":", 1)[0])
 TEST_MODE = os.environ.get("TEST_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
-PRODUCTION_CHAT_ID = os.environ["OUTPUT_CHAT_ID"]
+PRODUCTION_CHAT_ID = os.environ["TARGET_CHAT_ID"]
 TEST_CHAT_ID = os.environ.get("TEST_CHAT_ID")
 if TEST_MODE and not TEST_CHAT_ID:
     raise RuntimeError("TEST_CHAT_ID is required when TEST_MODE=true")
