@@ -1,9 +1,9 @@
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: official UkraineAlarm API (Kyiv City)
-- Normal mode: hourly analysis of 3 channels with per-channel filters
+- Normal mode: hourly analysis of 4 channels with per-channel filters
 - Alert mode (24/7): only @Nashee_PPO in real-time, with translation fallback
-- Night pause: no hourly summaries 01:00-06:00 CET, one big recap at 06:00
+- Night pause: no hourly summaries 01:00-06:00 Europe/Kyiv, one big recap at 06:00
 - Health check every 12h: private warning to owner if channels go silent
 """
 import asyncio
@@ -41,25 +41,26 @@ if not TEST_MODE and not UKRAINE_ALARM_API_KEY:
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
 MONITOR_CHANNEL = "Nashee_PPO"
+UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
 API_FALLBACK_AFTER = 45
 
-ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
+ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
 
 SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in production
 HEALTH_CHECK_INTERVAL = 43200  # 12 hours
 SILENCE_THRESHOLD = 4 * 3600  # 4 hours of total silence = warning
 
 # --- Timezone / night pause ---
-TZ = ZoneInfo("Europe/Rome")  # CET/CEST auto
+TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
 NIGHT_START = 1   # 01:00 CET
 NIGHT_END = 6     # 06:00 CET
 
 MODEL = "claude-haiku-4-5"
 
 # --- Display ---
-CHANNEL_NAMES = {KYIV_INFO_CHANNEL: "Kyiv City", AMK_CHANNEL: "Military Analysis", MONITOR_CHANNEL: "Air Defence Monitoring"}
-CHANNEL_ICONS = {KYIV_INFO_CHANNEL: "🏙️", AMK_CHANNEL: "🗺️", MONITOR_CHANNEL: "⚔️"}
+CHANNEL_NAMES = {KYIV_INFO_CHANNEL: "Kyiv City", UKRAINE_NEWS_CHANNEL: "Ukraine National News", AMK_CHANNEL: "Military Analysis", MONITOR_CHANNEL: "Air Defence Monitoring"}
+CHANNEL_ICONS = {KYIV_INFO_CHANNEL: "🏙️", UKRAINE_NEWS_CHANNEL: "🇺🇦", AMK_CHANNEL: "🗺️", MONITOR_CHANNEL: "⚔️"}
 
 # --- Prompts (normal mode) ---
 CHANNEL_PROMPTS = {
@@ -69,6 +70,17 @@ CHANNEL_PROMPTS = {
         "accidents, police operations, curfews, evacuations. Exclude general news, national politics, and "
         "military updates that don't affect city infrastructure. "
         "Format: max 5 bullets, each starting with '•', one line each, English. No preamble or closing. "
+        "If nothing qualifies, reply exactly 'NO_RELEVANT_INFO'."
+    ),
+    UKRAINE_NEWS_CHANNEL: (
+        "You analyze messages from a major Ukrainian national news channel. Extract ONLY consequential "
+        "developments about Ukraine: decisions by the President, government or parliament; domestic politics "
+        "and legislation; economy and energy; diplomacy, international support and sanctions; major corruption "
+        "or legal cases; civil-society developments; and security events with national significance. Exclude "
+        "advertising, clickbait, celebrity news, routine statements without a concrete development, and purely "
+        "local incidents. Avoid duplicating battlefield or air-alert items covered by the military sections "
+        "unless they have major national political or strategic importance. "
+        "Format: max 5 bullets, each '•', one line, English. No preamble or closing. "
         "If nothing qualifies, reply exactly 'NO_RELEVANT_INFO'."
     ),
     AMK_CHANNEL: (
@@ -90,7 +102,7 @@ CHANNEL_PROMPTS = {
 }
 
 # --- Pre-filters ---
-KYIV_CITY_KEYWORDS = ["kyiv","kiev","київ","киев","street","road","traffic","metro","subway","protest","demonstration","rally","power","water","heating","emergency","accident","fire","police","curfew","shelter","evacuation","bridge","district","avenue","closure","closed","block","disruption","delay","cancelled","train","bus","tram"]
+KYIV_CITY_KEYWORDS = ["kyiv","kiev","київ","киев","києві","києва","street","road","traffic","metro","subway","protest","demonstration","rally","power","water","heating","emergency","accident","fire","police","curfew","shelter","evacuation","bridge","district","avenue","closure","closed","block","disruption","delay","cancelled","train","bus","tram","вулиця","дорога","рух","затор","затори","метро","протест","мітинг","світло","електроенергія","відключення","вода","опалення","аварія","пожежа","поліція","комендантська","укриття","евакуація","міст","перекриття","перекрито","закрито","район","проспект","затримка","скасовано","поїзд","автобус","трамвай"]
 MIDDLE_EAST_KEYWORDS = ["israel","iran","gaza","palestine","lebanon","hamas","hezbollah","yemen","houthi","idf","tehran","jerusalem","beirut","middle east","west bank"]
 MILITARY_KEYWORDS = ["troop","movement","concentration","deployment","preparation","offensive","attack","shelling","drone","missile","launch","russian","belarus","border","military","convoy","equipment","tank","armored","artillery","mlrs","iskander","kinzhal","calibr","oniks","zircon","bomb","glide","fab","umpb","lancet","orlan","zala","reconnaissance","satellite","fortification","trenches","dragon teeth","digging","barracks","railway","ukraine","ukrainian"]
 AD_INDICATORS = ["#реклама","реклама","знижк","розпродаж","промокод","купуй","придбай","акція","магазин","замовляй","доставка"]
@@ -141,6 +153,8 @@ def clean_text(text):
 def pre_filter(channel, text):
     if channel == KYIV_INFO_CHANNEL:
         return contains_any(text, KYIV_CITY_KEYWORDS)
+    elif channel == UKRAINE_NEWS_CHANNEL:
+        return True
     elif channel == AMK_CHANNEL:
         if contains_any(text, MIDDLE_EAST_KEYWORDS):
             return False
@@ -250,9 +264,11 @@ def ukraine_alarm_air_active(payload):
 
 
 async def ukraine_alarm_loop():
-    """Drive production alert mode exclusively from the official UkraineAlarm API."""
+    """Poll UkraineAlarm while preserving state and throttling repeated outage logs."""
     global api_alert_state, last_api_success_time
     initialized = False
+    consecutive_errors = 0
+    last_error_log_time = 0.0
     endpoint = f"https://api.ukrainealarm.com/api/v3/alerts/{UKRAINE_ALARM_REGION_ID}"
     while True:
         try:
@@ -265,6 +281,7 @@ async def ukraine_alarm_loop():
             current_active = ukraine_alarm_air_active(response.json())
             last_api_success_time = time.time()
             api_alert_state = current_active
+            consecutive_errors = 0
 
             if not initialized:
                 initialized = True
@@ -275,7 +292,15 @@ async def ukraine_alarm_loop():
             await reconcile_alert_state("UkraineAlarm API")
         except Exception as exc:
             # Preserve the last known state: an API outage must never create a false transition.
-            print(f"UkraineAlarm API error (state preserved): {type(exc).__name__}: {exc}")
+            consecutive_errors += 1
+            now_mono = time.monotonic()
+            if consecutive_errors == 1 or now_mono - last_error_log_time >= 300:
+                print(
+                    "UkraineAlarm API error; Telegram fallback active "
+                    f"(state preserved, consecutive_errors={consecutive_errors}): "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                last_error_log_time = now_mono
             await reconcile_alert_state("Telegram fallback")
 
         await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
@@ -389,22 +414,52 @@ async def safe_send(text):
 
 async def build_summary(night_recap=False):
     sections = []
+    failed_channels = []
+
     for channel in ALL_CONTENT_CHANNELS:
-        msgs = buffers[channel]
+        # Snapshot only the messages currently pending. New arrivals during analysis stay buffered.
+        msgs = list(buffers[channel])
         if not msgs:
+            print(f"[SUMMARY INPUT] @{channel}: messages=0")
             continue
-        buffers[channel] = []
+
+        print(f"[SUMMARY INPUT] @{channel}: messages={len(msgs)}")
         result = await analyze_channel(msgs, CHANNEL_PROMPTS[channel])
-        if result and "NO_RELEVANT_INFO" not in result:
+
+        if result is None:
+            failed_channels.append(channel)
+            print(f"[SUMMARY ERROR] @{channel}: analysis failed; {len(msgs)} messages retained")
+            continue
+
+        # Remove only the successfully analyzed snapshot; preserve messages appended while awaiting the API.
+        del buffers[channel][:len(msgs)]
+
+        if "NO_RELEVANT_INFO" in result:
+            print(f"[SUMMARY RESULT] @{channel}: no relevant information")
+        else:
+            print(f"[SUMMARY RESULT] @{channel}: relevant section produced")
             sections.append(f"{CHANNEL_ICONS[channel]} <b>{CHANNEL_NAMES[channel]}</b>\n{result}")
+
+    if failed_channels:
+        failed_names = ", ".join(f"@{channel}" for channel in failed_channels)
+        await send_to_owner(
+            "⚠️ <b>Hourly summary analysis delayed</b>\n"
+            f"Failed sources: {html.escape(failed_names)}. Messages were retained for the next retry."
+        )
+
+    time_label = datetime.now(TZ).strftime("%H:%M %Z")
     if sections:
-        now = datetime.now(TZ).strftime("%H:%M")
         title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>Hourly Update"
-        header = f"{title} — {now} CET</b>\n\n"
+        header = f"{title} — {time_label}</b>\n\n"
         await send_to_channel(header + "\n\n".join(sections))
+    elif failed_channels:
+        # Never publish a false no-update message when one or more analyses failed.
+        return
     elif not night_recap:
-        now = datetime.now(TZ).strftime("%H:%M")
-        await send_to_channel(f"📋 <b>Hourly Update — {now} CET</b>\n\nNo relevant updates in the last hour.")
+        await send_to_channel(
+            f"📋 <b>Hourly Update — {time_label}</b>\n\n"
+            "No relevant updates in the last hour."
+        )
 
 
 async def summary_loop():
@@ -605,7 +660,7 @@ async def main():
         await send_to_channel(
             "🟢 <b>Kyiv Normal Monitor started</b>\n"
             "Mode: NORMAL (hourly summaries)\n"
-            "Night pause: 01:00–06:00 CET"
+            "Night pause: 01:00–06:00 EET/EEST"
         )
 
         @client.on(events.NewMessage(chats=int(PRODUCTION_CHAT_ID)))
@@ -663,6 +718,7 @@ async def main():
                 print(f"[IGNORED NON-CONTENT CHAT] channel={channel} chat_id={event.chat_id}")
                 return
             channel_buffer.append({"time": time_str, "text": clean[:800]})
+            print(f"[BUFFERED] @{channel}: pending={len(channel_buffer)} text={clean[:80]}")
 
     asyncio.create_task(summary_loop())
     if not TEST_MODE:
@@ -677,4 +733,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
