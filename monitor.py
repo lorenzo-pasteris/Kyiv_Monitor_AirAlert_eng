@@ -1,6 +1,6 @@
 """
-Kyiv Alert Monitor v5 — low-latency async pipeline
-- Trigger: @kyiv_airraid_alert (English) + Ukrainian ТРИВОГА/ВІДБІЙ as backup
+ Kyiv Alert Monitor v6 — low-latency async pipeline
+- Production trigger: official UkraineAlarm API (Kyiv City)
 - Normal mode: hourly analysis of 3 channels with per-channel filters
 - Alert mode (24/7): only @monitorwarr in real-time, with translation fallback
 - Night pause: no hourly summaries 01:00-06:00 CET, one big recap at 06:00
@@ -31,15 +31,18 @@ if TEST_MODE and not TEST_CHAT_ID:
     raise RuntimeError("TEST_CHAT_ID is required when TEST_MODE=true")
 OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else PRODUCTION_CHAT_ID
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "392256147")  # private warnings go here
+UKRAINE_ALARM_API_KEY = os.environ.get("UKRAINE_ALARM_API_KEY")
+UKRAINE_ALARM_REGION_ID = os.environ.get("UKRAINE_ALARM_REGION_ID", "31")  # Kyiv City
+UKRAINE_ALARM_POLL_INTERVAL = max(5, int(os.environ.get("UKRAINE_ALARM_POLL_INTERVAL", "10")))
+if not TEST_MODE and not UKRAINE_ALARM_API_KEY:
+    raise RuntimeError("UKRAINE_ALARM_API_KEY is required when TEST_MODE=false")
 
 # --- Channels ---
-TRIGGER_CHANNEL = "kyiv_airraid_alert"
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
 MONITOR_CHANNEL = "monitorwarr"
 
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
-ALL_CHANNELS = [TRIGGER_CHANNEL] + ALL_CONTENT_CHANNELS
 
 SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in production
 HEALTH_CHECK_INTERVAL = 43200  # 12 hours
@@ -94,6 +97,7 @@ ALERT_END_UA = ["відбій"]
 # --- State ---
 buffers = {ch: [] for ch in ALL_CONTENT_CHANNELS}
 alert_active = False
+alert_started_at = None
 last_send_time = 0
 last_message_time = time.time()
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
@@ -178,6 +182,67 @@ def check_ua_trigger(text):
             alert_active = True
             return "start"
     return None
+
+
+def ukraine_alarm_air_active(payload):
+    """Return the Kyiv City air-alert state from one regional API response."""
+    regions = payload if isinstance(payload, list) else [payload]
+    if not regions or not isinstance(regions[0], dict):
+        raise ValueError("unexpected UkraineAlarm response shape")
+    active_alerts = regions[0].get("activeAlerts") or []
+    return any(
+        isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "air"
+        for item in active_alerts
+    )
+
+
+async def ukraine_alarm_loop():
+    """Drive production alert mode exclusively from the official UkraineAlarm API."""
+    global alert_active, alert_started_at
+    initialized = False
+    endpoint = f"https://api.ukrainealarm.com/api/v3/alerts/{UKRAINE_ALARM_REGION_ID}"
+    while True:
+        try:
+            response = await http_client.get(
+                endpoint,
+                headers={"Authorization": UKRAINE_ALARM_API_KEY},
+                timeout=httpx.Timeout(10.0, connect=4.0),
+            )
+            response.raise_for_status()
+            current_active = ukraine_alarm_air_active(response.json())
+
+            if not initialized:
+                alert_active = current_active
+                alert_started_at = time.monotonic() if current_active else None
+                initialized = True
+                print(
+                    f"✅ UkraineAlarm API connected: Kyiv City region={UKRAINE_ALARM_REGION_ID}, "
+                    f"air_alert={'ACTIVE' if current_active else 'CLEAR'}, poll={UKRAINE_ALARM_POLL_INTERVAL}s"
+                )
+            elif current_active != alert_active:
+                alert_active = current_active
+                if current_active:
+                    alert_started_at = time.monotonic()
+                    for channel_name in ALL_CONTENT_CHANNELS:
+                        buffers[channel_name].clear()
+                    await send_to_channel(
+                        "🚨 <b>AIR ALERT — KYIV</b>\n\n"
+                        f"Official UkraineAlarm API signal.\n\n⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded."
+                    )
+                    print("🚨 UkraineAlarm transition: Kyiv City AIR ALERT started")
+                else:
+                    elapsed = time.monotonic() - alert_started_at if alert_started_at else None
+                    duration = f"{int(elapsed // 60)} min" if elapsed is not None else "unknown"
+                    alert_started_at = None
+                    await send_to_channel(
+                        f"✅ <b>ALL CLEAR — KYIV</b>\n\nDuration observed: {duration}\n\n📋 Back to NORMAL mode"
+                    )
+                    print("✅ UkraineAlarm transition: Kyiv City AIR ALERT ended")
+        except Exception as exc:
+            # Preserve the last known state: an API outage must never create a false transition.
+            print(f"UkraineAlarm API error (state preserved): {type(exc).__name__}: {exc}")
+
+        await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
 
 
 async def translate_message(text):
@@ -481,16 +546,17 @@ async def main():
     else:
         source_entities = {}
         channel_by_chat_id = {}
-        for channel_name in ALL_CHANNELS:
+        for channel_name in ALL_CONTENT_CHANNELS:
             entity = await client.get_entity(channel_name)
             source_entities[channel_name] = entity
             channel_by_chat_id[utils.get_peer_id(entity)] = channel_name
 
-        print(f"✅ Connected in production. Trigger: @{TRIGGER_CHANNEL}, sources: {ALL_CONTENT_CHANNELS}")
+        print(f"✅ Connected in production. Trigger: UkraineAlarm API; Telegram sources: {ALL_CONTENT_CHANNELS}")
         await send_to_channel(
             "🟢 <b>Kyiv Monitor started</b>\n"
             "Mode: NORMAL (hourly summaries)\n"
             "Night pause: 01:00–06:00 CET\n"
+            "Alert trigger: official UkraineAlarm API (Kyiv City)\n"
             "Alert mode active 24/7"
         )
 
@@ -522,22 +588,6 @@ async def main():
                 return
             clean = clean_text(raw_text)
 
-            if channel == TRIGGER_CHANNEL:
-                action, extra = check_alert_trigger(clean)
-                if action == "start":
-                    for channel_name in ALL_CONTENT_CHANNELS:
-                        buffers[channel_name].clear()
-                    await send_to_channel(
-                        f"🚨 <b>AIR ALERT — KYIV</b>\n\n{html.escape(clean)}\n\n"
-                        f"⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded."
-                    )
-                elif action == "end":
-                    await send_to_channel(
-                        f"✅ <b>ALL CLEAR — KYIV</b>\n\nDuration: {html.escape(str(extra))}\n\n"
-                        "📋 Back to NORMAL mode"
-                    )
-                return
-
             if is_pure_ad(clean):
                 print(f"[FILTERED AD] @{channel}: {clean[:80]}")
                 return
@@ -561,6 +611,7 @@ async def main():
     asyncio.create_task(summary_loop())
     if not TEST_MODE:
         asyncio.create_task(health_loop())
+        asyncio.create_task(ukraine_alarm_loop())
 
     try:
         await client.run_until_disconnected()
