@@ -174,3 +174,18 @@ UKRAINE_ALARM_POLL_INTERVAL
 6. Verificare il messaggio di avvio nel gruppo corretto.
 7. Eseguire test funzionali esclusivamente nel gruppo di test.
 
+## Aggiornamento operativo: riepiloghi e sorgenti
+
+Il ciclo NORMAL usa quattro sorgenti di contenuto:
+
+- `@kievinfo_kyiv` per disservizi e infrastrutture di Kyiv;
+- `@shv_ukr` per sviluppi politici, economici, diplomatici e nazionali ucraini;
+- `@AMK_Mapping` per analisi militare della guerra Russia-Ucraina;
+- `@Nashee_PPO` per monitoraggio della difesa aerea e riepiloghi numerici degli attacchi.
+
+Il fuso orario operativo è `Europe/Kyiv`: gli output mostrano automaticamente `EEST` in estate e `EET` in inverno. La pausa notturna 01:00–06:00 segue lo stesso fuso.
+
+Prima dell'analisi viene acquisita un'istantanea del buffer. I messaggi vengono rimossi solo dopo una risposta valida del modello; in caso di timeout o errore rimangono nel buffer per il tentativo successivo. Se una o più analisi falliscono, il sistema non pubblica `No relevant updates`, ma invia un avviso privato al proprietario.
+
+I log registrano messaggi inseriti nei buffer, quantità analizzate e risultato per sorgente. Gli errori ripetuti di UkraineAlarm vengono raggruppati: il primo è immediato e i successivi sono riportati al massimo ogni cinque minuti, mantenendo attivo il fallback Telegram.
+
