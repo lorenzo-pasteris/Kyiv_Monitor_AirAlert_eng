@@ -20,7 +20,7 @@ Il servizio è eseguito come worker Python su Railway e il codice è conservato 
 - **Railway**: esecuzione continua, configurazione tramite variabili d'ambiente e log.
 - **Telethon**: lettura dei canali e dei gruppi Telegram.
 - **Telegram Bot API**: pubblicazione dei messaggi nel gruppo di destinazione.
-- **UkraineAlarm API**: prima sorgente dello stato di allerta per Kyiv città.
+- **`@kyiv_airraid_alert`**: unica sorgente dello stato di allerta per Kyiv città.
 - **Anthropic API**: traduzione e produzione dei riepiloghi.
 - **GitHub**: versionamento e origine dei deployment Railway.
 
@@ -40,26 +40,16 @@ Il gruppo Telegram di produzione è configurato tramite `TARGET_CHAT_ID`. L'ID n
 
 ### Trigger dell'allerta
 
-Lo stato di allerta riceve sempre due input indipendenti:
+Lo stato di allerta proviene esclusivamente dal canale Telegram `@kyiv_airraid_alert`. Il canale non è una sorgente di contenuti: viene usato soltanto per determinare inizio e fine dell'allerta.
 
-1. UkraineAlarm API, regione Kyiv città (`UKRAINE_ALARM_REGION_ID`, valore attuale `31`).
-2. Canale Telegram `@kyiv_airraid_alert`.
+## Regole del trigger
 
-Entrambe le sorgenti vengono ascoltate continuamente. Il canale Telegram non è una sorgente di contenuti: viene usato soltanto per determinare inizio e fine dell'allerta.
+- Un messaggio esplicito di allarme per Kyiv attiva immediatamente ALERT.
+- Un messaggio esplicito di cessato allarme per Kyiv riporta il sistema in NORMAL.
+- Messaggi ambigui o non riferiti a Kyiv non modificano lo stato conosciuto.
+- UkraineAlarm API è stata rimossa dal codice e dalla configurazione perché restituiva `401 Unauthorized`.
 
-## Regole di fusione dei due trigger
-
-La priorità assoluta è evitare un falso cessato allarme o la mancata attivazione.
-
-- Se una sola sorgente valida segnala **allarme**, il sistema entra immediatamente in ALERT.
-- Se UkraineAlarm restituisce errori, incluso `401`, ma Telegram dispone di uno stato valido, viene seguito Telegram.
-- Se Telegram non dispone ancora di uno stato valido ma l'API funziona, viene seguita l'API.
-- Se entrambe concordano, viene applicato lo stato concordato.
-- Se sono in conflitto, prevale **allarme**.
-- Il cessato allarme viene applicato quando le sorgenti valide concordano, oppure quando è disponibile una sola sorgente valida e questa indica cessato allarme.
-- Un errore API non modifica lo stato conosciuto.
-
-All'avvio il worker legge gli ultimi messaggi di `@kyiv_airraid_alert` per ricostruire lo stato Telegram senza dover aspettare il prossimo evento.
+All'avvio il worker legge gli ultimi messaggi di `@kyiv_airraid_alert` per ricostruire lo stato senza dover aspettare il prossimo evento.
 
 ## Modalità NORMAL
 
@@ -73,10 +63,10 @@ Night pause: 01:00–06:00 CET
 
 In modalità NORMAL:
 
-- i messaggi delle tre sorgenti di contenuto vengono filtrati e conservati in memoria;
+- i messaggi delle quattro sorgenti di contenuto vengono filtrati e conservati in memoria;
 - ogni ora viene generato un riepilogo in inglese;
 - i contenuti non pertinenti e la pubblicità vengono esclususi;
-- tra le 01:00 e le 06:00, fuso Europe/Rome, i riepiloghi orari sono sospesi;
+- tra le 01:00 e le 06:00, fuso Europe/Kyiv, i riepiloghi orari sono sospesi;
 - al termine della pausa notturna viene prodotto un recap complessivo.
 
 ### Regole per `@Nashee_PPO`
@@ -142,9 +132,6 @@ TELEGRAM_API_HASH
 TELEGRAM_SESSION
 BOT_TOKEN
 ANTHROPIC_API_KEY
-UKRAINE_ALARM_API_KEY
-UKRAINE_ALARM_REGION_ID
-UKRAINE_ALARM_POLL_INTERVAL
 ```
 
 ## Protezioni operative
@@ -153,13 +140,11 @@ UKRAINE_ALARM_POLL_INTERVAL
 - Rispetto automatico di `retry_after` in caso di flood control.
 - Una sola connessione HTTP condivisa.
 - Serializzazione degli invii per evitare raffiche incontrollate.
-- Conservazione dell'ultimo stato in caso di errore UkraineAlarm.
-- Stato ALERT conservativo in caso di conflitto tra sorgenti.
 - Deduplicazione dei messaggi simulati e protezione contro i loop del bot.
 
 ## Limiti noti
 
-- UkraineAlarm ha restituito risposte intermittenti `401 Unauthorized`; per questo il trigger Telegram rimane sempre attivo come seconda sorgente.
+- UkraineAlarm è stato rimosso: il trigger è esclusivamente `@kyiv_airraid_alert`.
 - I buffer dei riepiloghi sono in memoria e vengono persi al riavvio del container.
 - Lo stato ricostruito dal canale Telegram dipende dall'ultimo messaggio esplicito riconoscibile relativo a Kyiv.
 - Il sistema è un'integrazione informativa e non sostituisce i sistemi ufficiali di protezione civile.
@@ -170,9 +155,8 @@ UKRAINE_ALARM_POLL_INTERVAL
 2. Verificare che il log indichi `TEST_MODE` o produzione in modo coerente.
 3. In produzione, controllare che le sorgenti di contenuto siano soltanto `kievinfo_kyiv`, `AMK_Mapping` e `Nashee_PPO`.
 4. Controllare che `@kyiv_airraid_alert` sia registrato come trigger e non come contenuto.
-5. Controllare la connessione UkraineAlarm e gli eventuali `401`.
-6. Verificare il messaggio di avvio nel gruppo corretto.
-7. Eseguire test funzionali esclusivamente nel gruppo di test.
+5. Verificare il messaggio di avvio nel gruppo corretto.
+6. Eseguire test funzionali esclusivamente nel gruppo di test.
 
 ## Aggiornamento operativo: riepiloghi e sorgenti
 
@@ -185,9 +169,11 @@ Il ciclo NORMAL usa quattro sorgenti di contenuto:
 
 Il fuso orario operativo è `Europe/Kyiv`: gli output mostrano automaticamente `EEST` in estate e `EET` in inverno. La pausa notturna 01:00–06:00 segue lo stesso fuso.
 
-Prima dell'analisi viene acquisita un'istantanea del buffer. I messaggi vengono rimossi solo dopo una risposta valida del modello; in caso di timeout o errore rimangono nel buffer per il tentativo successivo. Se una o più analisi falliscono, il sistema non pubblica `No relevant updates`, ma invia un avviso privato al proprietario.
+Prima dell'analisi viene acquisita un'istantanea del buffer. Il parser accetta il primo oggetto JSON completo anche se il modello aggiunge testo successivo. In caso di errore vengono eseguiti tre tentativi immediati con budget crescenti di 4000, 6000 e 8000 token. Se falliscono tutti, viene pubblicato un riepilogo deterministico basato sui testi sorgente.
 
-I log registrano messaggi inseriti nei buffer, quantità analizzate e risultato per sorgente. Gli errori ripetuti di UkraineAlarm vengono raggruppati: il primo è immediato e i successivi sono riportati al massimo ogni cinque minuti, mantenendo attivo il fallback Telegram.
+I messaggi vengono rimossi soltanto dopo la conferma dell'invio Telegram. Se la consegna non è confermata, il buffer resta intatto. Il watchdog riprova un riepilogo mancante a 62, 65, 67 e 70 minuti dall'ultimo invio confermato. Il loop dei riepiloghi intercetta le eccezioni e continua a funzionare.
+
+I log registrano buffer, tentativi AI, uso del fallback, risultato per sorgente e conferma di consegna.
 
 
 
