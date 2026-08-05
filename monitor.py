@@ -8,8 +8,10 @@
 """
 import asyncio
 import html
+import json
 import os
 import re
+import sqlite3
 import time
 import httpx
 from datetime import datetime
@@ -58,48 +60,49 @@ NIGHT_END = 6     # 06:00 CET
 
 MODEL = "claude-haiku-4-5"
 
-# --- Display ---
-CHANNEL_NAMES = {KYIV_INFO_CHANNEL: "Kyiv City", UKRAINE_NEWS_CHANNEL: "Ukraine National News", AMK_CHANNEL: "Military Analysis", MONITOR_CHANNEL: "Air Defence Monitoring"}
-CHANNEL_ICONS = {KYIV_INFO_CHANNEL: "🏙️", UKRAINE_NEWS_CHANNEL: "🇺🇦", AMK_CHANNEL: "🗺️", MONITOR_CHANNEL: "⚔️"}
-
-# --- Prompts (normal mode) ---
-CHANNEL_PROMPTS = {
-    KYIV_INFO_CHANNEL: (
-        "You analyze messages from a Kyiv city information channel. Extract ONLY concrete disruptions "
-        "to city life: road/bridge closures, traffic, metro problems, power/water/heating outages, fires, "
-        "accidents, police operations, curfews, evacuations. Exclude general news, national politics, and "
-        "military updates that don't affect city infrastructure. "
-        "Format: max 5 bullets, each starting with '•', one line each, English. No preamble or closing. "
-        "If nothing qualifies, reply exactly 'NO_RELEVANT_INFO'."
-    ),
-    UKRAINE_NEWS_CHANNEL: (
-        "You analyze messages from a major Ukrainian national news channel. Extract ONLY consequential "
-        "developments about Ukraine: decisions by the President, government or parliament; domestic politics "
-        "and legislation; economy and energy; diplomacy, international support and sanctions; major corruption "
-        "or legal cases; civil-society developments; and security events with national significance. Exclude "
-        "advertising, clickbait, celebrity news, routine statements without a concrete development, and purely "
-        "local incidents. Avoid duplicating battlefield or air-alert items covered by the military sections "
-        "unless they have major national political or strategic importance. "
-        "Format: max 5 bullets, each '•', one line, English. No preamble or closing. "
-        "If nothing qualifies, reply exactly 'NO_RELEVANT_INFO'."
-    ),
-    AMK_CHANNEL: (
-        "You analyze war-analysis messages. Extract ONLY developments in the Russia-Ukraine war: frontline "
-        "changes, offensives, operations, notable losses, strategic shifts. Hard exclude: Israel, Iran, Gaza, "
-        "Palestine, Lebanon, Yemen, and any non-Ukraine Middle East content. "
-        "Format: max 5 bullets, each '•', one line, English. No preamble. "
-        "If nothing about Ukraine, reply exactly 'NO_RELEVANT_INFO'."
-    ),
-    MONITOR_CHANNEL: (
-        "You analyze Ukrainian air-defence monitoring messages from Nashee_PPO. PRIORITIZE overnight or daily "
-        "recap posts that report the total number of attacks. Preserve every stated count and distinguish attack "
-        "types (Shahed/other UAVs, cruise missiles, ballistic missiles, hypersonic missiles, guided bombs), plus "
-        "interceptions, impacts, affected areas, casualties, and damage when explicitly reported. Also extract "
-        "concrete missile/drone launch activity and major military developments. Never invent or combine counts. "
-        "Format: max 5 bullets, each '•', one line, English. No preamble. "
-        "If nothing qualifies, reply exactly 'NO_RELEVANT_INFO'."
-    )
+# --- Cross-source categories (normal mode) ---
+# A source is only provenance. Every buffered message is evaluated against every category.
+CATEGORIES = {
+    "kyiv_city": {
+        "name": "Kyiv City",
+        "icon": "🏙️",
+        "criteria": (
+            "Concrete disruptions or consequences affecting life in Kyiv city: roads, bridges, traffic, "
+            "metro/public transport, power, water, heating, fires, accidents, police operations, curfews, "
+            "shelters, evacuations, damage, casualties, or direct consequences of attacks on Kyiv."
+        ),
+    },
+    "ukraine_national": {
+        "name": "Ukrainian National Developments",
+        "icon": "🇺🇦",
+        "criteria": (
+            "Consequential Ukrainian political, governmental, parliamentary, legislative, economic, energy, "
+            "diplomatic, sanctions, international-support, corruption, legal, or civil-society developments."
+        ),
+    },
+    "military": {
+        "name": "Military Developments",
+        "icon": "🗺️",
+        "criteria": (
+            "Russia-Ukraine war developments: frontline changes, troop movements, offensives, operations, "
+            "equipment or notable losses, fortifications, preparations, and strategic analysis. Exclude "
+            "Middle East events unless they directly and materially concern the war in Ukraine."
+        ),
+    },
+    "air_defence": {
+        "name": "Air Defence Monitoring",
+        "icon": "⚔️",
+        "criteria": (
+            "Missile, Shahed or other UAV launches and movements, aviation activity, air-defence actions, "
+            "interceptions, impacts, affected areas, and numerical attack recaps. Preserve all stated counts "
+            "and never invent or combine incompatible quantities."
+        ),
+    },
 }
+
+CATEGORY_STATS_DB_PATH = os.environ.get(
+    "CATEGORY_STATS_DB_PATH", "/data/kyiv_monitor_category_stats.sqlite3"
+)
 
 # --- Pre-filters ---
 KYIV_CITY_KEYWORDS = ["kyiv","kiev","київ","киев","києві","києва","street","road","traffic","metro","subway","protest","demonstration","rally","power","water","heating","emergency","accident","fire","police","curfew","shelter","evacuation","bridge","district","avenue","closure","closed","block","disruption","delay","cancelled","train","bus","tram","вулиця","дорога","рух","затор","затори","метро","протест","мітинг","світло","електроенергія","відключення","вода","опалення","аварія","пожежа","поліція","комендантська","укриття","евакуація","міст","перекриття","перекрито","закрито","район","проспект","затримка","скасовано","поїзд","автобус","трамвай"]
@@ -119,6 +122,7 @@ telegram_alert_state = None
 last_send_time = 0
 last_message_time = time.time()
 last_api_success_time = 0
+stats_db_ready = False
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
 
 # Created in main(); one shared connection pool avoids a new TLS handshake per message.
@@ -149,19 +153,6 @@ def clean_text(text):
     text = re.sub(r'\s*#\w+\s*', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
-
-def pre_filter(channel, text):
-    if channel == KYIV_INFO_CHANNEL:
-        return contains_any(text, KYIV_CITY_KEYWORDS)
-    elif channel == UKRAINE_NEWS_CHANNEL:
-        return True
-    elif channel == AMK_CHANNEL:
-        if contains_any(text, MIDDLE_EAST_KEYWORDS):
-            return False
-        return contains_any(text, MILITARY_KEYWORDS)
-    elif channel == MONITOR_CHANNEL:
-        return contains_any(text, MILITARY_KEYWORDS) or contains_any(text, SECURITY_KEYWORDS)
-    return True
 
 def is_night():
     h = datetime.now(TZ).hour
@@ -328,21 +319,143 @@ async def translate_message(text):
         print(f"Translation error: {e}")
         return None
 
-async def analyze_channel(messages, prompt):
-    if not messages:
-        return None
+def initialize_stats_db():
+    """Create the persistent hourly statistics store when the configured path is writable."""
     try:
-        msgs_text = "\n\n---\n\n".join([f"[{m['time']}] {m['text']}" for m in messages])
-        r = await http_client.post(
+        db_dir = os.path.dirname(CATEGORY_STATS_DB_PATH)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS hourly_category_stats (
+                    run_at TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    received INTEGER NOT NULL,
+                    valid INTEGER NOT NULL,
+                    PRIMARY KEY (run_at, category, channel)
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS hourly_classifications (
+                    run_at TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    preview TEXT NOT NULL,
+                    PRIMARY KEY (run_at, message_id, category)
+                )"""
+            )
+        print(f"[STATS DB] ready path={CATEGORY_STATS_DB_PATH}")
+        return True
+    except Exception as exc:
+        print(f"[STATS DB ERROR] persistence unavailable: {type(exc).__name__}: {exc}")
+        return False
+
+
+def persist_category_stats(run_at, snapshots, category_results):
+    if not stats_db_ready:
+        return
+    by_id = {item["id"]: item for item in snapshots}
+    received_by_channel = {
+        channel: sum(1 for item in snapshots if item["channel"] == channel)
+        for channel in ALL_CONTENT_CHANNELS
+    }
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            for category_key, category_data in category_results.items():
+                selected_ids = set(category_data.get("selected_ids", []))
+                for channel in ALL_CONTENT_CHANNELS:
+                    valid = sum(
+                        1 for message_id in selected_ids
+                        if message_id in by_id and by_id[message_id]["channel"] == channel
+                    )
+                    connection.execute(
+                        """INSERT OR REPLACE INTO hourly_category_stats
+                           (run_at, category, channel, received, valid)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (run_at, category_key, channel, received_by_channel[channel], valid),
+                    )
+                for message_id in selected_ids:
+                    item = by_id.get(message_id)
+                    if item:
+                        connection.execute(
+                            """INSERT OR REPLACE INTO hourly_classifications
+                               (run_at, message_id, channel, category, preview)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (run_at, message_id, item["channel"], category_key, item["text"][:300]),
+                        )
+    except Exception as exc:
+        print(f"[STATS DB ERROR] write failed: {type(exc).__name__}: {exc}")
+
+
+async def analyze_hourly_matrix(messages):
+    """Classify every message against every category in one model call."""
+    if not messages:
+        return {key: {"selected_ids": [], "bullets": []} for key in CATEGORIES}
+
+    category_text = "\n".join(
+        f"- {key}: {data['criteria']}" for key, data in CATEGORIES.items()
+    )
+    message_text = "\n\n".join(
+        f"ID={item['id']} SOURCE=@{item['channel']} TIME={item['time']}\n{item['text']}"
+        for item in messages
+    )
+    prompt = (
+        "Classify Ukrainian news messages. The source is provenance only: evaluate EVERY message against "
+        "EVERY category below. A message may belong to multiple categories when genuinely relevant. "
+        "Do not favor or exclude a message because of its source channel. Reject advertising, clickbait, "
+        "routine statements without a concrete development, and unrelated material.\n\n"
+        f"Categories:\n{category_text}\n\n"
+        "Return ONLY valid JSON using exactly this shape:\n"
+        '{"categories":{"kyiv_city":{"selected_ids":[],"bullets":[]},'
+        '"ukraine_national":{"selected_ids":[],"bullets":[]},'
+        '"military":{"selected_ids":[],"bullets":[]},'
+        '"air_defence":{"selected_ids":[],"bullets":[]}}}\n'
+        "selected_ids must contain the exact message IDs that qualify. bullets must contain at most five "
+        "concise English summary strings per category. Preserve stated locations, uncertainty, times and "
+        "quantities. Do not wrap JSON in markdown.\n\nMessages:\n" + message_text
+    )
+    try:
+        response = await http_client.post(
             "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 1500, "messages": [{"role": "user", "content": prompt + "\n\nMessages:\n\n" + msgs_text}]},
-            timeout=httpx.Timeout(45.0, connect=5.0)
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": MODEL,
+                "max_tokens": 4000,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=httpx.Timeout(60.0, connect=5.0),
         )
-        r.raise_for_status()
-        return r.json()["content"][0]["text"].strip()
-    except Exception as e:
-        print(f"Analysis error: {e}")
+        response.raise_for_status()
+        raw = response.json()["content"][0]["text"].strip()
+        raw = re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", raw, flags=re.IGNORECASE)
+        parsed = json.loads(raw)
+        supplied = parsed.get("categories", {})
+        valid_ids = {item["id"] for item in messages}
+        normalized = {}
+        for category_key in CATEGORIES:
+            category_data = supplied.get(category_key, {})
+            selected_ids = [
+                message_id for message_id in category_data.get("selected_ids", [])
+                if message_id in valid_ids
+            ]
+            bullets = [
+                str(bullet).strip().lstrip("•- ").strip()
+                for bullet in category_data.get("bullets", [])
+                if str(bullet).strip()
+            ][:5]
+            normalized[category_key] = {
+                "selected_ids": list(dict.fromkeys(selected_ids)),
+                "bullets": bullets,
+            }
+        return normalized
+    except Exception as exc:
+        print(f"[CATEGORY ANALYSIS ERROR] {type(exc).__name__}: {exc}")
         return None
 
 
@@ -413,48 +526,73 @@ async def safe_send(text):
 
 
 async def build_summary(night_recap=False):
-    sections = []
-    failed_channels = []
+    snapshots = []
+    snapshot_lengths = {}
+    received_by_channel = {}
 
     for channel in ALL_CONTENT_CHANNELS:
-        # Snapshot only the messages currently pending. New arrivals during analysis stay buffered.
-        msgs = list(buffers[channel])
-        if not msgs:
-            print(f"[SUMMARY INPUT] @{channel}: messages=0")
-            continue
+        pending = list(buffers[channel])
+        snapshot_lengths[channel] = len(pending)
+        received_by_channel[channel] = len(pending)
+        print(f"[SUMMARY INPUT] @{channel}: messages={len(pending)}")
+        for index, message in enumerate(pending):
+            snapshots.append({
+                "id": f"{channel}:{index}",
+                "channel": channel,
+                "time": message["time"],
+                "text": message["text"],
+            })
 
-        print(f"[SUMMARY INPUT] @{channel}: messages={len(msgs)}")
-        result = await analyze_channel(msgs, CHANNEL_PROMPTS[channel])
-
-        if result is None:
-            failed_channels.append(channel)
-            print(f"[SUMMARY ERROR] @{channel}: analysis failed; {len(msgs)} messages retained")
-            continue
-
-        # Remove only the successfully analyzed snapshot; preserve messages appended while awaiting the API.
-        del buffers[channel][:len(msgs)]
-
-        if "NO_RELEVANT_INFO" in result:
-            print(f"[SUMMARY RESULT] @{channel}: no relevant information")
-        else:
-            print(f"[SUMMARY RESULT] @{channel}: relevant section produced")
-            sections.append(f"{CHANNEL_ICONS[channel]} <b>{CHANNEL_NAMES[channel]}</b>\n{result}")
-
-    if failed_channels:
-        failed_names = ", ".join(f"@{channel}" for channel in failed_channels)
+    category_results = await analyze_hourly_matrix(snapshots)
+    if category_results is None:
         await send_to_owner(
             "⚠️ <b>Hourly summary analysis delayed</b>\n"
-            f"Failed sources: {html.escape(failed_names)}. Messages were retained for the next retry."
+            "Cross-source category analysis failed. All messages were retained for the next retry."
         )
+        return
+
+    by_id = {item["id"]: item for item in snapshots}
+    run_at = datetime.now(TZ).isoformat(timespec="seconds")
+    sections = []
+
+    print(f"[HOURLY CATEGORY STATS] run_at={run_at}")
+    for category_key, category_meta in CATEGORIES.items():
+        category_data = category_results[category_key]
+        selected_ids = set(category_data["selected_ids"])
+        for channel in ALL_CONTENT_CHANNELS:
+            valid = sum(
+                1 for message_id in selected_ids
+                if message_id in by_id and by_id[message_id]["channel"] == channel
+            )
+            print(
+                f"[CATEGORY STATS] category={category_key} @{channel}: "
+                f"valid={valid} received={received_by_channel[channel]}"
+            )
+        for message_id in category_data["selected_ids"]:
+            item = by_id.get(message_id)
+            if item:
+                print(
+                    f"[CATEGORY ITEM] category={category_key} @{item['channel']} "
+                    f"id={message_id} text={item['text'][:100]}"
+                )
+        if category_data["bullets"]:
+            bullets = "\n".join(
+                f"• {html.escape(bullet)}" for bullet in category_data["bullets"]
+            )
+            sections.append(
+                f"{category_meta['icon']} <b>{category_meta['name']}</b>\n{bullets}"
+            )
+
+    persist_category_stats(run_at, snapshots, category_results)
+
+    # Clear only the analyzed snapshots. Messages received during the API call remain queued.
+    for channel, length in snapshot_lengths.items():
+        del buffers[channel][:length]
 
     time_label = datetime.now(TZ).strftime("%H:%M %Z")
     if sections:
         title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>Hourly Update"
-        header = f"{title} — {time_label}</b>\n\n"
-        await send_to_channel(header + "\n\n".join(sections))
-    elif failed_channels:
-        # Never publish a false no-update message when one or more analyses failed.
-        return
+        await send_to_channel(f"{title} — {time_label}</b>\n\n" + "\n\n".join(sections))
     elif not night_recap:
         await send_to_channel(
             f"📋 <b>Hourly Update — {time_label}</b>\n\n"
@@ -540,10 +678,6 @@ async def process_test_source_text(clean):
         asyncio.create_task(handle_alert_message(clean))
         return
 
-    if not pre_filter(MONITOR_CHANNEL, clean):
-        print(f"[TEST FILTERED] @{MONITOR_CHANNEL}: {clean[:60]}")
-        return
-
     time_str = datetime.now(TZ).strftime("%H:%M")
     buffers[MONITOR_CHANNEL].append({"time": time_str, "text": clean[:800]})
 
@@ -556,7 +690,7 @@ async def publish_test_source(client, text):
 
 
 async def main():
-    global http_client, send_lock, test_command_lock, translation_slots, telegram_alert_state
+    global http_client, send_lock, test_command_lock, translation_slots, telegram_alert_state, stats_db_ready
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
         http2=False,
@@ -564,6 +698,7 @@ async def main():
     send_lock = asyncio.Lock()
     test_command_lock = asyncio.Lock()
     translation_slots = asyncio.Semaphore(8)
+    stats_db_ready = initialize_stats_db()
 
     client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
     await client.start()
@@ -706,10 +841,6 @@ async def main():
             if alert_active:
                 if channel == MONITOR_CHANNEL:
                     asyncio.create_task(handle_alert_message(clean))
-                return
-
-            if not pre_filter(channel, clean):
-                print(f"[FILTERED] @{channel}: {clean[:60]}")
                 return
 
             time_str = datetime.now(TZ).strftime("%H:%M")
