@@ -41,8 +41,6 @@ if not TEST_MODE and not UKRAINE_ALARM_API_KEY:
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
 MONITOR_CHANNEL = "Nashee_PPO"
-BACKUP_MONITOR_CHANNEL = "monitorwarr"
-BACKUP_SILENCE_SECONDS = 300
 
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
 
@@ -102,7 +100,6 @@ alert_active = False
 alert_started_at = None
 last_send_time = 0
 last_message_time = time.time()
-last_primary_monitor_time = 0
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
 
 # Created in main(); one shared connection pool avoids a new TLS handshake per message.
@@ -112,7 +109,7 @@ test_command_lock = None
 translation_slots = None
 bot_output_message_ids = set()
 simulator_processed_message_ids = set()
-TEST_SOURCE_PREFIX = "[TEST_SOURCE:monitorwarr]"
+TEST_SOURCE_PREFIX = "[TEST_SOURCE:Nashee_PPO]"
 TEST_SAMPLE_MESSAGES = [
     "⚠️ Київщина: зафіксовано рух ударних БпЛА Shahed drone у напрямку Києва.",
     "Ракетна небезпека: missile launch activity зафіксована з північного напрямку.",
@@ -201,7 +198,7 @@ def ukraine_alarm_air_active(payload):
 
 async def ukraine_alarm_loop():
     """Drive production alert mode exclusively from the official UkraineAlarm API."""
-    global alert_active, alert_started_at, last_primary_monitor_time
+    global alert_active, alert_started_at
     initialized = False
     endpoint = f"https://api.ukrainealarm.com/api/v3/alerts/{UKRAINE_ALARM_REGION_ID}"
     while True:
@@ -226,7 +223,6 @@ async def ukraine_alarm_loop():
                 alert_active = current_active
                 if current_active:
                     alert_started_at = time.monotonic()
-                    last_primary_monitor_time = 0
                     for channel_name in ALL_CONTENT_CHANNELS:
                         buffers[channel_name].clear()
                     await send_to_channel(
@@ -550,16 +546,12 @@ async def main():
     else:
         source_entities = {}
         channel_by_chat_id = {}
-        production_source_channels = ALL_CONTENT_CHANNELS + [BACKUP_MONITOR_CHANNEL]
-        for channel_name in production_source_channels:
+        for channel_name in ALL_CONTENT_CHANNELS:
             entity = await client.get_entity(channel_name)
             source_entities[channel_name] = entity
             channel_by_chat_id[utils.get_peer_id(entity)] = channel_name
 
-        print(
-            f"✅ Connected in production. Trigger: UkraineAlarm API; Telegram sources: {ALL_CONTENT_CHANNELS}; "
-            f"alert backup: @{BACKUP_MONITOR_CHANNEL} after {BACKUP_SILENCE_SECONDS}s primary silence"
-        )
+        print(f"✅ Connected in production. Trigger: UkraineAlarm API; Telegram sources: {ALL_CONTENT_CHANNELS}")
         await send_to_channel(
             "🟢 <b>Kyiv Monitor started</b>\n"
             "Mode: NORMAL (hourly summaries)\n"
@@ -583,7 +575,7 @@ async def main():
 
         @client.on(events.NewMessage(chats=list(source_entities.values())))
         async def production_source_handler(event):
-            global alert_active, last_message_time, last_primary_monitor_time
+            global alert_active, last_message_time
             last_message_time = time.time()
 
             raw_text = event.message.text or ""
@@ -602,19 +594,7 @@ async def main():
 
             if alert_active:
                 if channel == MONITOR_CHANNEL:
-                    last_primary_monitor_time = time.time()
                     asyncio.create_task(handle_alert_message(clean))
-                elif channel == BACKUP_MONITOR_CHANNEL:
-                    primary_silence = time.time() - last_primary_monitor_time
-                    if last_primary_monitor_time == 0 or primary_silence >= BACKUP_SILENCE_SECONDS:
-                        print(f"[ALERT BACKUP ACTIVE] @{BACKUP_MONITOR_CHANNEL}; primary silence={int(primary_silence)}s")
-                        asyncio.create_task(handle_alert_message(clean))
-                    else:
-                        print(f"[ALERT BACKUP SUPPRESSED] primary active {int(primary_silence)}s ago")
-                return
-
-            # The backup is alert-only; normal summaries use the primary monitoring source.
-            if channel == BACKUP_MONITOR_CHANNEL:
                 return
 
             if not pre_filter(channel, clean):
