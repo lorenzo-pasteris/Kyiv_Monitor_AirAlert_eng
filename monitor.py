@@ -41,6 +41,8 @@ if not TEST_MODE and not UKRAINE_ALARM_API_KEY:
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
 MONITOR_CHANNEL = "Nashee_PPO"
+BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
+API_FALLBACK_AFTER = 45
 
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
 
@@ -102,6 +104,7 @@ alert_active = False
 alert_started_at = None
 last_send_time = 0
 last_message_time = time.time()
+last_api_success_time = 0
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
 
 # Created in main(); one shared connection pool avoids a new TLS handshake per message.
@@ -200,7 +203,7 @@ def ukraine_alarm_air_active(payload):
 
 async def ukraine_alarm_loop():
     """Drive production alert mode exclusively from the official UkraineAlarm API."""
-    global alert_active, alert_started_at
+    global alert_active, alert_started_at, last_api_success_time
     initialized = False
     endpoint = f"https://api.ukrainealarm.com/api/v3/alerts/{UKRAINE_ALARM_REGION_ID}"
     while True:
@@ -212,6 +215,7 @@ async def ukraine_alarm_loop():
             )
             response.raise_for_status()
             current_active = ukraine_alarm_air_active(response.json())
+            last_api_success_time = time.time()
 
             if not initialized:
                 alert_active = current_active
@@ -438,6 +442,7 @@ async def handle_alert_message(clean):
 async def process_test_source_text(clean):
     global last_message_time
     clean = clean_text(clean)
+    clean = re.sub(r"^\[burst\s+\d+/\d+\]\s*", "", clean, flags=re.IGNORECASE)
     if not clean:
         return
     last_message_time = time.time()
@@ -548,18 +553,20 @@ async def main():
     else:
         source_entities = {}
         channel_by_chat_id = {}
-        for channel_name in ALL_CONTENT_CHANNELS:
+        production_channels = ALL_CONTENT_CHANNELS + [BACKUP_TRIGGER_CHANNEL]
+        for channel_name in production_channels:
             entity = await client.get_entity(channel_name)
             source_entities[channel_name] = entity
             channel_by_chat_id[utils.get_peer_id(entity)] = channel_name
 
-        print(f"✅ Connected in production. Trigger: UkraineAlarm API; Telegram sources: {ALL_CONTENT_CHANNELS}")
+        print(
+            f"✅ Connected in production. Trigger: UkraineAlarm API; backup: @{BACKUP_TRIGGER_CHANNEL}; "
+            f"content sources: {ALL_CONTENT_CHANNELS}"
+        )
         await send_to_channel(
-            "🟢 <b>Kyiv Monitor started</b>\n"
+            "🟢 <b>Kyiv Normal Monitor started</b>\n"
             "Mode: NORMAL (hourly summaries)\n"
-            "Night pause: 01:00–06:00 CET\n"
-            "Alert trigger: official UkraineAlarm API (Kyiv City)\n"
-            "Alert mode active 24/7"
+            "Night pause: 01:00–06:00 CET"
         )
 
         @client.on(events.NewMessage(chats=int(PRODUCTION_CHAT_ID)))
@@ -577,7 +584,7 @@ async def main():
 
         @client.on(events.NewMessage(chats=list(source_entities.values())))
         async def production_source_handler(event):
-            global alert_active, last_message_time
+            global alert_active, alert_started_at, last_message_time
             last_message_time = time.time()
 
             raw_text = event.message.text or ""
@@ -589,6 +596,23 @@ async def main():
                 print(f"[IGNORED UNKNOWN CHAT] chat_id={event.chat_id}")
                 return
             clean = clean_text(raw_text)
+
+            if channel == BACKUP_TRIGGER_CHANNEL:
+                api_stale_for = time.time() - last_api_success_time if last_api_success_time else float("inf")
+                if api_stale_for < API_FALLBACK_AFTER:
+                    return
+                action, _ = check_alert_trigger(clean)
+                if action == "start":
+                    alert_started_at = time.monotonic()
+                    for channel_name in ALL_CONTENT_CHANNELS:
+                        buffers[channel_name].clear()
+                    await send_to_channel("🚨 <b>AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME mode")
+                    print(f"🚨 Backup trigger @{BACKUP_TRIGGER_CHANNEL}: alert started; API stale")
+                elif action == "end":
+                    alert_started_at = None
+                    await send_to_channel("✅ <b>ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL mode")
+                    print(f"✅ Backup trigger @{BACKUP_TRIGGER_CHANNEL}: alert ended; API stale")
+                return
 
             if is_pure_ad(clean):
                 print(f"[FILTERED AD] @{channel}: {clean[:80]}")
