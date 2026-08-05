@@ -96,7 +96,7 @@ buffers = {ch: [] for ch in ALL_CONTENT_CHANNELS}
 alert_active = False
 last_send_time = 0
 last_message_time = time.time()
-MIN_SEND_INTERVAL = 0.2
+MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
 
 # Created in main(); one shared connection pool avoids a new TLS handshake per message.
 http_client = None
@@ -220,30 +220,31 @@ async def analyze_channel(messages, prompt):
 
 
 async def telegram_request(method, payload):
-    """Telegram Bot API request with one retry for flood control."""
-    try:
-        r = await http_client.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
-            json=payload,
-            timeout=httpx.Timeout(10.0, connect=3.0),
-        )
-        data = r.json()
-        if r.status_code == 429:
-            retry_after = min(data.get("parameters", {}).get("retry_after", 1), 5)
-            await asyncio.sleep(retry_after)
+    """Telegram Bot API request with bounded retries that honor flood control."""
+    for attempt in range(4):
+        try:
             r = await http_client.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
                 json=payload,
-                timeout=httpx.Timeout(10.0, connect=3.0),
+                timeout=httpx.Timeout(15.0, connect=3.0),
             )
             data = r.json()
-        if not data.get("ok"):
+            if data.get("ok"):
+                return data.get("result")
+            if r.status_code == 429 and attempt < 3:
+                retry_after = max(1, min(int(data.get("parameters", {}).get("retry_after", 1)), 60))
+                print(f"Telegram {method} flood control: waiting {retry_after}s")
+                await asyncio.sleep(retry_after)
+                continue
             print(f"Telegram {method} error: {data}")
             return None
-        return data.get("result")
-    except Exception as e:
-        print(f"Telegram {method} error: {e}")
-        return None
+        except Exception as exc:
+            if attempt < 3:
+                await asyncio.sleep(attempt + 1)
+                continue
+            print(f"Telegram {method} error: {exc}")
+            return None
+    return None
 
 async def send_message(chat_id, text):
     return await telegram_request("sendMessage", {
@@ -341,7 +342,15 @@ async def health_loop():
 
 
 async def handle_alert_message(clean):
-    """Publish instantly, then replace the same post with its translation."""
+    """Deliver low-latency alerts; TEST_MODE uses one Bot API write to avoid group flood limits."""
+    if TEST_MODE:
+        translation = await translate_message(clean[:1500])
+        if translation:
+            await safe_send(f"🔴 {html.escape(translation)}")
+        else:
+            await safe_send(f"🔴 ⚠️ Translation unavailable\n\n{html.escape(clean[:1000])}")
+        return
+
     original = html.escape(clean[:1500])
     sent = await safe_send(f"🔴 <b>Incoming alert — translating…</b>\n\n{original}")
     if not sent:
