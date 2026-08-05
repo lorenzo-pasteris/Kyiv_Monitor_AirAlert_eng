@@ -41,7 +41,7 @@ Railway riavvia automaticamente il worker. Dopo l'avvio devono essere controllat
 
 - connessione Telegram;
 - registrazione delle sorgenti corrette;
-- stato dei due trigger;
+- stato del trigger `@kyiv_airraid_alert`;
 - capacità di pubblicare nel gruppo previsto.
 
 Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e generare un avviso, evitando un restart loop infinito.
@@ -50,19 +50,17 @@ Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e ge
 
 ### Segnali osservati
 
-- ultimo successo UkraineAlarm;
-- codici HTTP e frequenza dei `401`;
 - ultimo stato esplicito ricevuto da `@kyiv_airraid_alert`;
-- eventuale conflitto tra le due sorgenti.
+- tempo trascorso dall'ultimo aggiornamento riconoscibile;
+- corretta registrazione dell'handler Telegram.
 
 ### Regole
 
-- Una sorgente valida in ALERT è sufficiente ad attivare ALERT.
-- Se l'API non è valida, viene seguito Telegram.
-- Se Telegram non ha ancora uno stato e l'API è valida, viene seguita l'API.
-- In caso di conflitto viene mantenuto ALERT.
-- La perdita di una sorgente genera un avviso, ma non interrompe il servizio se l'altra è valida.
-- La perdita di entrambe genera un avviso critico immediato e conserva l'ultimo stato conosciuto.
+- Un messaggio esplicito di allarme per Kyiv attiva ALERT.
+- Un messaggio esplicito di cessato allarme per Kyiv attiva NORMAL.
+- Messaggi ambigui non modificano lo stato conosciuto.
+- Se il canale non è leggibile, viene inviato un avviso critico e viene conservato l'ultimo stato.
+- UkraineAlarm API non fa più parte dell'architettura.
 
 Questo loop deve essere deterministico e non affidato a un modello linguistico.
 
@@ -110,7 +108,12 @@ Controllare che:
 - durante ALERT non vengano pubblicati riepiloghi;
 - la pausa notturna venga rispettata;
 - i recap numerici di `@Nashee_PPO` mantengano i numeri originali;
-- un errore dell'API Anthropic non cancelli definitivamente i messaggi prima di un nuovo tentativo.
+- il parser accetti il primo oggetto JSON valido anche con testo aggiuntivo;
+- i retry AI usino budget crescenti di 4000, 6000 e 8000 token;
+- dopo tre errori venga pubblicato un riepilogo deterministico di emergenza;
+- i buffer vengano cancellati soltanto dopo conferma dell'invio Telegram;
+- il watchdog riprovi a 62, 65, 67 e 70 minuti dall'ultimo riepilogo confermato;
+- un'eccezione non arresti definitivamente il loop dei riepiloghi.
 
 Miglioria consigliata: spostare i buffer da memoria a un archivio persistente, per esempio Redis o PostgreSQL, così un riavvio non perde il materiale del riepilogo.
 
@@ -145,9 +148,10 @@ L'agente non deve:
 Test minimi:
 
 - parsing di alert e cessato allarme Telegram;
-- risposta API ACTIVE, CLEAR, `401`, timeout e JSON invalido;
-- combinazioni API/Telegram concordi e in conflitto;
-- conferma che il conflitto mantenga ALERT;
+- parsing Telegram di ACTIVE, CLEAR e messaggi ambigui;
+- risposte Anthropic valide, duplicate, con testo aggiuntivo, troncate e non JSON;
+- retry a 4000/6000/8000 token e fallback deterministico;
+- watchdog a 62/65/67/70 minuti e conservazione del buffer su errore di invio;
 - isolamento totale di `TEST_MODE`;
 - rimozione delle etichette `[TEST_SOURCE:...]` e `[burst N/M]`;
 - deduplicazione degli output;
