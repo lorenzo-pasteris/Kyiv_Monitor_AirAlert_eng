@@ -24,6 +24,8 @@ Il servizio è eseguito come worker Python su Railway e il codice è conservato 
 - **Anthropic API**: traduzione e produzione dei riepiloghi.
 - **GitHub**: versionamento e origine dei deployment Railway.
 
+Railway usa i Watch Paths `/**` e `!/docs/**`: i commit che modificano soltanto `docs/` devono risultare `Skipped` e non devono riavviare il worker. Non aggiungere regole successive che reincludano la directory `docs/`.
+
 ## Canali e destinazioni
 
 ### Produzione
