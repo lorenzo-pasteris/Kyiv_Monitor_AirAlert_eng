@@ -1,5 +1,11 @@
 # Kyiv Monitor — Loop di monitoraggio e autoriparazione
 
+## Regola obbligatoria di sincronizzazione
+
+Ogni modifica al codice, al progetto, agli strumenti, ai workflow di deployment o alle regole operative deve includere l'aggiornamento della documentazione pertinente nella cartella `docs/`. La documentazione deve essere aggiornata nello stesso lavoro e rappresentare sempre ciò che è realmente attivo in produzione e in test.
+
+Un controllo di sincronizzazione documentale deve far parte della checklist di ogni pull request, commit operativo e intervento eseguito da un agente AI.
+
 ## Obiettivo
 
 Creare un sistema che rilevi rapidamente problemi, mantenga il servizio disponibile e, quando opportuno, coinvolga un agente AI per preparare una correzione verificabile.
@@ -203,3 +209,4 @@ Richiedere approvazione umana per modifiche che riguardano:
 5. Pipeline staging → test → produzione.
 6. Agente AI che apre pull request.
 7. Solo dopo sufficiente esperienza, automazione di correzioni a basso rischio.
+
