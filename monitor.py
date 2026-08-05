@@ -2,7 +2,7 @@
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: official UkraineAlarm API (Kyiv City)
 - Normal mode: hourly analysis of 3 channels with per-channel filters
-- Alert mode (24/7): only @monitorwarr in real-time, with translation fallback
+- Alert mode (24/7): only @Nashee_PPO in real-time, with translation fallback
 - Night pause: no hourly summaries 01:00-06:00 CET, one big recap at 06:00
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -40,7 +40,7 @@ if not TEST_MODE and not UKRAINE_ALARM_API_KEY:
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
-MONITOR_CHANNEL = "monitorwarr"
+MONITOR_CHANNEL = "Nashee_PPO"
 
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
 
@@ -56,7 +56,7 @@ NIGHT_END = 6     # 06:00 CET
 MODEL = "claude-haiku-4-5"
 
 # --- Display ---
-CHANNEL_NAMES = {KYIV_INFO_CHANNEL: "Kyiv City", AMK_CHANNEL: "Military Analysis", MONITOR_CHANNEL: "Russian Monitoring"}
+CHANNEL_NAMES = {KYIV_INFO_CHANNEL: "Kyiv City", AMK_CHANNEL: "Military Analysis", MONITOR_CHANNEL: "Air Defence Monitoring"}
 CHANNEL_ICONS = {KYIV_INFO_CHANNEL: "🏙️", AMK_CHANNEL: "🗺️", MONITOR_CHANNEL: "⚔️"}
 
 # --- Prompts (normal mode) ---
