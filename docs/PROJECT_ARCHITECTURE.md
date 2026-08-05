@@ -67,6 +67,7 @@ In modalità NORMAL:
 
 - i messaggi delle quattro sorgenti di contenuto vengono filtrati e conservati in memoria;
 - ogni ora viene generato un riepilogo in inglese;
+- in produzione il ciclo è allineato all'ora esatta di `Europe/Kyiv` (00 minuti), indipendentemente dall'orario dell'ultimo riavvio;
 - i contenuti non pertinenti e la pubblicità vengono esclususi;
 - tra le 01:00 e le 06:00, fuso Europe/Kyiv, i riepiloghi orari sono sospesi;
 - al termine della pausa notturna viene prodotto un recap complessivo.
