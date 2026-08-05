@@ -23,7 +23,13 @@ TELEGRAM_API_HASH = os.environ["TELEGRAM_API_HASH"]
 TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-TARGET_CHAT_ID = os.environ["TARGET_CHAT_ID"]
+BOT_USER_ID = int(BOT_TOKEN.split(":", 1)[0])
+TEST_MODE = os.environ.get("TEST_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+PRODUCTION_CHAT_ID = os.environ["OUTPUT_CHAT_ID"]
+TEST_CHAT_ID = os.environ.get("TEST_CHAT_ID")
+if TEST_MODE and not TEST_CHAT_ID:
+    raise RuntimeError("TEST_CHAT_ID is required when TEST_MODE=true")
+OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else PRODUCTION_CHAT_ID
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "392256147")  # private warnings go here
 
 # --- Channels ---
@@ -96,6 +102,13 @@ MIN_SEND_INTERVAL = 0.2
 http_client = None
 send_lock = None
 translation_slots = None
+bot_output_message_ids = set()
+TEST_SOURCE_PREFIX = "[TEST_SOURCE:monitorwarr]"
+TEST_SAMPLE_MESSAGES = [
+    "⚠️ Київщина: зафіксовано рух ударних БпЛА Shahed drone у напрямку Києва.",
+    "Ракетна небезпека: missile launch activity зафіксована з північного напрямку.",
+    "Група БпЛА продовжує рух; air-defense monitoring reports drone activity near Kyiv region.",
+]
 
 
 def contains_any(text, keywords):
@@ -249,7 +262,10 @@ async def edit_message(chat_id, message_id, text):
     })
 
 async def send_to_channel(text):
-    return await send_message(TARGET_CHAT_ID, text)
+    result = await send_message(OUTPUT_CHAT_ID, text)
+    if TEST_MODE and result and result.get("message_id"):
+        bot_output_message_ids.add(result["message_id"])
+    return result
 
 async def send_to_owner(text):
     return await send_message(OWNER_CHAT_ID, text)
@@ -332,13 +348,17 @@ async def handle_alert_message(clean):
 
     translation = await translate_message(clean[:1500])
     if translation:
-        await edit_message(TARGET_CHAT_ID, sent["message_id"], f"🔴 {html.escape(translation)}")
+        await edit_message(OUTPUT_CHAT_ID, sent["message_id"], f"🔴 {html.escape(translation)}")
     else:
         await edit_message(
-            TARGET_CHAT_ID,
+            OUTPUT_CHAT_ID,
             sent["message_id"],
             f"🔴 ⚠️ Translation unavailable\n\n{html.escape(clean[:1000])}",
         )
+
+
+async def publish_test_source(client, text):
+    await client.send_message(int(TEST_CHAT_ID), f"{TEST_SOURCE_PREFIX}\n{text}")
 
 
 async def main():
@@ -353,103 +373,167 @@ async def main():
     client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
     await client.start()
 
-    # Resolve each source once. event.chat.username is not reliable and may be None.
-    source_entities = {}
-    channel_by_chat_id = {}
-    for channel_name in ALL_CHANNELS:
-        entity = await client.get_entity(channel_name)
-        source_entities[channel_name] = entity
-        channel_by_chat_id[utils.get_peer_id(entity)] = channel_name
+    if TEST_MODE:
+        print(f"🧪 TEST_MODE enabled. Exclusive chat: {TEST_CHAT_ID}; real Telegram sources are NOT registered.")
+        await send_to_channel(
+            "🧪 <b>Kyiv Monitor started in TEST_MODE</b>\n"
+            "Exclusive source/output chat enabled. Real Telegram channels are disabled.\n"
+            "Commands: /test_start, /test_message, /test_burst N, /test_end, /test_summary"
+        )
 
-    print(f"✅ Resolved Telegram sources: {channel_by_chat_id}")
-
-    print(f"✅ Connected. Trigger: @{TRIGGER_CHANNEL}, sources: {ALL_CONTENT_CHANNELS}")
-    await send_to_channel(
-        f"🟢 <b>Kyiv Monitor started</b>\n"
-        f"Mode: NORMAL (hourly summaries)\n"
-        f"Night pause: 01:00–06:00 CET\n"
-        f"Alert mode active 24/7"
-    )
-
-    @client.on(events.NewMessage(chats=int(TARGET_CHAT_ID)))
-    async def command_handler(event):
-        global alert_active
-        text = (event.message.text or "").strip().lower()
-        if text == "/alert":
-            alert_active = True
-            for c in ALL_CONTENT_CHANNELS:
-                buffers[c].clear()
-            await send_to_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
-        elif text == "/normal":
-            alert_active = False
-            await send_to_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
-
-    @client.on(events.NewMessage(chats=list(source_entities.values())))
-    async def handler(event):
-        global alert_active, last_message_time
-        last_message_time = time.time()
-
-        raw_text = event.message.text or ""
-        if not raw_text or len(raw_text.strip()) < 5:
-            return
-
-        channel = channel_by_chat_id.get(event.chat_id)
-        if channel is None:
-            print(f"[IGNORED UNKNOWN CHAT] chat_id={event.chat_id}")
-            return
-        clean = clean_text(raw_text)
-
-        # ===== TRIGGER CHANNEL (English) =====
-        if channel == TRIGGER_CHANNEL:
-            action, extra = check_alert_trigger(clean)
-            if action == "start":
-                for c in ALL_CONTENT_CHANNELS:
-                    buffers[c].clear()
-                await send_to_channel(f"🚨 <b>AIR ALERT — KYIV</b>\n\n{html.escape(clean)}\n\n⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded.")
+        @client.on(events.NewMessage(chats=int(TEST_CHAT_ID)))
+        async def test_command_handler(event):
+            global alert_active, last_message_time
+            raw = (event.message.text or "").strip()
+            command = raw.lower()
+            if event.sender_id == BOT_USER_ID or event.message.id in bot_output_message_ids:
                 return
-            elif action == "end":
-                await send_to_channel(f"✅ <b>ALL CLEAR — KYIV</b>\n\nDuration: {html.escape(str(extra))}\n\n📋 Back to NORMAL mode")
+
+            if command == "/test_start":
+                alert_active = True
+                for channel_name in ALL_CONTENT_CHANNELS:
+                    buffers[channel_name].clear()
+                await send_to_channel("🚨 <b>TEST AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME test mode active")
                 return
-            return
 
-        # ===== Ukrainian backup trigger (must explicitly mention Kyiv) =====
-        ua = check_ua_trigger(clean)
-        if ua == "start":
-            for c in ALL_CONTENT_CHANNELS:
-                buffers[c].clear()
-            await send_to_channel(f"🚨 <b>AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded.")
-            # fall through: this same message may also be content
-        elif ua == "end":
-            await send_to_channel("✅ <b>ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL mode")
-            return
-
-        # ===== AD FILTER =====
-        if is_pure_ad(clean):
-            print(f"[FILTERED AD] @{channel}: {clean[:80]}")
-            return
-
-        # ===== ALERT MODE =====
-        if alert_active:
-            if channel != MONITOR_CHANNEL:
+            if command == "/test_message":
+                await publish_test_source(client, TEST_SAMPLE_MESSAGES[0])
                 return
-            # Translate + send in parallel so a burst of messages doesn't queue up.
-            asyncio.create_task(handle_alert_message(clean))
-            return
 
-        # ===== NORMAL MODE =====
-        if not pre_filter(channel, clean):
-            print(f"[FILTERED] @{channel}: {clean[:60]}")
-            return
+            burst_match = re.fullmatch(r"/test_burst(?:\s+(\d+))?", command)
+            if burst_match:
+                count = int(burst_match.group(1) or "1")
+                count = max(1, min(count, 100))
+                for index in range(count):
+                    sample = TEST_SAMPLE_MESSAGES[index % len(TEST_SAMPLE_MESSAGES)]
+                    await publish_test_source(client, f"[burst {index + 1}/{count}] {sample}")
+                return
 
-        time_str = datetime.now(TZ).strftime("%H:%M")
-        channel_buffer = buffers.get(channel)
-        if channel_buffer is None:
-            print(f"[IGNORED NON-CONTENT CHAT] channel={channel} chat_id={event.chat_id}")
-            return
-        channel_buffer.append({"time": time_str, "text": clean[:800]})
+            if command == "/test_end":
+                alert_active = False
+                await send_to_channel("✅ <b>TEST ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL test mode")
+                return
+
+            if command == "/test_summary":
+                if alert_active:
+                    await send_to_channel("⚠️ End the test alert with /test_end before requesting a summary.")
+                else:
+                    await build_summary()
+                return
+
+        @client.on(events.NewMessage(chats=int(TEST_CHAT_ID)))
+        async def test_source_handler(event):
+            global last_message_time
+            raw_text = (event.message.text or "").strip()
+            if event.sender_id == BOT_USER_ID or event.message.id in bot_output_message_ids:
+                return
+            if not raw_text.startswith(TEST_SOURCE_PREFIX):
+                return
+
+            clean = clean_text(raw_text[len(TEST_SOURCE_PREFIX):].lstrip())
+            if not clean:
+                return
+            last_message_time = time.time()
+
+            if is_pure_ad(clean):
+                print(f"[TEST FILTERED AD] {clean[:80]}")
+                return
+
+            if alert_active:
+                asyncio.create_task(handle_alert_message(clean))
+                return
+
+            if not pre_filter(MONITOR_CHANNEL, clean):
+                print(f"[TEST FILTERED] @{MONITOR_CHANNEL}: {clean[:60]}")
+                return
+
+            time_str = datetime.now(TZ).strftime("%H:%M")
+            buffers[MONITOR_CHANNEL].append({"time": time_str, "text": clean[:800]})
+
+    else:
+        source_entities = {}
+        channel_by_chat_id = {}
+        for channel_name in ALL_CHANNELS:
+            entity = await client.get_entity(channel_name)
+            source_entities[channel_name] = entity
+            channel_by_chat_id[utils.get_peer_id(entity)] = channel_name
+
+        print(f"✅ Connected in production. Trigger: @{TRIGGER_CHANNEL}, sources: {ALL_CONTENT_CHANNELS}")
+        await send_to_channel(
+            "🟢 <b>Kyiv Monitor started</b>\n"
+            "Mode: NORMAL (hourly summaries)\n"
+            "Night pause: 01:00–06:00 CET\n"
+            "Alert mode active 24/7"
+        )
+
+        @client.on(events.NewMessage(chats=int(PRODUCTION_CHAT_ID)))
+        async def production_command_handler(event):
+            global alert_active
+            text = (event.message.text or "").strip().lower()
+            if text == "/alert":
+                alert_active = True
+                for channel_name in ALL_CONTENT_CHANNELS:
+                    buffers[channel_name].clear()
+                await send_to_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
+            elif text == "/normal":
+                alert_active = False
+                await send_to_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
+
+        @client.on(events.NewMessage(chats=list(source_entities.values())))
+        async def production_source_handler(event):
+            global alert_active, last_message_time
+            last_message_time = time.time()
+
+            raw_text = event.message.text or ""
+            if not raw_text or len(raw_text.strip()) < 5:
+                return
+
+            channel = channel_by_chat_id.get(event.chat_id)
+            if channel is None:
+                print(f"[IGNORED UNKNOWN CHAT] chat_id={event.chat_id}")
+                return
+            clean = clean_text(raw_text)
+
+            if channel == TRIGGER_CHANNEL:
+                action, extra = check_alert_trigger(clean)
+                if action == "start":
+                    for channel_name in ALL_CONTENT_CHANNELS:
+                        buffers[channel_name].clear()
+                    await send_to_channel(
+                        f"🚨 <b>AIR ALERT — KYIV</b>\n\n{html.escape(clean)}\n\n"
+                        f"⚡ REAL-TIME mode — only @{MONITOR_CHANNEL} forwarded."
+                    )
+                elif action == "end":
+                    await send_to_channel(
+                        f"✅ <b>ALL CLEAR — KYIV</b>\n\nDuration: {html.escape(str(extra))}\n\n"
+                        "📋 Back to NORMAL mode"
+                    )
+                return
+
+            if is_pure_ad(clean):
+                print(f"[FILTERED AD] @{channel}: {clean[:80]}")
+                return
+
+            if alert_active:
+                if channel == MONITOR_CHANNEL:
+                    asyncio.create_task(handle_alert_message(clean))
+                return
+
+            if not pre_filter(channel, clean):
+                print(f"[FILTERED] @{channel}: {clean[:60]}")
+                return
+
+            time_str = datetime.now(TZ).strftime("%H:%M")
+            channel_buffer = buffers.get(channel)
+            if channel_buffer is None:
+                print(f"[IGNORED NON-CONTENT CHAT] channel={channel} chat_id={event.chat_id}")
+                return
+            channel_buffer.append({"time": time_str, "text": clean[:800]})
 
     asyncio.create_task(summary_loop())
-    asyncio.create_task(health_loop())
+    if not TEST_MODE:
+        asyncio.create_task(health_loop())
+
     try:
         await client.run_until_disconnected()
     finally:
