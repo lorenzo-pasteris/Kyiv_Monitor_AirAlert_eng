@@ -1,5 +1,11 @@
 # Kyiv Monitor — Architettura e funzionamento
 
+## Regola obbligatoria di sincronizzazione
+
+La documentazione è parte integrante del progetto. Ogni modifica a codice, architettura, canali, trigger, regole operative, variabili d'ambiente, configurazione Railway/GitHub, ambiente di test o strumenti deve aggiornare nello stesso lavoro i file pertinenti nella cartella `docs/`.
+
+Una modifica non è considerata completa finché la documentazione non descrive fedelmente lo stato distribuito. Prima di ogni commit o deploy verificare sempre se devono essere aggiornati almeno `PROJECT_ARCHITECTURE.md` e `SELF_HEALING_LOOPS.md`.
+
 ## Scopo
 
 Kyiv Monitor pubblica informazioni in inglese nel gruppo Telegram di produzione dedicato a Kyiv. Il sistema ha due modalità operative:
@@ -167,3 +173,4 @@ UKRAINE_ALARM_POLL_INTERVAL
 5. Controllare la connessione UkraineAlarm e gli eventuali `401`.
 6. Verificare il messaggio di avvio nel gruppo corretto.
 7. Eseguire test funzionali esclusivamente nel gruppo di test.
+
