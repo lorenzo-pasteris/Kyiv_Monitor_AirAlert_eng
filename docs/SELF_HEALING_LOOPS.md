@@ -108,9 +108,13 @@ Controllare che:
 - durante ALERT non vengano pubblicati riepiloghi;
 - la pausa notturna venga rispettata;
 - i recap numerici di `@Nashee_PPO` mantengano i numeri originali;
-- il parser accetti il primo oggetto JSON valido anche con testo aggiuntivo;
-- i retry AI usino budget crescenti di 4000, 6000 e 8000 token;
-- dopo tre errori venga pubblicato un riepilogo deterministico di emergenza;
+- Anthropic Structured Outputs imponga lo schema completo tramite `output_config.format`;
+- HTTP, `stop_reason`, JSON, categorie, tipi e ID vengano validati in quest'ordine;
+- il parser del primo JSON sia usato soltanto come fallback legacy, con log obbligatorio e validazione;
+- il budget cresca 4000/6000/8000 soltanto per `stop_reason=max_tokens`;
+- timeout, errori di trasporto, `429` e `5xx` ricevano backoff crescente e rispetto di `Retry-After`;
+- `refusal`, errori 400 e schema invalido non vengano riprovati identici;
+- dopo gli errori venga pubblicato un fallback con soli estratti originali e avviso di sintesi AI non disponibile;
 - i buffer vengano cancellati soltanto dopo conferma dell'invio Telegram;
 - il watchdog riprovi a 62, 65, 67 e 70 minuti dall'ultimo riepilogo confermato;
 - un'eccezione non arresti definitivamente il loop dei riepiloghi.
@@ -150,7 +154,7 @@ Test minimi:
 - parsing di alert e cessato allarme Telegram;
 - parsing Telegram di ACTIVE, CLEAR e messaggi ambigui;
 - risposte Anthropic valide, duplicate, con testo aggiuntivo, troncate e non JSON;
-- retry a 4000/6000/8000 token e fallback deterministico;
+- Structured Outputs, retry differenziati per errore, backoff/`Retry-After` e fallback di soli estratti originali;
 - watchdog a 62/65/67/70 minuti e conservazione del buffer su errore di invio;
 - isolamento totale di `TEST_MODE`;
 - rimozione delle etichette `[TEST_SOURCE:...]` e `[burst N/M]`;
