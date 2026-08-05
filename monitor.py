@@ -14,7 +14,7 @@ import time
 import httpx
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
 
 # --- Credentials ---
@@ -128,23 +128,32 @@ def is_night():
     return NIGHT_START <= h < NIGHT_END
 
 def check_alert_trigger(text):
-    """English trigger from @kyiv_airraid_alert."""
+    """Classify Kyiv alert-channel messages without depending on one exact phrase."""
     global alert_active
     t = text.lower()
-    if re.search(r'air\s+siren\s+in\s+kyiv\s+clear', t):
+    mentions_kyiv = contains_any(t, ["kyiv", "kiev", "київ", "києв", "киев"])
+    is_clear = contains_any(t, ["all clear", "clear", "cancelled", "canceled", "ended", "відбій"])
+    is_alert = (
+        ("air" in t and contains_any(t, ["siren", "raid", "alert"]))
+        or contains_any(t, ["повітряна тривога", "тривога"])
+    )
+
+    if mentions_kyiv and is_clear:
         if alert_active:
             alert_active = False
             m = re.search(r'Duration:\s*(.+)', text, re.IGNORECASE)
             return "end", (m.group(1).strip() if m else "unknown")
-    elif re.search(r'air\s+raid\s+sirens?\s+in\s+kyiv', t):
+    elif mentions_kyiv and is_alert:
         if not alert_active:
             alert_active = True
             return "start", None
     return None, None
 
 def check_ua_trigger(text):
-    """Backup Ukrainian triggers from any channel."""
+    """Backup trigger, accepted only when the message explicitly mentions Kyiv."""
     global alert_active
+    if not contains_any(text, ["київ", "києв", "киев", "kyiv", "kiev"]):
+        return None
     if contains_any(text, ALERT_END_UA):
         if alert_active:
             alert_active = False
@@ -273,12 +282,17 @@ async def build_summary(night_recap=False):
         title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>Hourly Update"
         header = f"{title} — {now} CET</b>\n\n"
         await send_to_channel(header + "\n\n".join(sections))
+    elif not night_recap:
+        now = datetime.now(TZ).strftime("%H:%M")
+        await send_to_channel(f"📋 <b>Hourly Update — {now} CET</b>\n\nNo relevant updates in the last hour.")
 
 
 async def summary_loop():
     was_night = False
+    next_run = time.monotonic() + SUMMARY_INTERVAL
     while True:
-        await asyncio.sleep(SUMMARY_INTERVAL)
+        await asyncio.sleep(max(0, next_run - time.monotonic()))
+        next_run += SUMMARY_INTERVAL
         if alert_active:
             continue
 
@@ -339,6 +353,16 @@ async def main():
     client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
     await client.start()
 
+    # Resolve each source once. event.chat.username is not reliable and may be None.
+    source_entities = {}
+    channel_by_chat_id = {}
+    for channel_name in ALL_CHANNELS:
+        entity = await client.get_entity(channel_name)
+        source_entities[channel_name] = entity
+        channel_by_chat_id[utils.get_peer_id(entity)] = channel_name
+
+    print(f"✅ Resolved Telegram sources: {channel_by_chat_id}")
+
     print(f"✅ Connected. Trigger: @{TRIGGER_CHANNEL}, sources: {ALL_CONTENT_CHANNELS}")
     await send_to_channel(
         f"🟢 <b>Kyiv Monitor started</b>\n"
@@ -360,7 +384,7 @@ async def main():
             alert_active = False
             await send_to_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
 
-    @client.on(events.NewMessage(chats=ALL_CHANNELS))
+    @client.on(events.NewMessage(chats=list(source_entities.values())))
     async def handler(event):
         global alert_active, last_message_time
         last_message_time = time.time()
@@ -369,7 +393,10 @@ async def main():
         if not raw_text or len(raw_text.strip()) < 5:
             return
 
-        channel = event.chat.username if event.chat and event.chat.username else "?"
+        channel = channel_by_chat_id.get(event.chat_id)
+        if channel is None:
+            print(f"[IGNORED UNKNOWN CHAT] chat_id={event.chat_id}")
+            return
         clean = clean_text(raw_text)
 
         # ===== TRIGGER CHANNEL (English) =====
@@ -385,7 +412,7 @@ async def main():
                 return
             return
 
-        # ===== Ukrainian backup triggers (any content channel) =====
+        # ===== Ukrainian backup trigger (must explicitly mention Kyiv) =====
         ua = check_ua_trigger(clean)
         if ua == "start":
             for c in ALL_CONTENT_CHANNELS:
@@ -415,7 +442,11 @@ async def main():
             return
 
         time_str = datetime.now(TZ).strftime("%H:%M")
-        buffers[channel].append({"time": time_str, "text": clean[:800]})
+        channel_buffer = buffers.get(channel)
+        if channel_buffer is None:
+            print(f"[IGNORED NON-CONTENT CHAT] channel={channel} chat_id={event.chat_id}")
+            return
+        channel_buffer.append({"time": time_str, "text": clean[:800]})
 
     asyncio.create_task(summary_loop())
     asyncio.create_task(health_loop())
