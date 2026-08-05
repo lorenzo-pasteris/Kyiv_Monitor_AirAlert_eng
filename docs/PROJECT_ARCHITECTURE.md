@@ -189,3 +189,33 @@ Prima dell'analisi viene acquisita un'istantanea del buffer. I messaggi vengono 
 
 I log registrano messaggi inseriti nei buffer, quantità analizzate e risultato per sorgente. Gli errori ripetuti di UkraineAlarm vengono raggruppati: il primo è immediato e i successivi sono riportati al massimo ogni cinque minuti, mantenendo attivo il fallback Telegram.
 
+
+
+## Classificazione trasversale e statistiche per fonte
+
+Le sorgenti indicano esclusivamente la provenienza dei messaggi. Non esiste più una categoria
+assegnata rigidamente a ciascun canale: a ogni ciclo NORMAL, ciascun messaggio acquisito da
+`@kievinfo_kyiv`, `@shv_ukr`, `@AMK_Mapping` e `@Nashee_PPO` viene valutato contro tutte
+le categorie:
+
+- `kyiv_city`: disservizi, infrastrutture e conseguenze concrete sulla vita di Kyiv;
+- `ukraine_national`: politica, economia, diplomazia e sviluppi nazionali ucraini;
+- `military`: sviluppi militari e analisi della guerra Russia-Ucraina;
+- `air_defence`: droni, missili, aviazione, intercettazioni, impatti e recap degli attacchi.
+
+Un messaggio può appartenere a più categorie quando è realmente pertinente. Pubblicità,
+clickbait e materiale non pertinente vengono scartati; i filtri preventivi specifici per canale
+non vengono più applicati.
+
+Ogni riepilogo scrive nei log Railway:
+
+- `[SUMMARY INPUT]`: messaggi ricevuti per fonte;
+- `[CATEGORY STATS]`: messaggi validi per ciascuna combinazione categoria × fonte;
+- `[CATEGORY ITEM]`: anteprima e provenienza dei messaggi selezionati;
+- `[CATEGORY ANALYSIS ERROR]`: errore del classificatore, con conservazione completa dei buffer.
+
+Le stesse statistiche vengono archiviate in SQLite nella posizione indicata da
+`CATEGORY_STATS_DB_PATH`, valore predefinito
+`/data/kyiv_monitor_category_stats.sqlite3`. Per conservarle attraverso restart e deployment,
+Railway deve montare un volume persistente su `/data`. Le tabelle sono
+`hourly_category_stats` e `hourly_classifications`.
