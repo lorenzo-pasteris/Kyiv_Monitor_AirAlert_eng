@@ -733,10 +733,21 @@ async def build_summary(night_recap=False, trigger="scheduled"):
                 f"{title} — {time_label}</b>\n\n" + "\n\n".join(sections)
             )
         else:
-            result = True
+            if night_recap:
+                heartbeat = (
+                    f"🌙 <b>Overnight Recap — {time_label}</b>\n\n"
+                    "No relevant updates during the overnight period."
+                )
+            else:
+                heartbeat = (
+                    f"📋 <b>Hourly Update — {time_label}</b>\n\n"
+                    "No relevant updates in the last hour."
+                )
+            heartbeat_sender = send_to_channel if TEST_MODE else send_to_owner
+            result = await heartbeat_sender(heartbeat)
             print(
-                f"[SUMMARY SKIPPED] trigger={trigger}; "
-                "no relevant updates, no Telegram message sent"
+                f"[SUMMARY OPS HEARTBEAT] trigger={trigger}; "
+                "no relevant updates, production chat kept silent"
             )
 
         if not result:
@@ -753,7 +764,7 @@ async def build_summary(night_recap=False, trigger="scheduled"):
 
         last_summary_success_time = time.monotonic()
         summary_watchdog_attempts.clear()
-        outcome = "delivered" if sections else "empty"
+        outcome = "delivered" if sections else "ops_heartbeat"
         print(
             f"[SUMMARY COMPLETED] trigger={trigger} "
             f"outcome={outcome} messages={len(snapshots)}"
