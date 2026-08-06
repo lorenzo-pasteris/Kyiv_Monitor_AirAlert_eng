@@ -3,7 +3,7 @@
 - Production trigger: @kyiv_airraid_alert
 - Normal mode: hourly analysis of 4 channels with per-channel filters
 - Alert mode (24/7): only @Nashee_PPO in real-time, with translation fallback
-- Night pause: no hourly summaries 01:00-06:00 Europe/Kyiv, one big recap at 06:00
+- Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
 - Health check every 12h: private warning to owner if channels go silent
 """
 import asyncio
@@ -47,8 +47,8 @@ SILENCE_THRESHOLD = 4 * 3600  # 4 hours of total silence = warning
 
 # --- Timezone / night pause ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
-NIGHT_START = 1   # 01:00 CET
-NIGHT_END = 6     # 06:00 CET
+NIGHT_START = 1   # 01:00 EET/EEST
+NIGHT_END = 7     # 07:00 EET/EEST
 
 MODEL = "claude-haiku-4-5"
 
@@ -450,7 +450,8 @@ async def analyze_hourly_matrix(messages):
         "routine statements without a concrete development, and unrelated material.\n\n"
         f"Categories:\n{category_text}\n\n"
         "Use the required structured output schema. selected_ids must contain exact message IDs that qualify. "
-        "bullets must contain at most five concise English summary strings per category. Preserve stated "
+        "bullets must contain at most five concise English summary strings per category. Within each category, "
+        "order bullets chronologically from the earliest event/message time to the latest. Preserve stated "
         "locations, uncertainty, times and quantities.\n\nMessages:\n" + message_text
     )
 
@@ -988,7 +989,7 @@ async def main():
         await send_to_channel(
             "🟢 <b>Kyiv Normal Monitor started</b>\n"
             "Mode: NORMAL (hourly summaries)\n"
-            "Night pause: 01:00–06:00 EET/EEST"
+            "Night pause: 01:00–07:00 EET/EEST"
         )
 
         @client.on(events.NewMessage(chats=int(PRODUCTION_CHAT_ID)))
