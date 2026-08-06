@@ -116,7 +116,7 @@ Controllare che:
 - `refusal`, errori 400 e schema invalido non vengano riprovati identici;
 - dopo gli errori venga pubblicato un fallback con soli estratti originali e avviso di sintesi AI non disponibile;
 - i buffer vengano cancellati soltanto dopo conferma dell'invio Telegram;
-- un ciclo senza aggiornamenti rilevanti sia registrato come completato senza inviare un messaggio Telegram e senza attivare falsamente il watchdog;
+- un ciclo senza aggiornamenti rilevanti mantenga silenziosa la produzione, invii un heartbeat con ora a `OPS_CHAT_ID`, sia registrato come completato e non attivi falsamente il watchdog;
 - il watchdog riprovi a 62, 65, 67 e 70 minuti dall'ultimo ciclo completato o riepilogo confermato;
 - un'eccezione non arresti definitivamente il loop dei riepiloghi;
 - le anomalie operative vengano inviate a `OPS_CHAT_ID`, con fallback a `OWNER_CHAT_ID`, mentre i dettagli ordinari restano nei log Railway.
