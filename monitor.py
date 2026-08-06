@@ -991,7 +991,7 @@ async def main():
             f"✅ Connected in production. Alert trigger: @{BACKUP_TRIGGER_CHANNEL}; "
             f"content sources: {ALL_CONTENT_CHANNELS}"
         )
-        await send_to_channel(
+        await send_to_owner(
             "🟢 <b>Kyiv Normal Monitor started</b>\n"
             "Mode: NORMAL (hourly summaries)\n"
             "Night pause: 01:00–07:00 EET/EEST"

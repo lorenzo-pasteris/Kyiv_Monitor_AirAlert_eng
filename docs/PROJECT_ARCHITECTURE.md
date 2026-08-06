@@ -55,13 +55,15 @@ All'avvio il worker legge gli ultimi messaggi di `@kyiv_airraid_alert` per ricos
 
 ## Modalità NORMAL
 
-Il messaggio di avvio è volutamente breve:
+Il messaggio di avvio è volutamente breve e viene inviato esclusivamente alla chat operativa `OPS_CHAT_ID` quando il worker riparte, per esempio dopo un deployment. Non viene pubblicato nella chat di produzione:
 
 ```text
 🟢 Kyiv Normal Monitor started
 Mode: NORMAL (hourly summaries)
-Night pause: 01:00–07:00 CET
+Night pause: 01:00–07:00 EET/EEST
 ```
+
+Il messaggio di cessato allarme `ALL CLEAR — KYIV / Back to NORMAL mode` resta invece nella chat di produzione, perché descrive un reale cambio di stato operativo e non un riavvio tecnico.
 
 In modalità NORMAL:
 

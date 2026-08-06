@@ -120,6 +120,7 @@ Controllare che:
 - il watchdog riprovi a 62, 65, 67 e 70 minuti dall'ultimo ciclo completato o riepilogo confermato;
 - un'eccezione non arresti definitivamente il loop dei riepiloghi;
 - le anomalie operative vengano inviate a `OPS_CHAT_ID`, con fallback a `OWNER_CHAT_ID`, mentre i dettagli ordinari restano nei log Railway.
+- ogni avvio o riavvio tecnico del worker venga notificato a `OPS_CHAT_ID`; il messaggio di cessato allarme e ritorno a NORMAL resti nella chat di produzione.
 
 Miglioria consigliata: spostare i buffer da memoria a un archivio persistente, per esempio Redis o PostgreSQL, così un riavvio non perde il materiale del riepilogo.
 
