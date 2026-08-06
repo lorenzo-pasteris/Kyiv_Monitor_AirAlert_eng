@@ -32,7 +32,8 @@ TEST_CHAT_ID = os.environ.get("TEST_CHAT_ID")
 if TEST_MODE and not TEST_CHAT_ID:
     raise RuntimeError("TEST_CHAT_ID is required when TEST_MODE=true")
 OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else PRODUCTION_CHAT_ID
-OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "392256147")  # private warnings go here
+OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "392256147")
+OPS_CHAT_ID = os.environ.get("OPS_CHAT_ID", OWNER_CHAT_ID)  # operational alerts; legacy fallback
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
@@ -637,7 +638,8 @@ async def send_to_channel(text):
     return result
 
 async def send_to_owner(text):
-    return await send_message(OWNER_CHAT_ID, text)
+    """Send actionable operational alerts to the dedicated private Ops chat."""
+    return await send_message(OPS_CHAT_ID, text)
 
 
 async def safe_send(text):
@@ -730,13 +732,12 @@ async def build_summary(night_recap=False, trigger="scheduled"):
             result = await send_to_channel(
                 f"{title} — {time_label}</b>\n\n" + "\n\n".join(sections)
             )
-        elif not night_recap:
-            result = await send_to_channel(
-                f"📋 <b>Hourly Update — {time_label}</b>\n\n"
-                "No relevant updates in the last hour."
-            )
         else:
             result = True
+            print(
+                f"[SUMMARY SKIPPED] trigger={trigger}; "
+                "no relevant updates, no Telegram message sent"
+            )
 
         if not result:
             print(f"[SUMMARY SEND ERROR] trigger={trigger}; buffers retained")
@@ -752,7 +753,11 @@ async def build_summary(night_recap=False, trigger="scheduled"):
 
         last_summary_success_time = time.monotonic()
         summary_watchdog_attempts.clear()
-        print(f"[SUMMARY DELIVERED] trigger={trigger} messages={len(snapshots)}")
+        outcome = "delivered" if sections else "empty"
+        print(
+            f"[SUMMARY COMPLETED] trigger={trigger} "
+            f"outcome={outcome} messages={len(snapshots)}"
+        )
         return True
 
 
