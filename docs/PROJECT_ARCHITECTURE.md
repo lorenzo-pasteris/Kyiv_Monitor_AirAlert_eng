@@ -67,6 +67,7 @@ In modalità NORMAL:
 
 - i messaggi delle quattro sorgenti di contenuto vengono filtrati e conservati in memoria;
 - ogni ora viene generato un riepilogo in inglese;
+- se nessuna categoria contiene aggiornamenti rilevanti, il ciclo termina senza inviare messaggi Telegram; il completamento viene registrato nei log e non attiva il watchdog;
 - in produzione il ciclo è allineato all'ora esatta di `Europe/Kyiv` (00 minuti), indipendentemente dall'orario dell'ultimo riavvio;
 - i contenuti non pertinenti e la pubblicità vengono esclususi;
 - tra le 01:00 e le 06:00, fuso Europe/Kyiv, i riepiloghi orari sono sospesi;
@@ -129,6 +130,7 @@ Le credenziali non devono essere inserite nel repository. Railway deve contenere
 TEST_MODE
 TEST_CHAT_ID
 TARGET_CHAT_ID
+OPS_CHAT_ID
 OWNER_CHAT_ID
 TELEGRAM_API_ID
 TELEGRAM_API_HASH
@@ -136,6 +138,8 @@ TELEGRAM_SESSION
 BOT_TOKEN
 ANTHROPIC_API_KEY
 ```
+
+`OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli ordinari restano esclusivamente nei log Railway; la chat di produzione non riceve messaggi “No relevant updates”.
 
 ## Protezioni operative
 
