@@ -60,7 +60,7 @@ Il messaggio di avvio è volutamente breve:
 ```text
 🟢 Kyiv Normal Monitor started
 Mode: NORMAL (hourly summaries)
-Night pause: 01:00–06:00 CET
+Night pause: 01:00–07:00 CET
 ```
 
 In modalità NORMAL:
@@ -170,7 +170,7 @@ Il ciclo NORMAL usa quattro sorgenti di contenuto:
 - `@AMK_Mapping` per analisi militare della guerra Russia-Ucraina;
 - `@Nashee_PPO` per monitoraggio della difesa aerea e riepiloghi numerici degli attacchi.
 
-Il fuso orario operativo è `Europe/Kyiv`: gli output mostrano automaticamente `EEST` in estate e `EET` in inverno. La pausa notturna 01:00–06:00 segue lo stesso fuso.
+Il fuso orario operativo è `Europe/Kyiv`: gli output mostrano automaticamente `EEST` in estate e `EET` in inverno. La pausa notturna 01:00–07:00 segue lo stesso fuso.
 
 Prima dell'analisi viene acquisita un'istantanea del buffer. Anthropic Structured Outputs (`output_config.format` con JSON Schema) è la difesa primaria: impone tutte le categorie e i tipi previsti. Dopo la risposta vengono controllati HTTP, `stop_reason`, JSON, categorie, tipi e ID. Il parser del primo oggetto JSON rimane soltanto come fallback legacy: ogni utilizzo produce un log esplicito e il risultato viene sottoposto alla stessa validazione rigorosa. Il budget cresce da 4000 a 6000 e 8000 token esclusivamente quando `stop_reason=max_tokens`; `refusal`, errori 400 e output strutturalmente invalidi non vengono riprovati identici. Timeout, errori di trasporto, `429` e `5xx` ricevono fino a tre tentativi con attesa crescente e rispetto di `Retry-After`. Se l'analisi non è disponibile, l'output di emergenza contiene soltanto brevi estratti originali con fonte esplicita e avverte che non si tratta di una sintesi AI.
 
@@ -208,3 +208,14 @@ Le stesse statistiche vengono archiviate in SQLite nella posizione indicata da
 `/data/kyiv_monitor_category_stats.sqlite3`. Per conservarle attraverso restart e deployment,
 Railway deve montare un volume persistente su `/data`. Le tabelle sono
 `hourly_category_stats` e `hourly_classifications`.
+
+
+## Pianificazione oraria e ordine cronologico
+
+In produzione i riepiloghi sono ancorati alle ore piene di `Europe/Kyiv`, non all'istante
+di avvio del container. Dopo un restart, il primo ciclo viene pianificato per la successiva
+ora piena EET/EEST e i successivi continuano alle ore 12:00, 13:00 e così via.
+
+La pausa notturna è 01:00–07:00 EET/EEST. Il riepilogo accumulato durante la pausa viene
+pubblicato alle 07:00. All'interno di ogni categoria, il modello deve ordinare i bullet dal
+messaggio/evento più vecchio al più recente.
