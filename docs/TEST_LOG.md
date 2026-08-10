@@ -75,6 +75,32 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Verifica visiva:** il gruppo mostra lo storico dei riepiloghi; nel canale restano soltanto messaggi del ciclo di allerta.
 - **Recuperabilità:** i post cancellati dal canale non sono ripristinabili automaticamente; le copie inoltrate rimangono nel gruppo.
 
+### 2026-08-11 — Attacco reale: test end-to-end fallito
+
+- **Ambiente:** Telegram e Railway produzione durante un attacco reale.
+- **Risultato osservato:** nel canale sono passati messaggi di raccolta fondi, ringraziamento e richiesta di supporto; il link `Join Kyiv News →` del cessato allarme riportava al canale invece che al gruppo; `@Nashee_PPO` non ha fornito copertura nei primi minuti.
+- **Cause individuate:** il filtro pubblicità considerava operativo qualsiasi testo contenente parole come `балістика`; `SUMMARY_CHAT_LINK` era configurato con una destinazione errata; ALERT ascoltava una sola sorgente real-time.
+- **Esito:** fallito.
+- **Correzione richiesta:** filtro deterministico per donazioni/pagamenti/auguri, link del gruppo corretto, aggiunta di `@nebo_raketa` e deduplicazione cross-source.
+- **Limite:** l'incidente dimostra i difetti reali; la correzione richiede test di regressione e verifica post-deploy separati.
+
+### 2026-08-11 — Regressione locale dopo l'incidente
+
+- **Ambiente:** checkout locale isolato.
+- **Procedura:** compilazione di `monitor.py` e `tests/test_routing.py`, seguita dalla suite `unittest`.
+- **Casi verificati:** routing casuale su 500 messaggi, copy del ciclo ALERT, filtro dei due testi reali di donazione/ringraziamento, registrazione di `@nebo_raketa` come feed solo ALERT, deduplicazione cross-source e scadenza della finestra dopo 180 secondi.
+- **Risultato osservato:** 6 test eseguiti, 6 superati; nessun errore di sintassi.
+- **Esito:** superato localmente.
+- **Limite:** non dimostra ancora il comportamento del nuovo codice nel worker Railway.
+
+### 2026-08-11 — Verifica reale del link e della seconda sorgente
+
+- **Ambiente:** sessione Telethon del container Railway e Telegram Web di produzione.
+- **Link:** l'href pubblicato da `Join Kyiv News →` è stato risolto tramite Telegram; l'invito corrisponde all'ID `SUMMARY_CHAT_ID` e al gruppo **Kyiv Hourly News 🇺🇦**.
+- **Seconda sorgente:** `@nebo_raketa` è risolvibile dalla sessione di produzione come canale **Київський купол | Графіки**.
+- **Esito:** superato per configurazione e accessibilità.
+- **Limite:** non è stato pubblicato un falso allarme nel canale pubblico; la consegna e la deduplicazione reali richiedono il prossimo ALERT o un ambiente di test dedicato con due sorgenti.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
