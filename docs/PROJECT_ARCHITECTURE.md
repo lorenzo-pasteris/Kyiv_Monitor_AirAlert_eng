@@ -43,6 +43,7 @@ Le destinazioni di produzione sono separate:
 
 - `TARGET_CHAT_ID` identifica il canale pubblico **Kyiv Air Alert**, riservato a inizio allerta, aggiornamenti real-time tradotti, cessato allarme ed eventuali override manuali;
 - `SUMMARY_CHAT_ID` identifica il gruppo collegato **Kyiv Air 🚨 Alert Chat**, destinazione esclusiva dei riepiloghi orari e del recap delle 07:00.
+- `SUMMARY_CHAT_LINK` contiene il link di accesso al gruppo, usato nel messaggio pubblico di cessato allarme.
 
 Gli ID devono essere configurati in Railway e non inseriti nel codice. Poiché il gruppo è collegato al canale tramite la funzione Discussion di Telegram, i post di allerta del canale vengono inoltrati automaticamente anche nel gruppo da Telegram. Il worker non duplica autonomamente le allerte nel gruppo.
 
@@ -69,7 +70,7 @@ Mode: NORMAL (hourly summaries)
 Night pause: 01:00–07:00 EET/EEST
 ```
 
-Il messaggio di cessato allarme `ALL CLEAR — KYIV / Back to NORMAL mode` resta invece nel canale di allerta, perché descrive un reale cambio di stato operativo e non un riavvio tecnico.
+Il messaggio di cessato allarme resta nel canale di allerta perché descrive un reale cambio di stato operativo. Mostra `ALL CLEAR — KYIV` seguito esclusivamente dal link cliccabile `Join Kyiv News →` verso il gruppo; la dicitura `Back to NORMAL mode` non viene pubblicata.
 
 In modalità NORMAL:
 
@@ -141,6 +142,7 @@ TEST_MODE
 TEST_CHAT_ID
 TARGET_CHAT_ID
 SUMMARY_CHAT_ID
+SUMMARY_CHAT_LINK
 OPS_CHAT_ID
 OWNER_CHAT_ID
 TELEGRAM_API_ID
@@ -150,7 +152,7 @@ BOT_TOKEN
 ANTHROPIC_API_KEY
 ```
 
-`TARGET_CHAT_ID` e `SUMMARY_CHAT_ID` sono entrambi obbligatori in produzione e devono essere differenti. `OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. Il canale e il gruppo pubblico non ricevono messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
+`TARGET_CHAT_ID`, `SUMMARY_CHAT_ID` e `SUMMARY_CHAT_LINK` sono obbligatori in produzione; i due ID devono essere differenti. `OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. Il canale e il gruppo pubblico non ricevono messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
 
 ## Protezioni operative
 
