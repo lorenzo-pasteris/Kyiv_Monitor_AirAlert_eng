@@ -170,6 +170,11 @@ ENGAGEMENT_INDICATORS = [
     "з днем", "вітаємо", "вітаю", "найкращі були та будете",
 ]
 SECURITY_KEYWORDS = ["тривога","відбій","балістика","ракета","шахед","шахеди","бпла","вибух","вибухи","ппо","повітряна ціль","укриття","загроза","обстріл","приліт","дрон","дрони","mig","міг","siren","raid","missile","drone","explosion","alert","attack","ballistic","shahed","interception","strike"]
+ALERT_TACTICAL_KEYWORDS = SECURITY_KEYWORDS + [
+    "ціль", "цілі", "рух", "рухається", "рухаються", "курс", "напрям", "летить",
+    "летять", "чисто", "знищено", "знищена", "знищений", "збито", "увага",
+    "target", "heading", "moving", "destroyed", "shot down", "area clear",
+]
 ALERT_START_UA = ["тривога"]
 ALERT_END_UA = ["відбій"]
 
@@ -215,6 +220,10 @@ def is_non_operational_alert_message(text):
         or contains_any(text, DONATION_INDICATORS)
         or contains_any(text, ENGAGEMENT_INDICATORS)
     )
+
+def is_actionable_alert_message(text):
+    """Allow tactical alerts and terse follow-ups; reject unrelated feed posts during ALERT."""
+    return contains_any(text, ALERT_TACTICAL_KEYWORDS)
 
 def is_pure_ad(text):
     if contains_any(text, SECURITY_KEYWORDS):
@@ -976,6 +985,9 @@ async def process_test_source_text(clean):
     if alert_active and is_non_operational_alert_message(clean):
         print(f"[TEST FILTERED NON-OPERATIONAL] {clean[:80]}")
         return
+    if alert_active and not is_actionable_alert_message(clean):
+        print(f"[TEST FILTERED NON-TACTICAL] {clean[:80]}")
+        return
 
     if is_pure_ad(clean):
         print(f"[TEST FILTERED AD] {clean[:80]}")
@@ -1148,6 +1160,9 @@ async def main():
 
             if alert_active and channel in ALERT_FEED_CHANNELS and is_non_operational_alert_message(clean):
                 print(f"[FILTERED NON-OPERATIONAL ALERT] @{channel}: {clean[:80]}")
+                return
+            if alert_active and channel in ALERT_FEED_CHANNELS and not is_actionable_alert_message(clean):
+                print(f"[FILTERED NON-TACTICAL ALERT] @{channel}: {clean[:80]}")
                 return
 
             if is_pure_ad(clean):
