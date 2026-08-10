@@ -4,7 +4,7 @@
 
 La documentazione è parte integrante del progetto. Ogni modifica a codice, architettura, canali, trigger, regole operative, variabili d'ambiente, configurazione Railway/GitHub, ambiente di test o strumenti deve aggiornare nello stesso lavoro i file pertinenti nella cartella `docs/`.
 
-Una modifica non è considerata completa finché la documentazione non descrive fedelmente lo stato distribuito. Prima di ogni commit o deploy verificare sempre se devono essere aggiornati almeno `PROJECT_ARCHITECTURE.md` e `SELF_HEALING_LOOPS.md`.
+Una modifica non è considerata completa finché la documentazione non descrive fedelmente lo stato distribuito. Prima di ogni commit o deploy verificare sempre se devono essere aggiornati almeno `PROJECT_ARCHITECTURE.md` e `SELF_HEALING_LOOPS.md`. Ogni richiesta esplicita di test deve inoltre aggiornare `TEST_LOG.md`, distinguendo chiaramente simulazioni locali e prove end-to-end reali.
 
 ## Scopo
 
@@ -132,6 +132,8 @@ Comandi disponibili:
 I messaggi simulati sono identificati da `[TEST_SOURCE:Nashee_PPO]`. Il marcatore e le etichette interne come `[burst 6/20]` vengono rimossi prima della traduzione. I messaggi prodotti dal bot sono esclusi esplicitamente dalla rielaborazione tramite sender ID e message ID.
 
 Quando `TEST_MODE=false`, i comandi e gli handler di simulazione sono disabilitati e vengono usate esclusivamente le sorgenti reali.
+
+Il registro storico e il protocollo obbligatorio delle verifiche si trovano in `docs/TEST_LOG.md`. Un risultato Telegram non deve essere dichiarato riuscito senza una conferma reale della consegna oppure un limite esplicitamente documentato.
 
 ## Variabili d'ambiente
 
