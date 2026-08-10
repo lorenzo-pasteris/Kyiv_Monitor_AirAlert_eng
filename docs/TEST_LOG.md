@@ -104,8 +104,8 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 ### 2026-08-11 — Verifica post-deploy della correzione ALERT
 
 - **Ambiente:** Railway produzione.
-- **Commit applicativo:** `43cea5090199a3b84f107b13ff6e2c4f0a473b6d`.
-- **Deployment:** `53f5d871-50dc-492a-a1c4-f05cf05af78a` attivo con esito riuscito.
+- **Commit applicativo finale:** `f046822daf7afc6a2485e593911b0ae2a1c86589`.
+- **Deployment finale:** `7189fdf4-8b70-4b30-9436-50f086fefcac` attivo con esito riuscito.
 - **Log osservati:** database statistiche pronto; stato Telegram ricostruito `CLEAR`; sorgenti NORMAL `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping`, `Nashee_PPO`; feed ALERT `Nashee_PPO`, `nebo_raketa`; pianificazione oraria attiva in `Europe/Kyiv`.
 - **Esito:** superato per build, avvio, risoluzione delle sorgenti e stabilità iniziale del worker.
 - **Limite:** il filtro e la deduplicazione non sono stati provocati con messaggi falsi nel canale pubblico; la loro prova end-to-end definitiva avverrà al prossimo evento reale oppure in un test isolato a due sorgenti.
