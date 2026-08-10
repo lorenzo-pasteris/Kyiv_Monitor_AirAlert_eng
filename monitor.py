@@ -2,7 +2,7 @@
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
 - Normal mode: hourly analysis of 4 channels published in the linked group
-- Alert mode (24/7): only @Nashee_PPO in real-time in the alert-only channel
+- Alert mode (24/7): @Nashee_PPO + @nebo_raketa with cross-source deduplication
 - Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -14,7 +14,9 @@ import re
 import sqlite3
 import time
 import httpx
+from collections import deque
 from datetime import datetime
+from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
@@ -37,6 +39,8 @@ if not TEST_MODE and not SUMMARY_CHAT_ID:
     raise RuntimeError("SUMMARY_CHAT_ID is required when TEST_MODE=false")
 if not TEST_MODE and not SUMMARY_CHAT_LINK:
     raise RuntimeError("SUMMARY_CHAT_LINK is required when TEST_MODE=false")
+if not TEST_MODE and "t.me/kyivairalert" in SUMMARY_CHAT_LINK.lower():
+    raise RuntimeError("SUMMARY_CHAT_LINK must point to the news group, not the alert channel")
 if not TEST_MODE and SUMMARY_CHAT_ID == ALERT_CHANNEL_ID:
     raise RuntimeError("SUMMARY_CHAT_ID must differ from TARGET_CHAT_ID")
 ALERT_OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else ALERT_CHANNEL_ID
@@ -47,9 +51,11 @@ OPS_CHAT_ID = os.environ.get("OPS_CHAT_ID", OWNER_CHAT_ID)  # operational alerts
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
 MONITOR_CHANNEL = "Nashee_PPO"
+SECONDARY_ALERT_CHANNEL = "nebo_raketa"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
+ALERT_FEED_CHANNELS = [MONITOR_CHANNEL, SECONDARY_ALERT_CHANNEL]
 
 SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in production
 HEALTH_CHECK_INTERVAL = 43200  # 12 hours
@@ -154,6 +160,15 @@ KYIV_CITY_KEYWORDS = ["kyiv","kiev","київ","киев","києві","києв
 MIDDLE_EAST_KEYWORDS = ["israel","iran","gaza","palestine","lebanon","hamas","hezbollah","yemen","houthi","idf","tehran","jerusalem","beirut","middle east","west bank"]
 MILITARY_KEYWORDS = ["troop","movement","concentration","deployment","preparation","offensive","attack","shelling","drone","missile","launch","russian","belarus","border","military","convoy","equipment","tank","armored","artillery","mlrs","iskander","kinzhal","calibr","oniks","zircon","bomb","glide","fab","umpb","lancet","orlan","zala","reconnaissance","satellite","fortification","trenches","dragon teeth","digging","barracks","railway","ukraine","ukrainian"]
 AD_INDICATORS = ["#реклама","реклама","знижк","розпродаж","промокод","купуй","придбай","акція","магазин","замовляй","доставка"]
+DONATION_INDICATORS = [
+    "донат", "донатів", "підтримати", "підтримайте", "підтримку", "підтримкою",
+    "кавою", "на каву", "mono", "моно", "monobank", "приват", "privat",
+    "банка", "банку", "збір", "збору", "картка", "карта", "реквізит",
+]
+ENGAGEMENT_INDICATORS = [
+    "щиро вдяч", "дуже вдяч", "дякуємо кожному", "ви найкращі", "тримаємось",
+    "з днем", "вітаємо", "вітаю", "найкращі були та будете",
+]
 SECURITY_KEYWORDS = ["тривога","відбій","балістика","ракета","шахед","шахеди","бпла","вибух","вибухи","ппо","повітряна ціль","укриття","загроза","обстріл","приліт","дрон","дрони","mig","міг","siren","raid","missile","drone","explosion","alert","attack","ballistic","shahed","interception","strike"]
 ALERT_START_UA = ["тривога"]
 ALERT_END_UA = ["відбій"]
@@ -178,6 +193,8 @@ translation_slots = None
 summary_lock = None
 bot_output_message_ids = set()
 simulator_processed_message_ids = set()
+recent_alert_messages = deque()
+ALERT_DEDUP_WINDOW = 180
 TEST_SOURCE_PREFIX = "[TEST_SOURCE:Nashee_PPO]"
 TEST_SAMPLE_MESSAGES = [
     "⚠️ Київщина: зафіксовано рух ударних БпЛА Shahed drone у напрямку Києва.",
@@ -189,10 +206,58 @@ TEST_SAMPLE_MESSAGES = [
 def contains_any(text, keywords):
     return any(k.lower() in text.lower() for k in keywords)
 
+def is_non_operational_alert_message(text):
+    """Reject fundraising, payment details, thanks and greeting posts even if they mention attacks."""
+    compact_digits = re.sub(r"[\s-]", "", text)
+    has_payment_number = bool(re.search(r"(?<!\d)\d{13,19}(?!\d)", compact_digits))
+    return (
+        has_payment_number
+        or contains_any(text, DONATION_INDICATORS)
+        or contains_any(text, ENGAGEMENT_INDICATORS)
+    )
+
 def is_pure_ad(text):
+    if is_non_operational_alert_message(text):
+        return True
     if contains_any(text, SECURITY_KEYWORDS):
         return False
     return contains_any(text, AD_INDICATORS)
+
+def normalize_alert_for_dedup(text):
+    """Normalize formatting noise while retaining locations, targets and quantities."""
+    normalized = clean_text(text).lower()
+    normalized = re.sub(r"https?://\S+|t\.me/\S+|@\w+", " ", normalized)
+    normalized = re.sub(r"[^\w\s]", " ", normalized, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+def should_publish_alert(text, source, now=None):
+    """First arrival wins; suppress only near-identical reports seen in the last three minutes."""
+    timestamp = time.monotonic() if now is None else now
+    normalized = normalize_alert_for_dedup(text)
+    if not normalized:
+        return False
+
+    while recent_alert_messages and timestamp - recent_alert_messages[0][0] > ALERT_DEDUP_WINDOW:
+        recent_alert_messages.popleft()
+
+    tokens = set(normalized.split())
+    for _, previous_source, previous_text, previous_tokens in recent_alert_messages:
+        if normalized == previous_text:
+            print(f"[ALERT DUPLICATE] @{source} matches @{previous_source}: {normalized[:100]}")
+            return False
+        union = tokens | previous_tokens
+        jaccard = len(tokens & previous_tokens) / len(union) if union else 0.0
+        similarity = SequenceMatcher(None, normalized, previous_text).ratio()
+        enough_context = min(len(tokens), len(previous_tokens)) >= 4
+        if enough_context and ((similarity >= 0.86 and jaccard >= 0.62) or jaccard >= 0.82):
+            print(
+                f"[ALERT DUPLICATE] @{source} near @{previous_source} "
+                f"similarity={similarity:.2f} jaccard={jaccard:.2f}: {normalized[:100]}"
+            )
+            return False
+
+    recent_alert_messages.append((timestamp, source, normalized, tokens))
+    return True
 
 def clean_text(text):
     text = re.sub(r'^\s*#\w+\s*', '', text)
@@ -276,6 +341,7 @@ async def reconcile_alert_state(source):
     alert_active = desired
     if desired:
         alert_started_at = time.monotonic()
+        recent_alert_messages.clear()
         for channel_name in ALL_CONTENT_CHANNELS:
             buffers[channel_name].clear()
         await send_to_alert_channel(ALERT_START_MESSAGE)
@@ -874,8 +940,9 @@ async def health_loop():
 
 
 
-async def handle_alert_message(clean):
+async def handle_alert_message(clean, source=MONITOR_CHANNEL):
     """Deliver low-latency alerts; TEST_MODE uses one Bot API write to avoid group flood limits."""
+    print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     if TEST_MODE:
         translation = await translate_message(clean[:1500])
         if translation:
@@ -913,7 +980,8 @@ async def process_test_source_text(clean):
         return
 
     if alert_active:
-        asyncio.create_task(handle_alert_message(clean))
+        if should_publish_alert(clean, "test"):
+            asyncio.create_task(handle_alert_message(clean, source="test"))
         return
 
     time_str = datetime.now(TZ).strftime("%H:%M")
@@ -1012,7 +1080,9 @@ async def main():
     else:
         source_entities = {}
         channel_by_chat_id = {}
-        production_channels = ALL_CONTENT_CHANNELS + [BACKUP_TRIGGER_CHANNEL]
+        production_channels = list(dict.fromkeys(
+            ALL_CONTENT_CHANNELS + ALERT_FEED_CHANNELS + [BACKUP_TRIGGER_CHANNEL]
+        ))
         for channel_name in production_channels:
             entity = await client.get_entity(channel_name)
             source_entities[channel_name] = entity
@@ -1029,7 +1099,7 @@ async def main():
 
         print(
             f"✅ Connected in production. Alert trigger: @{BACKUP_TRIGGER_CHANNEL}; "
-            f"content sources: {ALL_CONTENT_CHANNELS}"
+            f"content sources: {ALL_CONTENT_CHANNELS}; alert feeds: {ALERT_FEED_CHANNELS}"
         )
         await send_to_owner(
             "🟢 <b>Kyiv Normal Monitor started</b>\n"
@@ -1043,6 +1113,7 @@ async def main():
             text = (event.message.text or "").strip().lower()
             if text == "/alert":
                 alert_active = True
+                recent_alert_messages.clear()
                 for channel_name in ALL_CONTENT_CHANNELS:
                     buffers[channel_name].clear()
                 await send_to_alert_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
@@ -1078,8 +1149,11 @@ async def main():
                 return
 
             if alert_active:
-                if channel == MONITOR_CHANNEL:
-                    asyncio.create_task(handle_alert_message(clean))
+                if channel in ALERT_FEED_CHANNELS and should_publish_alert(clean, channel):
+                    asyncio.create_task(handle_alert_message(clean, source=channel))
+                return
+
+            if channel == SECONDARY_ALERT_CHANNEL:
                 return
 
             time_str = datetime.now(TZ).strftime("%H:%M")
