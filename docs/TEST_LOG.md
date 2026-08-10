@@ -62,7 +62,7 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Procedura:** invio di un messaggio casuale direttamente con le stesse variabili e credenziali del worker.
 - **Codice casuale:** `378948`.
 - **Risposta Telegram:** HTTP `200`, `ok=true`, message ID `3`.
-- **Verifica visiva:** messaggio presente in **Kyiv Air 🚨 Alert Chat** e assente dal canale delle allerte.
+- **Verifica visiva:** messaggio presente nel gruppo oggi chiamato **Kyiv Hourly News 🇺🇦** (all'epoca **Kyiv Air 🚨 Alert Chat**) e assente dal canale delle allerte.
 - **Risultato:** superato end-to-end per la capacità del bot di pubblicare nel gruppo corretto.
 
 ### 2026-08-10 — Migrazione manuale dello storico NORMAL
