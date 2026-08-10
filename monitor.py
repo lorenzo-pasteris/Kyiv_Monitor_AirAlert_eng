@@ -217,8 +217,6 @@ def is_non_operational_alert_message(text):
     )
 
 def is_pure_ad(text):
-    if is_non_operational_alert_message(text):
-        return True
     if contains_any(text, SECURITY_KEYWORDS):
         return False
     return contains_any(text, AD_INDICATORS)
@@ -975,6 +973,10 @@ async def process_test_source_text(clean):
         return
     last_message_time = time.time()
 
+    if alert_active and is_non_operational_alert_message(clean):
+        print(f"[TEST FILTERED NON-OPERATIONAL] {clean[:80]}")
+        return
+
     if is_pure_ad(clean):
         print(f"[TEST FILTERED AD] {clean[:80]}")
         return
@@ -1142,6 +1144,10 @@ async def main():
                     telegram_alert_state = state
                     print(f"Telegram trigger update: {'ACTIVE' if state else 'CLEAR'}")
                     await reconcile_alert_state(f"@{BACKUP_TRIGGER_CHANNEL}")
+                return
+
+            if alert_active and channel in ALERT_FEED_CHANNELS and is_non_operational_alert_message(clean):
+                print(f"[FILTERED NON-OPERATIONAL ALERT] @{channel}: {clean[:80]}")
                 return
 
             if is_pure_ad(clean):
