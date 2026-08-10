@@ -93,7 +93,8 @@ Verificare:
 - errori `429` e rispetto di `retry_after`;
 - tempo tra messaggio sorgente e output;
 - presenza di etichette interne come `[TEST_SOURCE:...]` o `[burst N/M]`;
-- duplicati e loop generati dal bot.
+- richieste di donazioni, numeri di carte, ringraziamenti o auguri pubblicati per errore;
+- duplicati tra `@Nashee_PPO` e `@nebo_raketa` e loop generati dal bot.
 
 Soglie suggerite:
 
@@ -171,6 +172,8 @@ Test minimi:
 - testo minimale di inizio allerta e cessato allarme con link al gruppo;
 - rimozione delle etichette `[TEST_SOURCE:...]` e `[burst N/M]`;
 - deduplicazione degli output;
+- filtro di donazioni, dettagli di pagamento, ringraziamenti e auguri anche quando il testo contiene parole di sicurezza;
+- deduplicazione cross-source entro tre minuti senza eliminare aggiornamenti con località, quantità o direzioni nuove;
 - filtri e riepiloghi numerici di `@Nashee_PPO`;
 - sintassi Python e avvio del worker.
 
