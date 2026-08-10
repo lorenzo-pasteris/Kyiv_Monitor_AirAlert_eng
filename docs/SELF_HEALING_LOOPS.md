@@ -89,6 +89,7 @@ Verificare:
 
 - esito delle chiamate `sendMessage` ed `editMessageText`;
 - rispetto della separazione delle destinazioni: ciclo ALERT verso `TARGET_CHAT_ID`, riepiloghi NORMAL verso `SUMMARY_CHAT_ID` e notifiche tecniche verso `OPS_CHAT_ID`;
+- validità di `SUMMARY_CHAT_LINK` e presenza del link `Join Kyiv News →` nel cessato allarme;
 - errori `429` e rispetto di `retry_after`;
 - tempo tra messaggio sorgente e output;
 - presenza di etichette interne come `[TEST_SOURCE:...]` o `[burst N/M]`;
@@ -165,6 +166,7 @@ Test minimi:
 - isolamento totale di `TEST_MODE`;
 - routing separato di allerte, riepiloghi e notifiche Ops;
 - assenza di riepiloghi nel canale `TARGET_CHAT_ID`;
+- testo minimale di inizio allerta e cessato allarme con link al gruppo;
 - rimozione delle etichette `[TEST_SOURCE:...]` e `[burst N/M]`;
 - deduplicazione degli output;
 - filtri e riepiloghi numerici di `@Nashee_PPO`;
