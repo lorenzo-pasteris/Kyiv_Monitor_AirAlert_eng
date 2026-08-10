@@ -8,10 +8,10 @@ Una modifica non è considerata completa finché la documentazione non descrive 
 
 ## Scopo
 
-Kyiv Monitor pubblica informazioni in inglese nel gruppo Telegram di produzione dedicato a Kyiv. Il sistema ha due modalità operative:
+Kyiv Monitor pubblica informazioni in inglese in due destinazioni Telegram collegate ma con ruoli separati: il canale pubblico è riservato alle allerte, mentre il gruppo di discussione riceve i riepiloghi informativi. Il sistema ha due modalità operative:
 
-- **NORMAL**: raccoglie i messaggi e pubblica riepiloghi orari.
-- **ALERT**: inoltra rapidamente, traducendoli, i messaggi di monitoraggio relativi all'allerta in corso.
+- **NORMAL**: mantiene silenzioso il canale, raccoglie i messaggi e pubblica riepiloghi orari nel gruppo collegato.
+- **ALERT**: sospende i riepiloghi e inoltra rapidamente nel canale, traducendoli, i messaggi di monitoraggio relativi all'allerta in corso.
 
 Il servizio è eseguito come worker Python su Railway e il codice è conservato su GitHub.
 
@@ -19,7 +19,7 @@ Il servizio è eseguito come worker Python su Railway e il codice è conservato 
 
 - **Railway**: esecuzione continua, configurazione tramite variabili d'ambiente e log.
 - **Telethon**: lettura dei canali e dei gruppi Telegram.
-- **Telegram Bot API**: pubblicazione dei messaggi nel gruppo di destinazione.
+- **Telegram Bot API**: pubblicazione delle allerte nel canale e dei riepiloghi nel gruppo collegato.
 - **`@kyiv_airraid_alert`**: unica sorgente dello stato di allerta per Kyiv città.
 - **Anthropic API**: traduzione e produzione dei riepiloghi.
 - **GitHub**: versionamento e origine dei deployment Railway.
@@ -33,12 +33,18 @@ Railway usa esclusivamente Watch Paths positivi per i file eseguibili: `/monitor
 Le sorgenti di contenuto sono:
 
 - `@kievinfo_kyiv`: informazioni concrete sulla vita e sulle infrastrutture di Kyiv.
+- `@shv_ukr`: sviluppi politici, economici, diplomatici e nazionali ucraini.
 - `@AMK_Mapping`: sviluppi militari rilevanti per la guerra in Ucraina.
 - `@Nashee_PPO`: monitoraggio della difesa aerea, messaggi in tempo reale e recap numerici degli attacchi.
 
 `@monitorwarr` è stato rimosso completamente e non deve essere registrato o letto.
 
-Il gruppo Telegram di produzione è configurato tramite `TARGET_CHAT_ID`. L'ID non deve essere inserito nel codice.
+Le destinazioni di produzione sono separate:
+
+- `TARGET_CHAT_ID` identifica il canale pubblico **Kyiv Air Alert**, riservato a inizio allerta, aggiornamenti real-time tradotti, cessato allarme ed eventuali override manuali;
+- `SUMMARY_CHAT_ID` identifica il gruppo collegato **Kyiv Air 🚨 Alert Chat**, destinazione esclusiva dei riepiloghi orari e del recap delle 07:00.
+
+Gli ID devono essere configurati in Railway e non inseriti nel codice. Poiché il gruppo è collegato al canale tramite la funzione Discussion di Telegram, i post di allerta del canale vengono inoltrati automaticamente anche nel gruppo da Telegram. Il worker non duplica autonomamente le allerte nel gruppo.
 
 ### Trigger dell'allerta
 
@@ -63,17 +69,18 @@ Mode: NORMAL (hourly summaries)
 Night pause: 01:00–07:00 EET/EEST
 ```
 
-Il messaggio di cessato allarme `ALL CLEAR — KYIV / Back to NORMAL mode` resta invece nella chat di produzione, perché descrive un reale cambio di stato operativo e non un riavvio tecnico.
+Il messaggio di cessato allarme `ALL CLEAR — KYIV / Back to NORMAL mode` resta invece nel canale di allerta, perché descrive un reale cambio di stato operativo e non un riavvio tecnico.
 
 In modalità NORMAL:
 
 - i messaggi delle quattro sorgenti di contenuto vengono filtrati e conservati in memoria;
-- ogni ora viene generato un riepilogo in inglese;
-- se nessuna categoria contiene aggiornamenti rilevanti, la chat di produzione resta silenziosa ma `OPS_CHAT_ID` riceve un heartbeat “No relevant updates” con ora e fuso; il ciclo viene registrato come completato e non attiva il watchdog;
+- ogni ora viene generato un riepilogo in inglese e inviato esclusivamente a `SUMMARY_CHAT_ID`;
+- il canale configurato tramite `TARGET_CHAT_ID` resta silenzioso in NORMAL;
+- se nessuna categoria contiene aggiornamenti rilevanti, anche il gruppo dei riepiloghi resta silenzioso ma `OPS_CHAT_ID` riceve un heartbeat “No relevant updates” con ora e fuso; il ciclo viene registrato come completato e non attiva il watchdog;
 - in produzione il ciclo è allineato all'ora esatta di `Europe/Kyiv` (00 minuti), indipendentemente dall'orario dell'ultimo riavvio;
 - i contenuti non pertinenti e la pubblicità vengono esclususi;
-- tra le 01:00 e le 06:00, fuso Europe/Kyiv, i riepiloghi orari sono sospesi;
-- al termine della pausa notturna viene prodotto un recap complessivo.
+- tra le 01:00 e le 07:00, fuso Europe/Kyiv, i riepiloghi orari sono sospesi;
+- al termine della pausa notturna viene prodotto nel gruppo un recap complessivo.
 
 ### Regole per `@Nashee_PPO`
 
@@ -92,13 +99,14 @@ I numeri devono essere conservati separatamente. Il modello non deve inventare, 
 Quando lo stato effettivo diventa ALERT:
 
 - i buffer dei riepiloghi vengono svuotati;
-- viene pubblicato un unico messaggio di inizio allerta;
+- i riepiloghi verso `SUMMARY_CHAT_ID` vengono sospesi;
+- nel canale `TARGET_CHAT_ID` viene pubblicato un unico messaggio di inizio allerta;
 - vengono ignorati i contenuti di `@kievinfo_kyiv` e `@AMK_Mapping`;
 - vengono elaborati esclusivamente i nuovi messaggi reali di `@Nashee_PPO`;
-- ciascun messaggio viene tradotto in inglese e pubblicato dopo pochi secondi;
+- ciascun messaggio viene tradotto in inglese e pubblicato nel canale dopo pochi secondi;
 - pubblicità e contenuti non pertinenti vengono filtrati.
 
-Quando lo stato effettivo torna CLEAR, il sistema pubblica il cessato allarme e ritorna in NORMAL.
+Quando lo stato effettivo torna CLEAR, il sistema pubblica il cessato allarme nel canale e ritorna in NORMAL. I riepiloghi nel gruppo riprendono alla successiva esecuzione pianificata. Telegram inoltra automaticamente nel gruppo collegato i post pubblicati nel canale durante ALERT.
 
 ## Ambiente di test
 
@@ -109,7 +117,7 @@ Quando `TEST_MODE=true`:
 - viene usato esclusivamente `TEST_CHAT_ID` come sorgente e destinazione;
 - nessun handler viene registrato sui canali Telegram reali;
 - non viene letta l'API UkraineAlarm;
-- non viene inviato nulla al gruppo di produzione;
+- non viene inviato nulla né al canale di produzione né al gruppo collegato;
 - i riepiloghi vengono eseguiti ogni 3 minuti invece che ogni ora.
 
 Comandi disponibili:
@@ -132,6 +140,7 @@ Le credenziali non devono essere inserite nel repository. Railway deve contenere
 TEST_MODE
 TEST_CHAT_ID
 TARGET_CHAT_ID
+SUMMARY_CHAT_ID
 OPS_CHAT_ID
 OWNER_CHAT_ID
 TELEGRAM_API_ID
@@ -141,7 +150,7 @@ BOT_TOKEN
 ANTHROPIC_API_KEY
 ```
 
-`OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. La chat di produzione non riceve messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
+`TARGET_CHAT_ID` e `SUMMARY_CHAT_ID` sono entrambi obbligatori in produzione e devono essere differenti. `OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. Il canale e il gruppo pubblico non ricevono messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
 
 ## Protezioni operative
 
@@ -162,10 +171,11 @@ ANTHROPIC_API_KEY
 
 1. Verificare che Railway mostri un solo deployment attivo.
 2. Verificare che il log indichi `TEST_MODE` o produzione in modo coerente.
-3. In produzione, controllare che le sorgenti di contenuto siano soltanto `kievinfo_kyiv`, `AMK_Mapping` e `Nashee_PPO`.
+3. In produzione, controllare che le sorgenti di contenuto siano soltanto `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping` e `Nashee_PPO`.
 4. Controllare che `@kyiv_airraid_alert` sia registrato come trigger e non come contenuto.
-5. Verificare il messaggio di avvio nel gruppo corretto.
-6. Eseguire test funzionali esclusivamente nel gruppo di test.
+5. Verificare che il messaggio tecnico di avvio arrivi soltanto a Ops.
+6. Verificare che le allerte vadano a `TARGET_CHAT_ID` e i riepiloghi a `SUMMARY_CHAT_ID`.
+7. Eseguire test funzionali esclusivamente nel gruppo di test.
 
 ## Aggiornamento operativo: riepiloghi e sorgenti
 
