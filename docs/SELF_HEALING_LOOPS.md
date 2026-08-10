@@ -42,7 +42,7 @@ Railway riavvia automaticamente il worker. Dopo l'avvio devono essere controllat
 - connessione Telegram;
 - registrazione delle sorgenti corrette;
 - stato del trigger `@kyiv_airraid_alert`;
-- capacità di pubblicare nel gruppo previsto.
+- capacità di pubblicare le allerte nel canale `TARGET_CHAT_ID` e i riepiloghi nel gruppo `SUMMARY_CHAT_ID`.
 
 Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e generare un avviso, evitando un restart loop infinito.
 
@@ -88,6 +88,7 @@ Controlli automatici:
 Verificare:
 
 - esito delle chiamate `sendMessage` ed `editMessageText`;
+- rispetto della separazione delle destinazioni: ciclo ALERT verso `TARGET_CHAT_ID`, riepiloghi NORMAL verso `SUMMARY_CHAT_ID` e notifiche tecniche verso `OPS_CHAT_ID`;
 - errori `429` e rispetto di `retry_after`;
 - tempo tra messaggio sorgente e output;
 - presenza di etichette interne come `[TEST_SOURCE:...]` o `[burst N/M]`;
@@ -104,6 +105,8 @@ Soglie suggerite:
 Controllare che:
 
 - in NORMAL venga eseguito un riepilogo ogni ora;
+- i riepiloghi vengano pubblicati esclusivamente nel gruppo `SUMMARY_CHAT_ID` e mai nel canale `TARGET_CHAT_ID`;
+- il canale `TARGET_CHAT_ID` resti silenzioso in NORMAL;
 - in TEST il ciclo sia di 3 minuti;
 - durante ALERT non vengano pubblicati riepiloghi;
 - la pausa notturna venga rispettata;
@@ -116,11 +119,11 @@ Controllare che:
 - `refusal`, errori 400 e schema invalido non vengano riprovati identici;
 - dopo gli errori venga pubblicato un fallback con soli estratti originali e avviso di sintesi AI non disponibile;
 - i buffer vengano cancellati soltanto dopo conferma dell'invio Telegram;
-- un ciclo senza aggiornamenti rilevanti mantenga silenziosa la produzione, invii un heartbeat con ora a `OPS_CHAT_ID`, sia registrato come completato e non attivi falsamente il watchdog;
+- un ciclo senza aggiornamenti rilevanti mantenga silenziosi sia il canale sia il gruppo dei riepiloghi, invii un heartbeat con ora a `OPS_CHAT_ID`, sia registrato come completato e non attivi falsamente il watchdog;
 - il watchdog riprovi a 62, 65, 67 e 70 minuti dall'ultimo ciclo completato o riepilogo confermato;
 - un'eccezione non arresti definitivamente il loop dei riepiloghi;
 - le anomalie operative vengano inviate a `OPS_CHAT_ID`, con fallback a `OWNER_CHAT_ID`, mentre i dettagli ordinari restano nei log Railway.
-- ogni avvio o riavvio tecnico del worker venga notificato a `OPS_CHAT_ID`; il messaggio di cessato allarme e ritorno a NORMAL resti nella chat di produzione.
+- ogni avvio o riavvio tecnico del worker venga notificato a `OPS_CHAT_ID`; il messaggio di cessato allarme e ritorno a NORMAL resti nel canale di allerta.
 
 Miglioria consigliata: spostare i buffer da memoria a un archivio persistente, per esempio Redis o PostgreSQL, così un riavvio non perde il materiale del riepilogo.
 
@@ -160,6 +163,8 @@ Test minimi:
 - Structured Outputs, retry differenziati per errore, backoff/`Retry-After` e fallback di soli estratti originali;
 - watchdog a 62/65/67/70 minuti e conservazione del buffer su errore di invio;
 - isolamento totale di `TEST_MODE`;
+- routing separato di allerte, riepiloghi e notifiche Ops;
+- assenza di riepiloghi nel canale `TARGET_CHAT_ID`;
 - rimozione delle etichette `[TEST_SOURCE:...]` e `[burst N/M]`;
 - deduplicazione degli output;
 - filtri e riepiloghi numerici di `@Nashee_PPO`;
@@ -220,4 +225,3 @@ Richiedere approvazione umana per modifiche che riguardano:
 5. Pipeline staging → test → produzione.
 6. Agente AI che apre pull request.
 7. Solo dopo sufficiente esperienza, automazione di correzioni a basso rischio.
-
