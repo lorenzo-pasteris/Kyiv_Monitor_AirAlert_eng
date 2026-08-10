@@ -103,11 +103,15 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "підтримку за нашу роботу."
         )
         operational = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва."
+        unrelated = "Оновлений графік відключень електроенергії на завтра."
+        terse_follow_up = "Київщина чисто."
 
         self.assertTrue(monitor.is_non_operational_alert_message(donation))
         self.assertTrue(monitor.is_non_operational_alert_message(thanks))
         self.assertFalse(monitor.is_non_operational_alert_message(operational))
         self.assertFalse(monitor.is_pure_ad(donation))  # security words no longer bypass the ALERT-only filter
+        self.assertFalse(monitor.is_actionable_alert_message(unrelated))
+        self.assertTrue(monitor.is_actionable_alert_message(terse_follow_up))
 
     async def test_second_alert_feed_is_alert_only(self):
         self.assertIn("Nashee_PPO", monitor.ALERT_FEED_CHANNELS)
