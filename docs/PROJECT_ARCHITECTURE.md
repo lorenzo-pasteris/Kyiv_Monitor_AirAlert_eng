@@ -42,7 +42,7 @@ Le sorgenti di contenuto sono:
 Le destinazioni di produzione sono separate:
 
 - `TARGET_CHAT_ID` identifica il canale pubblico **Kyiv Air Alert**, riservato a inizio allerta, aggiornamenti real-time tradotti, cessato allarme ed eventuali override manuali;
-- `SUMMARY_CHAT_ID` identifica il gruppo collegato **Kyiv Air 🚨 Alert Chat**, destinazione esclusiva dei riepiloghi orari e del recap delle 07:00.
+- `SUMMARY_CHAT_ID` identifica il gruppo collegato **Kyiv Hourly News 🇺🇦**, destinazione esclusiva dei riepiloghi orari e del recap delle 07:00.
 - `SUMMARY_CHAT_LINK` contiene il link di accesso al gruppo, usato nel messaggio pubblico di cessato allarme.
 
 Gli ID devono essere configurati in Railway e non inseriti nel codice. Poiché il gruppo è collegato al canale tramite la funzione Discussion di Telegram, i post di allerta del canale vengono inoltrati automaticamente anche nel gruppo da Telegram. Il worker non duplica autonomamente le allerte nel gruppo.
