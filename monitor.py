@@ -29,11 +29,14 @@ BOT_USER_ID = int(BOT_TOKEN.split(":", 1)[0])
 TEST_MODE = os.environ.get("TEST_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
 ALERT_CHANNEL_ID = os.environ["TARGET_CHAT_ID"]
 SUMMARY_CHAT_ID = os.environ.get("SUMMARY_CHAT_ID")
+SUMMARY_CHAT_LINK = os.environ.get("SUMMARY_CHAT_LINK")
 TEST_CHAT_ID = os.environ.get("TEST_CHAT_ID")
 if TEST_MODE and not TEST_CHAT_ID:
     raise RuntimeError("TEST_CHAT_ID is required when TEST_MODE=true")
 if not TEST_MODE and not SUMMARY_CHAT_ID:
     raise RuntimeError("SUMMARY_CHAT_ID is required when TEST_MODE=false")
+if not TEST_MODE and not SUMMARY_CHAT_LINK:
+    raise RuntimeError("SUMMARY_CHAT_LINK is required when TEST_MODE=false")
 if not TEST_MODE and SUMMARY_CHAT_ID == ALERT_CHANNEL_ID:
     raise RuntimeError("SUMMARY_CHAT_ID must differ from TARGET_CHAT_ID")
 ALERT_OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else ALERT_CHANNEL_ID
@@ -58,6 +61,17 @@ NIGHT_START = 1   # 01:00 EET/EEST
 NIGHT_END = 7     # 07:00 EET/EEST
 
 MODEL = "claude-haiku-4-5"
+
+ALERT_START_MESSAGE = "🚨 <b>AIR ALERT — KYIV</b>"
+
+
+def build_all_clear_message():
+    """Return the public all-clear message with a safe link to the news group."""
+    safe_link = html.escape(SUMMARY_CHAT_LINK or "", quote=True)
+    return (
+        "✅ <b>ALL CLEAR — KYIV</b>\n\n"
+        f'<a href="{safe_link}">Join Kyiv News →</a>'
+    )
 
 # --- Cross-source categories (normal mode) ---
 # A source is only provenance. Every buffered message is evaluated against every category.
@@ -264,11 +278,11 @@ async def reconcile_alert_state(source):
         alert_started_at = time.monotonic()
         for channel_name in ALL_CONTENT_CHANNELS:
             buffers[channel_name].clear()
-        await send_to_alert_channel("🚨 <b>AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME mode")
+        await send_to_alert_channel(ALERT_START_MESSAGE)
         print(f"🚨 Effective alert state started via {source}")
     else:
         alert_started_at = None
-        await send_to_alert_channel("✅ <b>ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL mode")
+        await send_to_alert_channel(build_all_clear_message())
         print(f"✅ Effective alert state ended via {source}")
 
 
