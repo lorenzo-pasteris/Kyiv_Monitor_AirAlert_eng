@@ -88,7 +88,7 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 
 - **Ambiente:** checkout locale isolato.
 - **Procedura:** compilazione di `monitor.py` e `tests/test_routing.py`, seguita dalla suite `unittest`.
-- **Casi verificati:** routing casuale su 500 messaggi, copy del ciclo ALERT, filtro dei due testi reali di donazione/ringraziamento, registrazione di `@nebo_raketa` come feed solo ALERT, deduplicazione cross-source e scadenza della finestra dopo 180 secondi.
+- **Casi verificati:** routing casuale su 500 messaggi, copy del ciclo ALERT, filtro dei due testi reali di donazione/ringraziamento, esclusione dei post non tattici, accettazione dei follow-up brevi come `Київщина чисто`, registrazione di `@nebo_raketa` come feed solo ALERT, deduplicazione cross-source e scadenza della finestra dopo 180 secondi.
 - **Risultato osservato:** 6 test eseguiti, 6 superati; nessun errore di sintassi.
 - **Esito:** superato localmente.
 - **Limite:** non dimostra ancora il comportamento del nuovo codice nel worker Railway.
@@ -104,8 +104,8 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 ### 2026-08-11 — Verifica post-deploy della correzione ALERT
 
 - **Ambiente:** Railway produzione.
-- **Commit applicativo finale:** `f046822daf7afc6a2485e593911b0ae2a1c86589`.
-- **Deployment finale:** `7189fdf4-8b70-4b30-9436-50f086fefcac` attivo con esito riuscito.
+- **Commit applicativo finale:** `184164492a848ed4e7177ae52fe87f5713023bee`.
+- **Deployment finale:** `2d20c537-83df-4d8d-a0b8-2d38b0a7f528` attivo con esito riuscito.
 - **Log osservati:** database statistiche pronto; stato Telegram ricostruito `CLEAR`; sorgenti NORMAL `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping`, `Nashee_PPO`; feed ALERT `Nashee_PPO`, `nebo_raketa`; pianificazione oraria attiva in `Europe/Kyiv`.
 - **Esito:** superato per build, avvio, risoluzione delle sorgenti e stabilità iniziale del worker.
 - **Limite:** il filtro e la deduplicazione non sono stati provocati con messaggi falsi nel canale pubblico; la loro prova end-to-end definitiva avverrà al prossimo evento reale oppure in un test isolato a due sorgenti.
