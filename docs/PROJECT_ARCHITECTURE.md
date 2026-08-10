@@ -36,6 +36,7 @@ Le sorgenti di contenuto sono:
 - `@shv_ukr`: sviluppi politici, economici, diplomatici e nazionali ucraini.
 - `@AMK_Mapping`: sviluppi militari rilevanti per la guerra in Ucraina.
 - `@Nashee_PPO`: monitoraggio della difesa aerea, messaggi in tempo reale e recap numerici degli attacchi.
+- `@nebo_raketa`: seconda sorgente real-time usata esclusivamente durante ALERT per coprire ritardi o silenzi temporanei di `@Nashee_PPO`.
 
 `@monitorwarr` è stato rimosso completamente e non deve essere registrato o letto.
 
@@ -103,9 +104,10 @@ Quando lo stato effettivo diventa ALERT:
 - i riepiloghi verso `SUMMARY_CHAT_ID` vengono sospesi;
 - nel canale `TARGET_CHAT_ID` viene pubblicato un unico messaggio di inizio allerta;
 - vengono ignorati i contenuti di `@kievinfo_kyiv` e `@AMK_Mapping`;
-- vengono elaborati esclusivamente i nuovi messaggi reali di `@Nashee_PPO`;
+- vengono elaborati i nuovi messaggi reali di `@Nashee_PPO` e `@nebo_raketa`;
+- il primo avviso ricevuto viene pubblicato; per tre minuti i testi identici o fortemente simili dell'altra sorgente vengono soppressi, mentre un aggiornamento con quantità, località o direzione diverse passa;
 - ciascun messaggio viene tradotto in inglese e pubblicato nel canale dopo pochi secondi;
-- pubblicità e contenuti non pertinenti vengono filtrati.
+- richieste di donazioni, numeri di carte, ringraziamenti, auguri, pubblicità e contenuti non operativi vengono filtrati prima della traduzione, anche quando citano un attacco passato.
 
 Quando lo stato effettivo torna CLEAR, il sistema pubblica il cessato allarme nel canale e ritorna in NORMAL. I riepiloghi nel gruppo riprendono alla successiva esecuzione pianificata. Telegram inoltra automaticamente nel gruppo collegato i post pubblicati nel canale durante ALERT.
 
@@ -154,7 +156,7 @@ BOT_TOKEN
 ANTHROPIC_API_KEY
 ```
 
-`TARGET_CHAT_ID`, `SUMMARY_CHAT_ID` e `SUMMARY_CHAT_LINK` sono obbligatori in produzione; i due ID devono essere differenti. `OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. Il canale e il gruppo pubblico non ricevono messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
+`TARGET_CHAT_ID`, `SUMMARY_CHAT_ID` e `SUMMARY_CHAT_LINK` sono obbligatori in produzione; i due ID devono essere differenti e `SUMMARY_CHAT_LINK` deve puntare al gruppo, mai al canale `@kyivairalert`. `OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. Il canale e il gruppo pubblico non ricevono messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
 
 ## Protezioni operative
 
@@ -162,6 +164,7 @@ ANTHROPIC_API_KEY
 - Rispetto automatico di `retry_after` in caso di flood control.
 - Una sola connessione HTTP condivisa.
 - Serializzazione degli invii per evitare raffiche incontrollate.
+- Deduplicazione temporale e testuale tra `@Nashee_PPO` e `@nebo_raketa`, con conservazione degli aggiornamenti che aggiungono fatti nuovi.
 - Deduplicazione dei messaggi simulati e protezione contro i loop del bot.
 
 ## Limiti noti
@@ -175,7 +178,7 @@ ANTHROPIC_API_KEY
 
 1. Verificare che Railway mostri un solo deployment attivo.
 2. Verificare che il log indichi `TEST_MODE` o produzione in modo coerente.
-3. In produzione, controllare che le sorgenti di contenuto siano soltanto `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping` e `Nashee_PPO`.
+3. In produzione, controllare che le sorgenti dei riepiloghi siano `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping` e `Nashee_PPO`, e che i feed ALERT siano `Nashee_PPO` e `nebo_raketa`.
 4. Controllare che `@kyiv_airraid_alert` sia registrato come trigger e non come contenuto.
 5. Verificare che il messaggio tecnico di avvio arrivi soltanto a Ops.
 6. Verificare che le allerte vadano a `TARGET_CHAT_ID` e i riepiloghi a `SUMMARY_CHAT_ID`.
