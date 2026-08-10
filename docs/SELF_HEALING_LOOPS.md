@@ -156,6 +156,8 @@ L'agente non deve:
 
 ## Loop 7 — Test automatici prima del deploy
 
+Ogni esecuzione richiesta dal proprietario deve essere registrata in `docs/TEST_LOG.md` con ambiente, procedura, risultato osservato e limiti. I test locali e le prove end-to-end Telegram/Railway non sono equivalenti e devono essere indicati separatamente.
+
 Test minimi:
 
 - parsing di alert e cessato allarme Telegram;
