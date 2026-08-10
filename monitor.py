@@ -1,8 +1,8 @@
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
-- Normal mode: hourly analysis of 4 channels with per-channel filters
-- Alert mode (24/7): only @Nashee_PPO in real-time, with translation fallback
+- Normal mode: hourly analysis of 4 channels published in the linked group
+- Alert mode (24/7): only @Nashee_PPO in real-time in the alert-only channel
 - Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -27,11 +27,17 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USER_ID = int(BOT_TOKEN.split(":", 1)[0])
 TEST_MODE = os.environ.get("TEST_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
-PRODUCTION_CHAT_ID = os.environ["TARGET_CHAT_ID"]
+ALERT_CHANNEL_ID = os.environ["TARGET_CHAT_ID"]
+SUMMARY_CHAT_ID = os.environ.get("SUMMARY_CHAT_ID")
 TEST_CHAT_ID = os.environ.get("TEST_CHAT_ID")
 if TEST_MODE and not TEST_CHAT_ID:
     raise RuntimeError("TEST_CHAT_ID is required when TEST_MODE=true")
-OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else PRODUCTION_CHAT_ID
+if not TEST_MODE and not SUMMARY_CHAT_ID:
+    raise RuntimeError("SUMMARY_CHAT_ID is required when TEST_MODE=false")
+if not TEST_MODE and SUMMARY_CHAT_ID == ALERT_CHANNEL_ID:
+    raise RuntimeError("SUMMARY_CHAT_ID must differ from TARGET_CHAT_ID")
+ALERT_OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else ALERT_CHANNEL_ID
+SUMMARY_OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else SUMMARY_CHAT_ID
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "392256147")
 OPS_CHAT_ID = os.environ.get("OPS_CHAT_ID", OWNER_CHAT_ID)  # operational alerts; legacy fallback
 # --- Channels ---
@@ -258,11 +264,11 @@ async def reconcile_alert_state(source):
         alert_started_at = time.monotonic()
         for channel_name in ALL_CONTENT_CHANNELS:
             buffers[channel_name].clear()
-        await send_to_channel("🚨 <b>AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME mode")
+        await send_to_alert_channel("🚨 <b>AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME mode")
         print(f"🚨 Effective alert state started via {source}")
     else:
         alert_started_at = None
-        await send_to_channel("✅ <b>ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL mode")
+        await send_to_alert_channel("✅ <b>ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL mode")
         print(f"✅ Effective alert state ended via {source}")
 
 
@@ -631,8 +637,17 @@ async def edit_message(chat_id, message_id, text):
         "disable_web_page_preview": True,
     })
 
-async def send_to_channel(text):
-    result = await send_message(OUTPUT_CHAT_ID, text)
+async def send_to_alert_channel(text):
+    """Send alert lifecycle and real-time messages to the alert-only channel."""
+    result = await send_message(ALERT_OUTPUT_CHAT_ID, text)
+    if TEST_MODE and result and result.get("message_id"):
+        bot_output_message_ids.add(result["message_id"])
+    return result
+
+
+async def send_to_summary_group(text):
+    """Send scheduled analysis only to the linked summary group."""
+    result = await send_message(SUMMARY_OUTPUT_CHAT_ID, text)
     if TEST_MODE and result and result.get("message_id"):
         bot_output_message_ids.add(result["message_id"])
     return result
@@ -649,7 +664,7 @@ async def safe_send(text):
         wait = MIN_SEND_INTERVAL - (now - last_send_time)
         if wait > 0:
             await asyncio.sleep(wait)
-        result = await send_to_channel(text)
+        result = await send_to_alert_channel(text)
         last_send_time = time.monotonic()
         return result
 
@@ -729,7 +744,7 @@ async def build_summary(night_recap=False, trigger="scheduled"):
         time_label = datetime.now(TZ).strftime("%H:%M %Z")
         if sections:
             title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>Hourly Update"
-            result = await send_to_channel(
+            result = await send_to_summary_group(
                 f"{title} — {time_label}</b>\n\n" + "\n\n".join(sections)
             )
         else:
@@ -743,7 +758,7 @@ async def build_summary(night_recap=False, trigger="scheduled"):
                     f"📋 <b>Hourly Update — {time_label}</b>\n\n"
                     "No relevant updates in the last hour."
                 )
-            heartbeat_sender = send_to_channel if TEST_MODE else send_to_owner
+            heartbeat_sender = send_to_summary_group if TEST_MODE else send_to_owner
             result = await heartbeat_sender(heartbeat)
             print(
                 f"[SUMMARY OPS HEARTBEAT] trigger={trigger}; "
@@ -862,10 +877,10 @@ async def handle_alert_message(clean):
 
     translation = await translate_message(clean[:1500])
     if translation:
-        await edit_message(OUTPUT_CHAT_ID, sent["message_id"], f"🔴 {html.escape(translation)}")
+        await edit_message(ALERT_OUTPUT_CHAT_ID, sent["message_id"], f"🔴 {html.escape(translation)}")
     else:
         await edit_message(
-            OUTPUT_CHAT_ID,
+            ALERT_OUTPUT_CHAT_ID,
             sent["message_id"],
             f"🔴 ⚠️ Translation unavailable\n\n{html.escape(clean[:1000])}",
         )
@@ -915,7 +930,7 @@ async def main():
 
     if TEST_MODE:
         print(f"🧪 TEST_MODE enabled. Exclusive chat: {TEST_CHAT_ID}; real Telegram sources are NOT registered.")
-        await send_to_channel(
+        await send_to_alert_channel(
             "🧪 <b>Kyiv Monitor started in TEST_MODE</b>\n"
             "Exclusive source/output chat enabled. Real Telegram channels are disabled.\n"
             "Commands: /test_start, /test_message, /test_burst N, /test_end, /test_summary"
@@ -934,7 +949,7 @@ async def main():
                     alert_active = True
                     for channel_name in ALL_CONTENT_CHANNELS:
                         buffers[channel_name].clear()
-                    await send_to_channel("🚨 <b>TEST AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME test mode active")
+                    await send_to_alert_channel("🚨 <b>TEST AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME test mode active")
                 return
 
             if command == "/test_message":
@@ -955,13 +970,13 @@ async def main():
             if command == "/test_end":
                 async with test_command_lock:
                     alert_active = False
-                    await send_to_channel("✅ <b>TEST ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL test mode")
+                    await send_to_alert_channel("✅ <b>TEST ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL test mode")
                 return
 
             if command == "/test_summary":
                 async with test_command_lock:
                     if alert_active:
-                        await send_to_channel("⚠️ End the test alert with /test_end before requesting a summary.")
+                        await send_to_alert_channel("⚠️ End the test alert with /test_end before requesting a summary.")
                     else:
                         await build_summary()
                 return
@@ -1008,7 +1023,7 @@ async def main():
             "Night pause: 01:00–07:00 EET/EEST"
         )
 
-        @client.on(events.NewMessage(chats=int(PRODUCTION_CHAT_ID)))
+        @client.on(events.NewMessage(chats=int(ALERT_CHANNEL_ID)))
         async def production_command_handler(event):
             global alert_active
             text = (event.message.text or "").strip().lower()
@@ -1016,10 +1031,10 @@ async def main():
                 alert_active = True
                 for channel_name in ALL_CONTENT_CHANNELS:
                     buffers[channel_name].clear()
-                await send_to_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
+                await send_to_alert_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
             elif text == "/normal":
                 alert_active = False
-                await send_to_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
+                await send_to_alert_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
 
         @client.on(events.NewMessage(chats=list(source_entities.values())))
         async def production_source_handler(event):
