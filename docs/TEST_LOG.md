@@ -101,6 +101,15 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato per configurazione e accessibilità.
 - **Limite:** non è stato pubblicato un falso allarme nel canale pubblico; la consegna e la deduplicazione reali richiedono il prossimo ALERT o un ambiente di test dedicato con due sorgenti.
 
+### 2026-08-11 — Verifica post-deploy della correzione ALERT
+
+- **Ambiente:** Railway produzione.
+- **Commit applicativo:** `43cea5090199a3b84f107b13ff6e2c4f0a473b6d`.
+- **Deployment:** `53f5d871-50dc-492a-a1c4-f05cf05af78a` attivo con esito riuscito.
+- **Log osservati:** database statistiche pronto; stato Telegram ricostruito `CLEAR`; sorgenti NORMAL `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping`, `Nashee_PPO`; feed ALERT `Nashee_PPO`, `nebo_raketa`; pianificazione oraria attiva in `Europe/Kyiv`.
+- **Esito:** superato per build, avvio, risoluzione delle sorgenti e stabilità iniziale del worker.
+- **Limite:** il filtro e la deduplicazione non sono stati provocati con messaggi falsi nel canale pubblico; la loro prova end-to-end definitiva avverrà al prossimo evento reale oppure in un test isolato a due sorgenti.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
