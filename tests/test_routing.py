@@ -50,6 +50,7 @@ monitor = load_monitor()
 class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.sent = []
+        monitor.recent_alert_messages.clear()
 
         async def fake_send_message(chat_id, text):
             self.sent.append((chat_id, text))
@@ -91,6 +92,40 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("✅ <b>ALL CLEAR — KYIV</b>", clear_text)
         self.assertIn(f'<a href="{SUMMARY_CHAT_LINK}">Join Kyiv News →</a>', clear_text)
         self.assertNotIn("Back to NORMAL mode", clear_text)
+
+    async def test_fundraising_and_engagement_posts_are_rejected(self):
+        donation = (
+            "Через постійну загрозу балістики ці дні проводжу без сну. "
+            "При бажані можете підтримати кавою. Моно: 4441111045774118"
+        )
+        thanks = (
+            "Ми щиро вдячні кожному вашому донату та сподіваємося на вашу "
+            "підтримку за нашу роботу."
+        )
+        operational = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва."
+
+        self.assertTrue(monitor.is_pure_ad(donation))
+        self.assertTrue(monitor.is_pure_ad(thanks))
+        self.assertFalse(monitor.is_pure_ad(operational))
+
+    async def test_second_alert_feed_is_alert_only(self):
+        self.assertIn("Nashee_PPO", monitor.ALERT_FEED_CHANNELS)
+        self.assertIn("nebo_raketa", monitor.ALERT_FEED_CHANNELS)
+        self.assertNotIn("nebo_raketa", monitor.ALL_CONTENT_CHANNELS)
+
+    async def test_cross_source_dedup_keeps_first_and_new_information(self):
+        first = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва"
+        duplicate = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва!"
+        update = "⚠️ 3 шахеди рухаються через Васильків у напрямку Києва"
+
+        self.assertTrue(monitor.should_publish_alert(first, "Nashee_PPO", now=100.0))
+        self.assertFalse(monitor.should_publish_alert(duplicate, "nebo_raketa", now=130.0))
+        self.assertTrue(monitor.should_publish_alert(update, "nebo_raketa", now=140.0))
+
+    async def test_duplicate_window_expires(self):
+        message = "Балістична ціль рухається у напрямку Києва"
+        self.assertTrue(monitor.should_publish_alert(message, "Nashee_PPO", now=100.0))
+        self.assertTrue(monitor.should_publish_alert(message, "nebo_raketa", now=281.0))
 
 
 if __name__ == "__main__":
