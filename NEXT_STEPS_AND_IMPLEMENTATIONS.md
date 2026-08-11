@@ -16,7 +16,7 @@ Kyiv Monitor è un worker Python eseguito continuamente su Railway. Legge fonti 
 
 Il sistema ha due modalità operative:
 
-- **NORMAL:** raccoglie i messaggi delle fonti, li conserva temporaneamente in memoria e produce riepiloghi categorizzati ogni ora.
+- **NORMAL:** raccoglie i messaggi live e dalla cronologia delle fonti, li conserva nella coda SQLite persistente e produce riepiloghi categorizzati ogni ora.
 - **ALERT:** interrompe i riepiloghi e pubblica rapidamente la traduzione dei nuovi messaggi di monitoraggio relativi all'allerta in corso.
 
 Lo stato di allerta viene determinato esclusivamente dai messaggi espliciti di `@kyiv_airraid_alert`. L'API UkraineAlarm non è più utilizzata.
@@ -28,7 +28,7 @@ Canali Telegram di contenuto
         ↓
      Telethon
         ↓
-Buffer temporanei in memoria
+Coda SQLite persistente e cursori per fonte
         ↓
 Anthropic: classificazione e sintesi strutturata
         ↓
@@ -55,7 +55,7 @@ Stato NORMAL / ALERT
 - Watchdog dei riepiloghi con tentativi a 62, 65, 67 e 70 minuti.
 - Heartbeat verso `OPS_CHAT_ID` quando non esistono aggiornamenti rilevanti.
 - Modalità test isolata dalla produzione.
-- Archivio SQLite per statistiche di classificazione.
+- Archivio SQLite per statistiche, coda NORMAL e cursori Telegram per fonte.
 - Deploy Railway originato da GitHub.
 
 ## Sorgenti e destinazioni
@@ -65,7 +65,6 @@ Stato NORMAL / ALERT
 1. `@kievinfo_kyiv`
 2. `@shv_ukr`
 3. `@AMK_Mapping`
-4. `@Nashee_PPO`
 
 Ogni messaggio viene valutato trasversalmente rispetto alle quattro categorie, indipendentemente dalla fonte:
 
@@ -93,12 +92,12 @@ Questo canale deve essere usato soltanto come trigger e non come sorgente di con
 
 ### Modalità NORMAL
 
-- I messaggi delle quattro fonti vengono ripuliti dalla pubblicità evidente e conservati in buffer distinti.
+- I messaggi delle tre fonti vengono ripuliti dalla pubblicità evidente e conservati idempotentemente nella coda persistente.
 - In produzione il riepilogo è allineato all'ora piena nel fuso `Europe/Kyiv`.
 - Anthropic valuta tutti i messaggi rispetto a tutte le categorie.
 - Ogni categoria può contenere al massimo cinque bullet in inglese.
 - I bullet devono mantenere ordine cronologico, località, orari, quantità e incertezza delle fonti.
-- I buffer vengono rimossi soltanto dopo la conferma dell'invio Telegram.
+- I record vengono marcati `processed` soltanto dopo la conferma dell'invio Telegram.
 - Se non esistono aggiornamenti rilevanti, la produzione resta silenziosa e Ops riceve un heartbeat.
 - Tra le 01:00 e le 07:00 non vengono pubblicati riepiloghi orari.
 - Alle 07:00 viene prodotto un recap del materiale accumulato durante la notte.
@@ -107,7 +106,7 @@ Questo canale deve essere usato soltanto come trigger e non come sorgente di con
 
 - All'inizio dell'allerta i buffer NORMAL vengono svuotati.
 - Viene pubblicato un messaggio unico di inizio allerta.
-- Soltanto i nuovi messaggi di `@Nashee_PPO` vengono processati.
+- Soltanto i nuovi messaggi di `@nebo_raketa` vengono processati.
 - Il messaggio originale appare inizialmente come contenuto in traduzione e viene poi sostituito dalla versione inglese.
 - Pubblicità e messaggi non pertinenti vengono scartati.
 - Al cessato allarme viene pubblicato `ALL CLEAR — KYIV` e il sistema torna in NORMAL.
@@ -185,18 +184,19 @@ Il worker accetta `/alert` e `/normal` nella chat di produzione, ma il codice no
 - aggiungere test di autorizzazione;
 - documentare chiaramente precedenza e durata dell'override manuale.
 
-### P1 — Persistenza dei buffer
+### P1 — Persistenza dei buffer — implementato il 2026-08-11
 
-I buffer NORMAL sono mantenuti soltanto in memoria. Un restart o deploy perde i messaggi accumulati dall'ultimo riepilogo.
+La coda NORMAL è ora mantenuta nello stesso SQLite già presente sul volume Railway `/data`. Restart e deployment non eliminano i messaggi accumulati dall'ultimo riepilogo.
 
-**Implementazione proposta:**
+**Implementazione completata:**
 
-- prima scelta semplice: SQLite sul volume Railway già previsto in `/data`;
-- alternativa più scalabile: Redis o PostgreSQL;
-- salvare identificatore Telegram, fonte, timestamp, testo pulito e stato di consegna;
-- rendere l'inserimento idempotente per evitare duplicati;
-- eliminare i record soltanto dopo conferma Telegram;
-- prevedere retention e limite massimo per evitare crescita incontrollata.
+- tabella `normal_messages` con identificatore Telegram, fonte, timestamp, testo pulito e stato `pending`, `processed` o `discarded`;
+- tabella `source_cursors` con l'ultimo ID letto dalla cronologia per ciascuna fonte;
+- inserimento idempotente tramite chiave primaria `(channel, message_id)`;
+- recupero orario dei messaggi persi dal listener live;
+- passaggio a `processed` soltanto dopo conferma Telegram;
+- conservazione dei record completati per sette giorni;
+- buffer in memoria mantenuto come fallback se SQLite non è disponibile.
 
 ### P1 — Stato operativo persistente
 

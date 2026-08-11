@@ -124,13 +124,22 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Log post-deploy:** stato Telegram `CLEAR`; sorgenti NORMAL `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping`; unico feed ALERT `nebo_raketa`; pianificazione oraria attiva in `Europe/Kyiv`; nessuna registrazione di `Nashee_PPO`.
 - **Esito:** superato per separazione Telegram, regressione locale e avvio della configurazione definitiva in produzione.
 
+### 2026-08-11 — Persistenza SQLite e recupero della cronologia NORMAL
+
+- **Ambiente:** checkout locale isolato con SQLite temporaneo e client Telegram simulato.
+- **Obiettivo:** dimostrare che restart, eventi live mancati, duplicati e invii Telegram falliti non causino perdita dei messaggi NORMAL.
+- **Procedura:** compilazione Python e suite `unittest`; inserimento dello stesso messaggio via listener live e cronologia; recupero incrementale tramite cursore; simulazione di invio fallito seguita da invio riuscito; ingresso in ALERT con materiale pendente e avanzamento dei cursori al cessato allarme.
+- **Risultato osservato:** 9 test eseguiti e superati; chiave `(channel, message_id)` idempotente; messaggio rimasto `pending` dopo invio fallito e passato a `processed` soltanto dopo conferma; materiale pendente marcato `discarded` all'inizio di ALERT; cursori riallineati alle tre fonti alla ripresa di NORMAL.
+- **Esito:** superato localmente.
+- **Limite:** manca ancora la verifica post-deploy sul volume Railway reale e un ciclo orario con messaggi recuperati dalla cronologia reale.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
 2. Riepilogo NORMAL con almeno un contenuto rilevante: consegna nel gruppo e assenza nel canale.
 3. Ciclo NORMAL senza contenuti rilevanti: silenzio pubblico e heartbeat soltanto a Ops.
 4. Pausa notturna 01:00–07:00 Europe/Kyiv e recap alla ripresa.
-5. Riavvio con buffer persistente, quando verrà implementato, per dimostrare che i messaggi non vengono persi.
+5. Riavvio Railway con almeno un record `pending`, per confermare sul volume reale che il messaggio sopravvive e viene riepilogato.
 6. Collegamento `Join Kyiv News →` su un cessato allarme reale o controllato.
 
 ## Modello per le prossime registrazioni
