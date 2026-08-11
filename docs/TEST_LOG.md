@@ -140,7 +140,10 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Verifica reale della fonte:** la sessione Railway risolve `@kyiv_alerts` come canale broadcast **Kyiv Alerts**, ID Telegram `-1001520282656`, risulta iscritta e legge i messaggi recenti.
 - **Test locali:** compilazione di `monitor.py` e `tests/test_routing.py`; suite `unittest` con controllo del feed unico, esclusione della fonte precedente e riconoscimento dei formati reali `тривога` e `Відбій` osservati nel canale.
 - **Risultato osservato:** 10 test eseguiti e superati; nessun errore di sintassi.
-- **Esito:** superato prima del deploy.
+- **Commit applicativo:** `3d80b93200cafcf58eac3792ed3b0324728c0905`.
+- **Deployment Railway:** `c153286b-ec94-4eb2-99a1-5697df3359e9`, stato `Active` e worker `Online`.
+- **Log post-deploy:** database SQLite pronto; stato Telegram `CLEAR`; sorgenti NORMAL invariate; unico feed ALERT `kyiv_alerts`; pianificazione oraria attiva in `Europe/Kyiv`; nessun errore di avvio.
+- **Esito:** superato localmente e per configurazione/avvio in produzione.
 - **Limite:** la consegna pubblica end-to-end deve essere confermata dal prossimo allarme reale; non è stato generato un falso allarme nel canale pubblico.
 
 ## Test futuri consigliati
