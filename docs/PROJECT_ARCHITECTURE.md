@@ -75,7 +75,8 @@ Il messaggio di cessato allarme resta nel canale di allerta perché descrive un 
 
 In modalità NORMAL:
 
-- i messaggi delle tre sorgenti di contenuto vengono filtrati e conservati in memoria;
+- i messaggi delle tre sorgenti vengono acquisiti sia dal listener live sia dalla cronologia Telegram e salvati nella coda SQLite persistente;
+- un cursore separato per fonte permette di recuperare gli eventi live mancati senza duplicare quelli già acquisiti;
 - ogni ora viene generato un riepilogo in inglese e inviato esclusivamente a `SUMMARY_CHAT_ID`;
 - il canale configurato tramite `TARGET_CHAT_ID` resta silenzioso in NORMAL;
 - se nessuna categoria contiene aggiornamenti rilevanti, anche il gruppo dei riepiloghi resta silenzioso ma `OPS_CHAT_ID` riceve un heartbeat “No relevant updates” con ora e fuso; il ciclo viene registrato come completato e non attiva il watchdog;
@@ -89,6 +90,7 @@ In modalità NORMAL:
 Quando lo stato effettivo diventa ALERT:
 
 - i buffer dei riepiloghi vengono svuotati;
+- i record NORMAL ancora pendenti vengono marcati `discarded` e, al cessato allarme, i cursori vengono avanzati agli ultimi messaggi disponibili per non importare nel gruppo materiale prodotto durante ALERT;
 - i riepiloghi verso `SUMMARY_CHAT_ID` vengono sospesi;
 - nel canale `TARGET_CHAT_ID` viene pubblicato un unico messaggio di inizio allerta;
 - vengono ignorati i contenuti di `@kievinfo_kyiv` e `@AMK_Mapping`;
@@ -158,7 +160,7 @@ ANTHROPIC_API_KEY
 ## Limiti noti
 
 - UkraineAlarm è stato rimosso: il trigger è esclusivamente `@kyiv_airraid_alert`.
-- I buffer dei riepiloghi sono in memoria e vengono persi al riavvio del container.
+- La persistenza NORMAL dipende dal volume Railway montato su `/data`; senza tale volume il worker usa il buffer in memoria come fallback e torna vulnerabile ai riavvii.
 - Lo stato ricostruito dal canale Telegram dipende dall'ultimo messaggio esplicito riconoscibile relativo a Kyiv.
 - Il sistema è un'integrazione informativa e non sostituisce i sistemi ufficiali di protezione civile.
 
@@ -182,9 +184,9 @@ Il ciclo NORMAL usa tre sorgenti di contenuto:
 
 Il fuso orario operativo è `Europe/Kyiv`: gli output mostrano automaticamente `EEST` in estate e `EET` in inverno. La pausa notturna 01:00–07:00 segue lo stesso fuso.
 
-Prima dell'analisi viene acquisita un'istantanea del buffer. Anthropic Structured Outputs (`output_config.format` con JSON Schema) è la difesa primaria: impone tutte le categorie e i tipi previsti. Dopo la risposta vengono controllati HTTP, `stop_reason`, JSON, categorie, tipi e ID. Il parser del primo oggetto JSON rimane soltanto come fallback legacy: ogni utilizzo produce un log esplicito e il risultato viene sottoposto alla stessa validazione rigorosa. Il budget cresce da 4000 a 6000 e 8000 token esclusivamente quando `stop_reason=max_tokens`; `refusal`, errori 400 e output strutturalmente invalidi non vengono riprovati identici. Timeout, errori di trasporto, `429` e `5xx` ricevono fino a tre tentativi con attesa crescente e rispetto di `Retry-After`. Se l'analisi non è disponibile, l'output di emergenza contiene soltanto brevi estratti originali con fonte esplicita e avverte che non si tratta di una sintesi AI.
+Prima dell'analisi il worker recupera dalla cronologia Telegram tutti i messaggi successivi al cursore persistente di ciascuna fonte, li inserisce idempotentemente in SQLite e acquisisce un'istantanea dei record `pending`. Al primo avvio senza cursore importa soltanto l'ultima ora, evitando un replay storico incontrollato. Anthropic Structured Outputs (`output_config.format` con JSON Schema) è la difesa primaria: impone tutte le categorie e i tipi previsti. Dopo la risposta vengono controllati HTTP, `stop_reason`, JSON, categorie, tipi e ID. Il parser del primo oggetto JSON rimane soltanto come fallback legacy: ogni utilizzo produce un log esplicito e il risultato viene sottoposto alla stessa validazione rigorosa. Il budget cresce da 4000 a 6000 e 8000 token esclusivamente quando `stop_reason=max_tokens`; `refusal`, errori 400 e output strutturalmente invalidi non vengono riprovati identici. Timeout, errori di trasporto, `429` e `5xx` ricevono fino a tre tentativi con attesa crescente e rispetto di `Retry-After`. Se l'analisi non è disponibile, l'output di emergenza contiene soltanto brevi estratti originali con fonte esplicita e avverte che non si tratta di una sintesi AI.
 
-I messaggi vengono rimossi soltanto dopo la conferma dell'invio Telegram. Se la consegna non è confermata, il buffer resta intatto. Il watchdog riprova un riepilogo mancante a 62, 65, 67 e 70 minuti dall'ultimo invio confermato. Il loop dei riepiloghi intercetta le eccezioni e continua a funzionare.
+I messaggi vengono marcati `processed` soltanto dopo la conferma dell'invio Telegram. Se la consegna non è confermata, restano `pending` anche attraverso restart e deployment. I record completati vengono conservati per sette giorni e poi eliminati. Il watchdog riprova un riepilogo mancante a 62, 65, 67 e 70 minuti dall'ultimo invio confermato. Il loop dei riepiloghi intercetta le eccezioni e continua a funzionare.
 
 I log registrano buffer, tentativi AI, uso del fallback, risultato per sorgente e conferma di consegna.
 
@@ -216,8 +218,9 @@ Ogni riepilogo scrive nei log Railway:
 Le stesse statistiche vengono archiviate in SQLite nella posizione indicata da
 `CATEGORY_STATS_DB_PATH`, valore predefinito
 `/data/kyiv_monitor_category_stats.sqlite3`. Per conservarle attraverso restart e deployment,
-Railway deve montare un volume persistente su `/data`. Le tabelle sono
-`hourly_category_stats` e `hourly_classifications`.
+Railway deve montare un volume persistente su `/data`. Le tabelle statistiche sono
+`hourly_category_stats` e `hourly_classifications`; la coda affidabile usa
+`normal_messages` e i checkpoint per fonte usano `source_cursors`.
 
 
 ## Pianificazione oraria e ordine cronologico

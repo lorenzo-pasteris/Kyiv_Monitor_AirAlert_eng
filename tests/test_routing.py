@@ -1,10 +1,14 @@
+import asyncio
 import importlib.util
 import os
 import random
+import sqlite3
 import sys
+import tempfile
 import types
 import unittest
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -45,6 +49,158 @@ def load_monitor():
 
 
 monitor = load_monitor()
+
+
+class FakeTelegramMessage:
+    def __init__(self, message_id, text, date):
+        self.id = message_id
+        self.text = text
+        self.date = date
+
+
+class FakeHistoryClient:
+    def __init__(self, messages_by_channel):
+        self.messages_by_channel = messages_by_channel
+
+    async def get_messages(self, entity, limit):
+        return list(reversed(self.messages_by_channel.get(entity, [])))[0:limit]
+
+    def iter_messages(self, entity, min_id, reverse=True):
+        async def generate():
+            messages = [
+                message for message in self.messages_by_channel.get(entity, [])
+                if message.id > min_id
+            ]
+            for message in messages if reverse else reversed(messages):
+                yield message
+        return generate()
+
+
+class PersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_db_path = monitor.CATEGORY_STATS_DB_PATH
+        self.original_stats_ready = monitor.stats_db_ready
+        self.original_client = monitor.production_client
+        self.original_entities = monitor.content_source_entities
+        self.original_analyzer = monitor.analyze_hourly_matrix
+        self.original_summary_sender = monitor.send_to_summary_group
+        self.original_owner_sender = monitor.send_to_owner
+        monitor.CATEGORY_STATS_DB_PATH = str(Path(self.temp_dir.name) / "monitor.sqlite3")
+        monitor.stats_db_ready = monitor.initialize_stats_db()
+        monitor.production_client = None
+        monitor.content_source_entities = {}
+        monitor.summary_lock = asyncio.Lock()
+        monitor.summary_watchdog_attempts.clear()
+
+    async def asyncTearDown(self):
+        monitor.CATEGORY_STATS_DB_PATH = self.original_db_path
+        monitor.stats_db_ready = self.original_stats_ready
+        monitor.production_client = self.original_client
+        monitor.content_source_entities = self.original_entities
+        monitor.analyze_hourly_matrix = self.original_analyzer
+        monitor.send_to_summary_group = self.original_summary_sender
+        monitor.send_to_owner = self.original_owner_sender
+        self.temp_dir.cleanup()
+
+    async def test_live_and_history_ingestion_are_idempotent_and_cursor_based(self):
+        now = datetime.now(timezone.utc)
+        messages = [
+            FakeTelegramMessage(101, "Kyiv metro service changed this morning.", now - timedelta(minutes=30)),
+            FakeTelegramMessage(102, "Ukraine approved a new national measure.", now - timedelta(minutes=10)),
+        ]
+        entities = {channel: channel for channel in monitor.ALL_CONTENT_CHANNELS}
+        client = FakeHistoryClient({channel: [] for channel in monitor.ALL_CONTENT_CHANNELS})
+        client.messages_by_channel[monitor.KYIV_INFO_CHANNEL] = messages
+
+        self.assertTrue(monitor.persist_normal_message(
+            monitor.KYIV_INFO_CHANNEL, 102, messages[1].date, messages[1].text
+        ))
+        self.assertTrue(await monitor.sync_normal_history(client, entities))
+
+        pending = monitor.load_pending_normal_messages()
+        self.assertEqual([row["message_id"] for row in pending], [101, 102])
+        self.assertEqual(monitor.get_source_cursor(monitor.KYIV_INFO_CHANNEL), 102)
+
+        messages.append(FakeTelegramMessage(
+            103, "A new road closure was announced in Kyiv.", now
+        ))
+        self.assertTrue(await monitor.sync_normal_history(client, entities))
+        self.assertEqual(
+            [row["message_id"] for row in monitor.load_pending_normal_messages()],
+            [101, 102, 103],
+        )
+        self.assertEqual(monitor.get_source_cursor(monitor.KYIV_INFO_CHANNEL), 103)
+
+    async def test_failed_delivery_retains_pending_and_success_marks_processed(self):
+        channel = monitor.KYIV_INFO_CHANNEL
+        message_id = 501
+        monitor.persist_normal_message(
+            channel,
+            message_id,
+            datetime.now(timezone.utc),
+            "Kyiv metro announced a concrete service disruption.",
+        )
+
+        async def fake_analyzer(messages):
+            result = {
+                key: {"selected_ids": [], "bullets": []}
+                for key in monitor.CATEGORIES
+            }
+            stable_id = f"{channel}:{message_id}"
+            result["kyiv_city"] = {
+                "selected_ids": [stable_id],
+                "bullets": ["Kyiv metro announced a service disruption."],
+            }
+            return result
+
+        delivery_results = [None, {"message_id": 9001}]
+
+        async def fake_summary_sender(text):
+            return delivery_results.pop(0)
+
+        async def fake_owner_sender(text):
+            return {"message_id": 1}
+
+        monitor.analyze_hourly_matrix = fake_analyzer
+        monitor.send_to_summary_group = fake_summary_sender
+        monitor.send_to_owner = fake_owner_sender
+
+        self.assertFalse(await monitor.build_summary(trigger="failure-test"))
+        self.assertEqual(len(monitor.load_pending_normal_messages()), 1)
+
+        self.assertTrue(await monitor.build_summary(trigger="success-test"))
+        self.assertEqual(monitor.load_pending_normal_messages(), [])
+        with sqlite3.connect(monitor.CATEGORY_STATS_DB_PATH) as connection:
+            status = connection.execute(
+                "SELECT status FROM normal_messages WHERE channel = ? AND message_id = ?",
+                (channel, message_id),
+            ).fetchone()[0]
+        self.assertEqual(status, "processed")
+
+    async def test_alert_discards_pending_and_clear_advances_all_cursors(self):
+        now = datetime.now(timezone.utc)
+        monitor.persist_normal_message(
+            monitor.KYIV_INFO_CHANNEL,
+            700,
+            now,
+            "A pending NORMAL message that must not cross into ALERT.",
+        )
+        monitor.discard_pending_normal_messages("unit-test-alert")
+        self.assertEqual(monitor.load_pending_normal_messages(), [])
+
+        entities = {channel: channel for channel in monitor.ALL_CONTENT_CHANNELS}
+        messages_by_channel = {
+            channel: [FakeTelegramMessage(800 + index, "latest source message", now)]
+            for index, channel in enumerate(monitor.ALL_CONTENT_CHANNELS)
+        }
+        client = FakeHistoryClient(messages_by_channel)
+        await monitor.advance_normal_cursors_to_latest(client, entities, "unit-test-clear")
+
+        self.assertEqual(
+            [monitor.get_source_cursor(channel) for channel in monitor.ALL_CONTENT_CHANNELS],
+            [800, 801, 802],
+        )
 
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):

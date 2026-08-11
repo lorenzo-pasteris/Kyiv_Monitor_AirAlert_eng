@@ -126,7 +126,7 @@ Controllare che:
 - le anomalie operative vengano inviate a `OPS_CHAT_ID`, con fallback a `OWNER_CHAT_ID`, mentre i dettagli ordinari restano nei log Railway.
 - ogni avvio o riavvio tecnico del worker venga notificato a `OPS_CHAT_ID`; il messaggio di cessato allarme e ritorno a NORMAL resti nel canale di allerta.
 
-Miglioria consigliata: spostare i buffer da memoria a un archivio persistente, per esempio Redis o PostgreSQL, così un riavvio non perde il materiale del riepilogo.
+Implementato: la coda NORMAL usa SQLite sul volume Railway `/data`, con inserimenti idempotenti, cursori Telegram per fonte, recupero dalla cronologia, stato `pending`/`processed`/`discarded` e retention di sette giorni. Il buffer in memoria resta soltanto come fallback quando SQLite non è disponibile.
 
 ## Loop 6 — Diagnosi tramite agente AI
 

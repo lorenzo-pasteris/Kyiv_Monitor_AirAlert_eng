@@ -15,7 +15,7 @@ import sqlite3
 import time
 import httpx
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events, utils
@@ -153,6 +153,8 @@ CATEGORY_RESULT_SCHEMA = {
 CATEGORY_STATS_DB_PATH = os.environ.get(
     "CATEGORY_STATS_DB_PATH", "/data/kyiv_monitor_category_stats.sqlite3"
 )
+NORMAL_HISTORY_BOOTSTRAP_HOURS = 1
+NORMAL_MESSAGE_RETENTION_DAYS = 7
 
 # --- Pre-filters ---
 KYIV_CITY_KEYWORDS = ["kyiv","kiev","київ","киев","києві","києва","street","road","traffic","metro","subway","protest","demonstration","rally","power","water","heating","emergency","accident","fire","police","curfew","shelter","evacuation","bridge","district","avenue","closure","closed","block","disruption","delay","cancelled","train","bus","tram","вулиця","дорога","рух","затор","затори","метро","протест","мітинг","світло","електроенергія","відключення","вода","опалення","аварія","пожежа","поліція","комендантська","укриття","евакуація","міст","перекриття","перекрито","закрито","район","проспект","затримка","скасовано","поїзд","автобус","трамвай"]
@@ -187,6 +189,8 @@ last_message_time = time.time()
 last_summary_success_time = time.monotonic()
 summary_watchdog_attempts = set()
 stats_db_ready = False
+production_client = None
+content_source_entities = {}
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
 
 # Created in main(); one shared connection pool avoids a new TLS handshake per message.
@@ -345,16 +349,22 @@ async def reconcile_alert_state(source):
     if desired == alert_active:
         return
 
-    alert_active = desired
     if desired:
+        alert_active = True
         alert_started_at = time.monotonic()
         recent_alert_messages.clear()
         for channel_name in ALL_CONTENT_CHANNELS:
             buffers[channel_name].clear()
+        discard_pending_normal_messages(f"alert_started:{source}")
         await send_to_alert_channel(ALERT_START_MESSAGE)
         print(f"🚨 Effective alert state started via {source}")
     else:
         alert_started_at = None
+        if production_client and content_source_entities:
+            await advance_normal_cursors_to_latest(
+                production_client, content_source_entities, f"alert_ended:{source}"
+            )
+        alert_active = False
         await send_to_alert_channel(build_all_clear_message())
         print(f"✅ Effective alert state ended via {source}")
 
@@ -382,7 +392,7 @@ async def translate_message(text):
         return None
 
 def initialize_stats_db():
-    """Create the persistent hourly statistics store when the configured path is writable."""
+    """Create the persistent statistics and NORMAL-message store."""
     try:
         db_dir = os.path.dirname(CATEGORY_STATS_DB_PATH)
         if db_dir:
@@ -408,11 +418,245 @@ def initialize_stats_db():
                     PRIMARY KEY (run_at, message_id, category)
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS normal_messages (
+                    channel TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    message_at TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    processed_at TEXT,
+                    PRIMARY KEY (channel, message_id)
+                )"""
+            )
+            connection.execute(
+                """CREATE INDEX IF NOT EXISTS normal_messages_status_time
+                   ON normal_messages (status, message_at)"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS source_cursors (
+                    channel TEXT PRIMARY KEY,
+                    last_message_id INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
         print(f"[STATS DB] ready path={CATEGORY_STATS_DB_PATH}")
         return True
     except Exception as exc:
         print(f"[STATS DB ERROR] persistence unavailable: {type(exc).__name__}: {exc}")
         return False
+
+
+def utc_iso(value=None):
+    """Return a stable UTC timestamp for Telegram messages and database state."""
+    value = value or datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def persist_normal_message(channel, message_id, message_at, text):
+    """Persist one live NORMAL message idempotently; return False only on storage failure."""
+    if not stats_db_ready:
+        return False
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO normal_messages
+                   (channel, message_id, message_at, text, status)
+                   VALUES (?, ?, ?, ?, 'pending')""",
+                (channel, int(message_id), utc_iso(message_at), text[:800]),
+            )
+        return True
+    except Exception as exc:
+        print(f"[NORMAL DB ERROR] live insert failed @{channel}: {type(exc).__name__}: {exc}")
+        return False
+
+
+def get_source_cursor(channel):
+    if not stats_db_ready:
+        return None
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            row = connection.execute(
+                "SELECT last_message_id FROM source_cursors WHERE channel = ?",
+                (channel,),
+            ).fetchone()
+        return int(row[0]) if row else None
+    except Exception as exc:
+        print(f"[NORMAL DB ERROR] cursor read failed @{channel}: {type(exc).__name__}: {exc}")
+        return None
+
+
+def persist_history_batch(channel, messages, last_message_id):
+    """Atomically persist a history batch and its source cursor."""
+    if not stats_db_ready:
+        return False
+    try:
+        now = utc_iso()
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            for message in messages:
+                connection.execute(
+                    """INSERT OR IGNORE INTO normal_messages
+                       (channel, message_id, message_at, text, status)
+                       VALUES (?, ?, ?, ?, 'pending')""",
+                    (
+                        channel,
+                        int(message["message_id"]),
+                        message["message_at"],
+                        message["text"][:800],
+                    ),
+                )
+            if last_message_id is not None:
+                connection.execute(
+                    """INSERT INTO source_cursors (channel, last_message_id, updated_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(channel) DO UPDATE SET
+                           last_message_id = excluded.last_message_id,
+                           updated_at = excluded.updated_at""",
+                    (channel, int(last_message_id), now),
+                )
+        return True
+    except Exception as exc:
+        print(f"[NORMAL DB ERROR] history batch failed @{channel}: {type(exc).__name__}: {exc}")
+        return False
+
+
+def load_pending_normal_messages():
+    """Load the durable NORMAL queue in chronological order."""
+    if not stats_db_ready:
+        return []
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            rows = connection.execute(
+                """SELECT channel, message_id, message_at, text
+                   FROM normal_messages
+                   WHERE status = 'pending'
+                   ORDER BY message_at, channel, message_id"""
+            ).fetchall()
+        return [
+            {
+                "channel": channel,
+                "message_id": int(message_id),
+                "message_at": message_at,
+                "text": text,
+            }
+            for channel, message_id, message_at, text in rows
+        ]
+    except Exception as exc:
+        print(f"[NORMAL DB ERROR] pending read failed: {type(exc).__name__}: {exc}")
+        return []
+
+
+def mark_normal_messages_processed(message_keys):
+    """Mark exactly the delivered snapshot as processed, leaving later arrivals pending."""
+    if not stats_db_ready or not message_keys:
+        return
+    try:
+        processed_at = utc_iso()
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            connection.executemany(
+                """UPDATE normal_messages
+                   SET status = 'processed', processed_at = ?
+                   WHERE channel = ? AND message_id = ? AND status = 'pending'""",
+                [(processed_at, channel, int(message_id)) for channel, message_id in message_keys],
+            )
+            cutoff = utc_iso(datetime.now(timezone.utc) - timedelta(days=NORMAL_MESSAGE_RETENTION_DAYS))
+            connection.execute(
+                """DELETE FROM normal_messages
+                   WHERE status != 'pending' AND processed_at < ?""",
+                (cutoff,),
+            )
+    except Exception as exc:
+        print(f"[NORMAL DB ERROR] completion write failed: {type(exc).__name__}: {exc}")
+
+
+def discard_pending_normal_messages(reason):
+    """Preserve the original rule that an alert discards accumulated NORMAL material."""
+    if not stats_db_ready:
+        return
+    try:
+        processed_at = utc_iso()
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            changed = connection.execute(
+                """UPDATE normal_messages
+                   SET status = 'discarded', processed_at = ?
+                   WHERE status = 'pending'""",
+                (processed_at,),
+            ).rowcount
+        print(f"[NORMAL DB] discarded={changed} reason={reason}")
+    except Exception as exc:
+        print(f"[NORMAL DB ERROR] discard failed: {type(exc).__name__}: {exc}")
+
+
+async def sync_normal_history(client, source_entities):
+    """Backfill messages missed by live events and advance each cursor atomically."""
+    global last_message_time
+    if TEST_MODE or not stats_db_ready:
+        return True
+    all_ok = True
+    bootstrap_cutoff = datetime.now(timezone.utc) - timedelta(hours=NORMAL_HISTORY_BOOTSTRAP_HOURS)
+    for channel in ALL_CONTENT_CHANNELS:
+        cursor = get_source_cursor(channel)
+        try:
+            if cursor is None:
+                fetched = list(await client.get_messages(source_entities[channel], limit=500))
+                fetched = [
+                    message for message in reversed(fetched)
+                    if getattr(message, "date", bootstrap_cutoff) >= bootstrap_cutoff
+                ]
+            else:
+                fetched = [
+                    message async for message in client.iter_messages(
+                        source_entities[channel], min_id=cursor, reverse=True
+                    )
+                ]
+
+            latest_id = cursor
+            rows = []
+            for message in fetched:
+                latest_id = max(latest_id or 0, int(message.id))
+                raw_text = message.text or ""
+                if not raw_text or len(raw_text.strip()) < 5:
+                    continue
+                clean = clean_text(raw_text)
+                if is_pure_ad(clean):
+                    print(f"[HISTORY FILTERED AD] @{channel}: {clean[:80]}")
+                    continue
+                rows.append({
+                    "message_id": int(message.id),
+                    "message_at": utc_iso(message.date),
+                    "text": clean[:800],
+                })
+
+            if not persist_history_batch(channel, rows, latest_id):
+                all_ok = False
+                continue
+            if fetched:
+                last_message_time = time.time()
+            print(
+                f"[HISTORY SYNC] @{channel}: fetched={len(fetched)} "
+                f"stored_candidates={len(rows)} cursor={latest_id}"
+            )
+        except Exception as exc:
+            all_ok = False
+            print(f"[HISTORY SYNC ERROR] @{channel}: {type(exc).__name__}: {exc}")
+    return all_ok
+
+
+async def advance_normal_cursors_to_latest(client, source_entities, reason):
+    """Skip material produced while NORMAL mode is intentionally paused."""
+    if TEST_MODE or not stats_db_ready:
+        return
+    for channel in ALL_CONTENT_CHANNELS:
+        try:
+            latest = await client.get_messages(source_entities[channel], limit=1)
+            latest_id = int(latest[0].id) if latest else get_source_cursor(channel)
+            if latest_id is not None:
+                persist_history_batch(channel, [], latest_id)
+                print(f"[HISTORY CURSOR] @{channel}: cursor={latest_id} reason={reason}")
+        except Exception as exc:
+            print(f"[HISTORY CURSOR ERROR] @{channel}: {type(exc).__name__}: {exc}")
 
 
 def persist_category_stats(run_at, snapshots, category_results):
@@ -757,25 +1001,46 @@ async def safe_send(text):
 
 
 async def build_summary(night_recap=False, trigger="scheduled"):
-    """Build and publish one summary; retain buffers until Telegram confirms delivery."""
+    """Build and publish one summary; retain durable input until delivery is confirmed."""
     global last_summary_success_time, summary_watchdog_attempts
     async with summary_lock:
+        if not TEST_MODE and stats_db_ready and production_client and content_source_entities:
+            await sync_normal_history(production_client, content_source_entities)
+
         snapshots = []
         snapshot_lengths = {}
+        snapshot_message_keys = []
         received_by_channel = {}
 
-        for channel in ALL_CONTENT_CHANNELS:
-            pending = list(buffers[channel])
-            snapshot_lengths[channel] = len(pending)
-            received_by_channel[channel] = len(pending)
-            print(f"[SUMMARY INPUT] @{channel}: messages={len(pending)} trigger={trigger}")
-            for index, message in enumerate(pending):
+        if not TEST_MODE and stats_db_ready:
+            pending_rows = load_pending_normal_messages()
+            for channel in ALL_CONTENT_CHANNELS:
+                channel_rows = [row for row in pending_rows if row["channel"] == channel]
+                received_by_channel[channel] = len(channel_rows)
+                print(f"[SUMMARY INPUT] @{channel}: messages={len(channel_rows)} trigger={trigger}")
+            for row in pending_rows:
+                message_at = datetime.fromisoformat(row["message_at"])
+                message_key = (row["channel"], row["message_id"])
+                snapshot_message_keys.append(message_key)
                 snapshots.append({
-                    "id": f"{channel}:{index}",
-                    "channel": channel,
-                    "time": message["time"],
-                    "text": message["text"],
+                    "id": f"{row['channel']}:{row['message_id']}",
+                    "channel": row["channel"],
+                    "time": message_at.astimezone(TZ).strftime("%H:%M"),
+                    "text": row["text"],
                 })
+        else:
+            for channel in ALL_CONTENT_CHANNELS:
+                pending = list(buffers[channel])
+                snapshot_lengths[channel] = len(pending)
+                received_by_channel[channel] = len(pending)
+                print(f"[SUMMARY INPUT] @{channel}: messages={len(pending)} trigger={trigger}")
+                for index, message in enumerate(pending):
+                    snapshots.append({
+                        "id": f"{channel}:{index}",
+                        "channel": channel,
+                        "time": message["time"],
+                        "text": message["text"],
+                    })
 
         category_results = await analyze_hourly_matrix(snapshots)
         used_emergency_fallback = category_results is None
@@ -861,8 +1126,11 @@ async def build_summary(night_recap=False, trigger="scheduled"):
             return False
 
         persist_category_stats(run_at, snapshots, category_results)
-        for channel, length in snapshot_lengths.items():
-            del buffers[channel][:length]
+        if not TEST_MODE and stats_db_ready:
+            mark_normal_messages_processed(snapshot_message_keys)
+        else:
+            for channel, length in snapshot_lengths.items():
+                del buffers[channel][:length]
 
         last_summary_success_time = time.monotonic()
         summary_watchdog_attempts.clear()
@@ -1010,7 +1278,8 @@ async def publish_test_source(client, text):
 
 
 async def main():
-    global http_client, send_lock, test_command_lock, translation_slots, summary_lock, telegram_alert_state, stats_db_ready
+    global http_client, send_lock, test_command_lock, translation_slots, summary_lock
+    global telegram_alert_state, stats_db_ready, production_client, content_source_entities
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
         http2=False,
@@ -1101,6 +1370,10 @@ async def main():
             entity = await client.get_entity(channel_name)
             source_entities[channel_name] = entity
             channel_by_chat_id[utils.get_peer_id(entity)] = channel_name
+        production_client = client
+        content_source_entities = {
+            channel: source_entities[channel] for channel in ALL_CONTENT_CHANNELS
+        }
 
         # Establish the Telegram trigger state immediately from its latest explicit event.
         recent_trigger_messages = await client.get_messages(source_entities[BACKUP_TRIGGER_CHANNEL], limit=20)
@@ -1130,8 +1403,12 @@ async def main():
                 recent_alert_messages.clear()
                 for channel_name in ALL_CONTENT_CHANNELS:
                     buffers[channel_name].clear()
+                discard_pending_normal_messages("manual_alert")
                 await send_to_alert_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
             elif text == "/normal":
+                await advance_normal_cursors_to_latest(
+                    production_client, content_source_entities, "manual_normal"
+                )
                 alert_active = False
                 await send_to_alert_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
 
@@ -1182,8 +1459,13 @@ async def main():
             if channel_buffer is None:
                 print(f"[IGNORED NON-CONTENT CHAT] channel={channel} chat_id={event.chat_id}")
                 return
-            channel_buffer.append({"time": time_str, "text": clean[:800]})
-            print(f"[BUFFERED] @{channel}: pending={len(channel_buffer)} text={clean[:80]}")
+            if stats_db_ready and persist_normal_message(
+                channel, event.message.id, event.message.date, clean
+            ):
+                print(f"[PERSISTED LIVE] @{channel}: id={event.message.id} text={clean[:80]}")
+            else:
+                channel_buffer.append({"time": time_str, "text": clean[:800]})
+                print(f"[BUFFERED FALLBACK] @{channel}: pending={len(channel_buffer)} text={clean[:80]}")
 
     asyncio.create_task(summary_loop())
     asyncio.create_task(summary_watchdog_loop())
