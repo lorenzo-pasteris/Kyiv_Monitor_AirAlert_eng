@@ -94,7 +94,7 @@ Verificare:
 - tempo tra messaggio sorgente e output;
 - presenza di etichette interne come `[TEST_SOURCE:...]` o `[burst N/M]`;
 - richieste di donazioni, numeri di carte, ringraziamenti o auguri pubblicati per errore;
-- duplicati tra `@Nashee_PPO` e `@nebo_raketa` e loop generati dal bot.
+- duplicati di `@nebo_raketa` e loop generati dal bot.
 
 Soglie suggerite:
 
@@ -112,7 +112,6 @@ Controllare che:
 - in TEST il ciclo sia di 3 minuti;
 - durante ALERT non vengano pubblicati riepiloghi;
 - la pausa notturna venga rispettata;
-- i recap numerici di `@Nashee_PPO` mantengano i numeri originali;
 - Anthropic Structured Outputs imponga lo schema completo tramite `output_config.format`;
 - HTTP, `stop_reason`, JSON, categorie, tipi e ID vengano validati in quest'ordine;
 - il parser del primo JSON sia usato soltanto come fallback legacy, con log obbligatorio e validazione;
@@ -173,8 +172,8 @@ Test minimi:
 - rimozione delle etichette `[TEST_SOURCE:...]` e `[burst N/M]`;
 - deduplicazione degli output;
 - filtro di donazioni, dettagli di pagamento, ringraziamenti e auguri anche quando il testo contiene parole di sicurezza;
-- deduplicazione cross-source entro tre minuti senza eliminare aggiornamenti con località, quantità o direzioni nuove;
-- filtri e riepiloghi numerici di `@Nashee_PPO`;
+- deduplicazione entro tre minuti senza eliminare aggiornamenti con località, quantità o direzioni nuove;
+- registrazione di `@nebo_raketa` come unico feed ALERT e assenza completa di `@Nashee_PPO`;
 - sintassi Python e avvio del worker.
 
 Il deploy deve essere bloccato se fallisce un test relativo a trigger, isolamento del test o destinazione Telegram.
