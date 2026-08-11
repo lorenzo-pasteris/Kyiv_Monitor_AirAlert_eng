@@ -146,6 +146,18 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato localmente e per configurazione/avvio in produzione.
 - **Limite:** la consegna pubblica end-to-end deve essere confermata dal prossimo allarme reale; non è stato generato un falso allarme nel canale pubblico.
 
+### 2026-08-12 — Collaudo end-to-end privato di Kyiv Alerts
+
+- **Ambiente:** codice del deployment Railway di produzione, eseguito una sola volta con `TEST_MODE=true` e destinazioni forzate a `TEST_CHAT_ID`.
+- **Obiettivo:** verificare l'intera catena applicativa senza pubblicare un falso allarme nel canale pubblico: formato reale `@kyiv_alerts` → filtro ALERT → traduzione Anthropic → Telegram Bot API; in parallelo, notizia NORMAL → analisi oraria → gruppo privato di test.
+- **Precondizioni confermate:** deployment `c153286b-ec94-4eb2-99a1-5697df3359e9` `Active`, worker `Online`, `TEST_CHAT_ID` configurato, stato iniziale `CLEAR`, unico feed ALERT dichiarato nei log `['kyiv_alerts']`.
+- **Procedura ALERT:** passato a `handle_alert_message` un testo ucraino realistico su allerta UAV nella regione di Kyiv, con `source="kyiv_alerts"`; osservati `[ALERT ACCEPTED] @kyiv_alerts` e conferma positiva dell'invio Telegram dopo la traduzione.
+- **Procedura NORMAL:** inserita una notizia realistica su una variazione temporanea della metropolitana di Kyiv; l'analisi Anthropic l'ha selezionata esclusivamente nella categoria `kyiv_city` e il riepilogo è stato consegnato alla destinazione SUMMARY di test.
+- **Risultato osservato:** marker `KYIV_ALERTS_E2E_20260812_0026`; log `[SUMMARY COMPLETED] ... outcome=delivered messages=1`; risultato finale `E2E_RESULT True True True` per marker iniziale, riepilogo e marker finale. La traduzione ALERT è stata inviata fra i due marker dalla stessa funzione usata in produzione.
+- **Regressione locale successiva:** compilazione di `monitor.py` e `tests/test_routing.py`; 10 test `unittest` eseguiti e superati, inclusi feed unico, formati reali, filtri, deduplicazione, persistenza SQLite e separazione casuale delle destinazioni.
+- **Esito:** superato end-to-end nell'ambiente reale per Anthropic e Telegram, con isolamento completo nella chat privata di test.
+- **Limite:** resta da osservare il prossimo allarme esterno reale per provare il listener Telethon e il ciclo pubblico senza simulazioni; il test non ha scritto nulla nel canale pubblico.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
