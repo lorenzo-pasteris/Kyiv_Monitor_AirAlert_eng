@@ -36,7 +36,7 @@ Le sorgenti di contenuto sono:
 - `@shv_ukr`: sviluppi politici, economici, diplomatici e nazionali ucraini.
 - `@AMK_Mapping`: sviluppi militari rilevanti per la guerra in Ucraina.
 
-La sola sorgente degli aggiornamenti real-time durante ALERT è `@nebo_raketa`, scelta perché focalizzata su Kyiv. `@Nashee_PPO` è stato rimosso completamente perché copre l'intera Ucraina e produceva aggiornamenti troppo ampi per il canale.
+La sola sorgente degli aggiornamenti real-time durante ALERT è `@kyiv_alerts`, verificata come canale broadcast dedicato a Kyiv e accessibile dalla sessione Railway. `@Nashee_PPO` e `@nebo_raketa` non vengono registrati dal worker.
 
 `@monitorwarr` è stato rimosso completamente e non deve essere registrato o letto.
 
@@ -94,7 +94,7 @@ Quando lo stato effettivo diventa ALERT:
 - i riepiloghi verso `SUMMARY_CHAT_ID` vengono sospesi;
 - nel canale `TARGET_CHAT_ID` viene pubblicato un unico messaggio di inizio allerta;
 - vengono ignorati i contenuti di `@kievinfo_kyiv` e `@AMK_Mapping`;
-- vengono elaborati esclusivamente i nuovi messaggi reali di `@nebo_raketa`;
+- vengono elaborati esclusivamente i nuovi messaggi reali di `@kyiv_alerts`;
 - per tre minuti i testi identici o fortemente simili vengono soppressi, mentre un aggiornamento con quantità, località o direzione diverse passa;
 - ciascun messaggio viene tradotto in inglese e pubblicato nel canale dopo pochi secondi;
 - richieste di donazioni, numeri di carte, ringraziamenti, auguri, pubblicità e contenuti non operativi vengono filtrati prima della traduzione, anche quando citano un attacco passato.
@@ -121,7 +121,7 @@ Comandi disponibili:
 - `/test_end`: termina direttamente l'allerta di test.
 - `/test_summary`: forza un riepilogo quando il test è in NORMAL.
 
-I messaggi simulati sono identificati da `[TEST_SOURCE:nebo_raketa]`. Il marcatore e le etichette interne come `[burst 6/20]` vengono rimossi prima della traduzione. I messaggi prodotti dal bot sono esclusi esplicitamente dalla rielaborazione tramite sender ID e message ID.
+I messaggi simulati sono identificati da `[TEST_SOURCE:kyiv_alerts]`. Il marcatore e le etichette interne come `[burst 6/20]` vengono rimossi prima della traduzione. I messaggi prodotti dal bot sono esclusi esplicitamente dalla rielaborazione tramite sender ID e message ID.
 
 Quando `TEST_MODE=false`, i comandi e gli handler di simulazione sono disabilitati e vengono usate esclusivamente le sorgenti reali.
 
@@ -154,7 +154,7 @@ ANTHROPIC_API_KEY
 - Rispetto automatico di `retry_after` in caso di flood control.
 - Una sola connessione HTTP condivisa.
 - Serializzazione degli invii per evitare raffiche incontrollate.
-- Deduplicazione temporale e testuale degli output di `@nebo_raketa`, con conservazione degli aggiornamenti che aggiungono fatti nuovi.
+- Deduplicazione temporale e testuale degli output di `@kyiv_alerts`, con conservazione degli aggiornamenti che aggiungono fatti nuovi.
 - Deduplicazione dei messaggi simulati e protezione contro i loop del bot.
 
 ## Limiti noti
@@ -168,7 +168,7 @@ ANTHROPIC_API_KEY
 
 1. Verificare che Railway mostri un solo deployment attivo.
 2. Verificare che il log indichi `TEST_MODE` o produzione in modo coerente.
-3. In produzione, controllare che le sorgenti dei riepiloghi siano `kievinfo_kyiv`, `shv_ukr` e `AMK_Mapping`, e che l'unico feed ALERT sia `nebo_raketa`.
+3. In produzione, controllare che le sorgenti dei riepiloghi siano `kievinfo_kyiv`, `shv_ukr` e `AMK_Mapping`, e che l'unico feed ALERT sia `kyiv_alerts`.
 4. Controllare che `@kyiv_airraid_alert` sia registrato come trigger e non come contenuto.
 5. Verificare che il messaggio tecnico di avvio arrivi soltanto a Ops.
 6. Verificare che le allerte vadano a `TARGET_CHAT_ID` e i riepiloghi a `SUMMARY_CHAT_ID`.

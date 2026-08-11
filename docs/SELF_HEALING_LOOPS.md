@@ -94,7 +94,7 @@ Verificare:
 - tempo tra messaggio sorgente e output;
 - presenza di etichette interne come `[TEST_SOURCE:...]` o `[burst N/M]`;
 - richieste di donazioni, numeri di carte, ringraziamenti o auguri pubblicati per errore;
-- duplicati di `@nebo_raketa` e loop generati dal bot.
+- duplicati di `@kyiv_alerts` e loop generati dal bot.
 
 Soglie suggerite:
 
@@ -173,7 +173,7 @@ Test minimi:
 - deduplicazione degli output;
 - filtro di donazioni, dettagli di pagamento, ringraziamenti e auguri anche quando il testo contiene parole di sicurezza;
 - deduplicazione entro tre minuti senza eliminare aggiornamenti con località, quantità o direzioni nuove;
-- registrazione di `@nebo_raketa` come unico feed ALERT e assenza completa di `@Nashee_PPO`;
+- registrazione di `@kyiv_alerts` come unico feed ALERT e assenza completa di `@nebo_raketa` e `@Nashee_PPO`;
 - sintassi Python e avvio del worker.
 
 Il deploy deve essere bloccato se fallisce un test relativo a trigger, isolamento del test o destinazione Telegram.
