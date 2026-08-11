@@ -2,7 +2,7 @@
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
 - Normal mode: hourly analysis of 3 channels published in the news group
-- Alert mode (24/7): only @nebo_raketa in the alert-only channel
+- Alert mode (24/7): only @kyiv_alerts in the alert-only channel
 - Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -50,7 +50,7 @@ OPS_CHAT_ID = os.environ.get("OPS_CHAT_ID", OWNER_CHAT_ID)  # operational alerts
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
-ALERT_FEED_CHANNEL = "nebo_raketa"
+ALERT_FEED_CHANNEL = "kyiv_alerts"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL]
@@ -203,7 +203,7 @@ bot_output_message_ids = set()
 simulator_processed_message_ids = set()
 recent_alert_messages = deque()
 ALERT_DEDUP_WINDOW = 180
-TEST_SOURCE_PREFIX = "[TEST_SOURCE:nebo_raketa]"
+TEST_SOURCE_PREFIX = "[TEST_SOURCE:kyiv_alerts]"
 TEST_BUFFER_CHANNEL = AMK_CHANNEL
 TEST_SAMPLE_MESSAGES = [
     "⚠️ Київщина: зафіксовано рух ударних БпЛА Shahed drone у напрямку Києва.",

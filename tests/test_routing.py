@@ -269,24 +269,34 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_actionable_alert_message(unrelated))
         self.assertTrue(monitor.is_actionable_alert_message(terse_follow_up))
 
-    async def test_nebo_raketa_is_the_only_alert_feed(self):
-        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["nebo_raketa"])
-        self.assertNotIn("nebo_raketa", monitor.ALL_CONTENT_CHANNELS)
+    async def test_kyiv_alerts_is_the_only_alert_feed(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyiv_alerts"])
+        self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("nebo_raketa", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("Nashee_PPO", monitor.ALL_CONTENT_CHANNELS)
+
+    async def test_kyiv_alerts_real_message_shapes_are_actionable(self):
+        alert = "тривога на сході області на мопеди. Поки без загроз."
+        clear = "Відбій балістичної загрози по всій Україні."
+
+        self.assertTrue(monitor.is_actionable_alert_message(alert))
+        self.assertTrue(monitor.is_actionable_alert_message(clear))
+        self.assertFalse(monitor.is_non_operational_alert_message(alert))
+        self.assertFalse(monitor.is_non_operational_alert_message(clear))
 
     async def test_alert_dedup_keeps_first_and_new_information(self):
         first = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва"
         duplicate = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва!"
         update = "⚠️ 3 шахеди рухаються через Васильків у напрямку Києва"
 
-        self.assertTrue(monitor.should_publish_alert(first, "nebo_raketa", now=100.0))
-        self.assertFalse(monitor.should_publish_alert(duplicate, "nebo_raketa", now=130.0))
-        self.assertTrue(monitor.should_publish_alert(update, "nebo_raketa", now=140.0))
+        self.assertTrue(monitor.should_publish_alert(first, "kyiv_alerts", now=100.0))
+        self.assertFalse(monitor.should_publish_alert(duplicate, "kyiv_alerts", now=130.0))
+        self.assertTrue(monitor.should_publish_alert(update, "kyiv_alerts", now=140.0))
 
     async def test_duplicate_window_expires(self):
         message = "Балістична ціль рухається у напрямку Києва"
-        self.assertTrue(monitor.should_publish_alert(message, "nebo_raketa", now=100.0))
-        self.assertTrue(monitor.should_publish_alert(message, "nebo_raketa", now=281.0))
+        self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=100.0))
+        self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=281.0))
 
 
 if __name__ == "__main__":

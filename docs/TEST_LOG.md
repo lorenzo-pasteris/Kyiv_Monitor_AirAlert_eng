@@ -133,6 +133,16 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato localmente.
 - **Limite:** manca ancora la verifica post-deploy sul volume Railway reale e un ciclo orario con messaggi recuperati dalla cronologia reale.
 
+### 2026-08-12 — Sostituzione del feed ALERT con Kyiv Alerts
+
+- **Ambiente:** sessione Telethon del container Railway e checkout locale isolato.
+- **Obiettivo:** configurare `@kyiv_alerts` come unica sorgente degli aggiornamenti durante ALERT ed escludere completamente `@nebo_raketa` e `@Nashee_PPO`.
+- **Verifica reale della fonte:** la sessione Railway risolve `@kyiv_alerts` come canale broadcast **Kyiv Alerts**, ID Telegram `-1001520282656`, risulta iscritta e legge i messaggi recenti.
+- **Test locali:** compilazione di `monitor.py` e `tests/test_routing.py`; suite `unittest` con controllo del feed unico, esclusione della fonte precedente e riconoscimento dei formati reali `тривога` e `Відбій` osservati nel canale.
+- **Risultato osservato:** 10 test eseguiti e superati; nessun errore di sintassi.
+- **Esito:** superato prima del deploy.
+- **Limite:** la consegna pubblica end-to-end deve essere confermata dal prossimo allarme reale; non è stato generato un falso allarme nel canale pubblico.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
