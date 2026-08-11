@@ -10,7 +10,7 @@ Una modifica non è considerata completa finché la documentazione non descrive 
 
 Kyiv Monitor pubblica informazioni in inglese in due destinazioni Telegram collegate ma con ruoli separati: il canale pubblico è riservato alle allerte, mentre il gruppo di discussione riceve i riepiloghi informativi. Il sistema ha due modalità operative:
 
-- **NORMAL**: mantiene silenzioso il canale, raccoglie i messaggi e pubblica riepiloghi orari nel gruppo collegato.
+- **NORMAL**: mantiene silenzioso il canale, raccoglie i messaggi e pubblica riepiloghi orari nel gruppo separato.
 - **ALERT**: sospende i riepiloghi e inoltra rapidamente nel canale, traducendoli, i messaggi di monitoraggio relativi all'allerta in corso.
 
 Il servizio è eseguito come worker Python su Railway e il codice è conservato su GitHub.
@@ -19,7 +19,7 @@ Il servizio è eseguito come worker Python su Railway e il codice è conservato 
 
 - **Railway**: esecuzione continua, configurazione tramite variabili d'ambiente e log.
 - **Telethon**: lettura dei canali e dei gruppi Telegram.
-- **Telegram Bot API**: pubblicazione delle allerte nel canale e dei riepiloghi nel gruppo collegato.
+- **Telegram Bot API**: pubblicazione delle allerte nel canale e dei riepiloghi nel gruppo separato.
 - **`@kyiv_airraid_alert`**: unica sorgente dello stato di allerta per Kyiv città.
 - **Anthropic API**: traduzione e produzione dei riepiloghi.
 - **GitHub**: versionamento e origine dei deployment Railway.
@@ -35,18 +35,18 @@ Le sorgenti di contenuto sono:
 - `@kievinfo_kyiv`: informazioni concrete sulla vita e sulle infrastrutture di Kyiv.
 - `@shv_ukr`: sviluppi politici, economici, diplomatici e nazionali ucraini.
 - `@AMK_Mapping`: sviluppi militari rilevanti per la guerra in Ucraina.
-- `@Nashee_PPO`: monitoraggio della difesa aerea, messaggi in tempo reale e recap numerici degli attacchi.
-- `@nebo_raketa`: seconda sorgente real-time usata esclusivamente durante ALERT per coprire ritardi o silenzi temporanei di `@Nashee_PPO`.
+
+La sola sorgente degli aggiornamenti real-time durante ALERT è `@nebo_raketa`, scelta perché focalizzata su Kyiv. `@Nashee_PPO` è stato rimosso completamente perché copre l'intera Ucraina e produceva aggiornamenti troppo ampi per il canale.
 
 `@monitorwarr` è stato rimosso completamente e non deve essere registrato o letto.
 
 Le destinazioni di produzione sono separate:
 
 - `TARGET_CHAT_ID` identifica il canale pubblico **Kyiv Air Alert**, riservato a inizio allerta, aggiornamenti real-time tradotti, cessato allarme ed eventuali override manuali;
-- `SUMMARY_CHAT_ID` identifica il gruppo collegato **Kyiv Hourly News 🇺🇦**, destinazione esclusiva dei riepiloghi orari e del recap delle 07:00.
+- `SUMMARY_CHAT_ID` identifica il gruppo separato **Kyiv Hourly News 🇺🇦**, destinazione esclusiva dei riepiloghi orari e del recap delle 07:00.
 - `SUMMARY_CHAT_LINK` contiene il link di accesso al gruppo, usato nel messaggio pubblico di cessato allarme.
 
-Gli ID devono essere configurati in Railway e non inseriti nel codice. Poiché il gruppo è collegato al canale tramite la funzione Discussion di Telegram, i post di allerta del canale vengono inoltrati automaticamente anche nel gruppo da Telegram. Il worker non duplica autonomamente le allerte nel gruppo.
+Gli ID devono essere configurati in Railway e non inseriti nel codice. Il gruppo non è collegato al canale tramite la funzione Discussion di Telegram: in questo modo gli attacchi non vengono copiati nel gruppo. Il worker invia al gruppo soltanto gli output NORMAL.
 
 ### Trigger dell'allerta
 
@@ -75,7 +75,7 @@ Il messaggio di cessato allarme resta nel canale di allerta perché descrive un 
 
 In modalità NORMAL:
 
-- i messaggi delle quattro sorgenti di contenuto vengono filtrati e conservati in memoria;
+- i messaggi delle tre sorgenti di contenuto vengono filtrati e conservati in memoria;
 - ogni ora viene generato un riepilogo in inglese e inviato esclusivamente a `SUMMARY_CHAT_ID`;
 - il canale configurato tramite `TARGET_CHAT_ID` resta silenzioso in NORMAL;
 - se nessuna categoria contiene aggiornamenti rilevanti, anche il gruppo dei riepiloghi resta silenzioso ma `OPS_CHAT_ID` riceve un heartbeat “No relevant updates” con ora e fuso; il ciclo viene registrato come completato e non attiva il watchdog;
@@ -83,18 +83,6 @@ In modalità NORMAL:
 - i contenuti non pertinenti e la pubblicità vengono esclususi;
 - tra le 01:00 e le 07:00, fuso Europe/Kyiv, i riepiloghi orari sono sospesi;
 - al termine della pausa notturna viene prodotto nel gruppo un recap complessivo.
-
-### Regole per `@Nashee_PPO`
-
-I riepiloghi devono dare priorità ai recap notturni o giornalieri contenenti quantità precise:
-
-- numero totale di Shahed e altri UAV;
-- missili da crociera, balistici e ipersonici;
-- bombe guidate e altre tipologie dichiarate;
-- intercettazioni, impatti e aree interessate;
-- vittime e danni, soltanto quando esplicitamente riportati.
-
-I numeri devono essere conservati separatamente. Il modello non deve inventare, sommare o combinare quantità non compatibili.
 
 ## Modalità ALERT
 
@@ -104,12 +92,12 @@ Quando lo stato effettivo diventa ALERT:
 - i riepiloghi verso `SUMMARY_CHAT_ID` vengono sospesi;
 - nel canale `TARGET_CHAT_ID` viene pubblicato un unico messaggio di inizio allerta;
 - vengono ignorati i contenuti di `@kievinfo_kyiv` e `@AMK_Mapping`;
-- vengono elaborati i nuovi messaggi reali di `@Nashee_PPO` e `@nebo_raketa`;
-- il primo avviso ricevuto viene pubblicato; per tre minuti i testi identici o fortemente simili dell'altra sorgente vengono soppressi, mentre un aggiornamento con quantità, località o direzione diverse passa;
+- vengono elaborati esclusivamente i nuovi messaggi reali di `@nebo_raketa`;
+- per tre minuti i testi identici o fortemente simili vengono soppressi, mentre un aggiornamento con quantità, località o direzione diverse passa;
 - ciascun messaggio viene tradotto in inglese e pubblicato nel canale dopo pochi secondi;
 - richieste di donazioni, numeri di carte, ringraziamenti, auguri, pubblicità e contenuti non operativi vengono filtrati prima della traduzione, anche quando citano un attacco passato.
 
-Quando lo stato effettivo torna CLEAR, il sistema pubblica il cessato allarme nel canale e ritorna in NORMAL. I riepiloghi nel gruppo riprendono alla successiva esecuzione pianificata. Telegram inoltra automaticamente nel gruppo collegato i post pubblicati nel canale durante ALERT.
+Quando lo stato effettivo torna CLEAR, il sistema pubblica il cessato allarme nel canale e ritorna in NORMAL. I riepiloghi nel gruppo riprendono alla successiva esecuzione pianificata. Poiché il gruppo è separato dal canale, Telegram non vi inoltra i post ALERT.
 
 ## Ambiente di test
 
@@ -120,7 +108,7 @@ Quando `TEST_MODE=true`:
 - viene usato esclusivamente `TEST_CHAT_ID` come sorgente e destinazione;
 - nessun handler viene registrato sui canali Telegram reali;
 - non viene letta l'API UkraineAlarm;
-- non viene inviato nulla né al canale di produzione né al gruppo collegato;
+- non viene inviato nulla né al canale di produzione né al gruppo NORMAL;
 - i riepiloghi vengono eseguiti ogni 3 minuti invece che ogni ora.
 
 Comandi disponibili:
@@ -131,7 +119,7 @@ Comandi disponibili:
 - `/test_end`: termina direttamente l'allerta di test.
 - `/test_summary`: forza un riepilogo quando il test è in NORMAL.
 
-I messaggi simulati sono identificati da `[TEST_SOURCE:Nashee_PPO]`. Il marcatore e le etichette interne come `[burst 6/20]` vengono rimossi prima della traduzione. I messaggi prodotti dal bot sono esclusi esplicitamente dalla rielaborazione tramite sender ID e message ID.
+I messaggi simulati sono identificati da `[TEST_SOURCE:nebo_raketa]`. Il marcatore e le etichette interne come `[burst 6/20]` vengono rimossi prima della traduzione. I messaggi prodotti dal bot sono esclusi esplicitamente dalla rielaborazione tramite sender ID e message ID.
 
 Quando `TEST_MODE=false`, i comandi e gli handler di simulazione sono disabilitati e vengono usate esclusivamente le sorgenti reali.
 
@@ -164,7 +152,7 @@ ANTHROPIC_API_KEY
 - Rispetto automatico di `retry_after` in caso di flood control.
 - Una sola connessione HTTP condivisa.
 - Serializzazione degli invii per evitare raffiche incontrollate.
-- Deduplicazione temporale e testuale tra `@Nashee_PPO` e `@nebo_raketa`, con conservazione degli aggiornamenti che aggiungono fatti nuovi.
+- Deduplicazione temporale e testuale degli output di `@nebo_raketa`, con conservazione degli aggiornamenti che aggiungono fatti nuovi.
 - Deduplicazione dei messaggi simulati e protezione contro i loop del bot.
 
 ## Limiti noti
@@ -178,7 +166,7 @@ ANTHROPIC_API_KEY
 
 1. Verificare che Railway mostri un solo deployment attivo.
 2. Verificare che il log indichi `TEST_MODE` o produzione in modo coerente.
-3. In produzione, controllare che le sorgenti dei riepiloghi siano `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping` e `Nashee_PPO`, e che i feed ALERT siano `Nashee_PPO` e `nebo_raketa`.
+3. In produzione, controllare che le sorgenti dei riepiloghi siano `kievinfo_kyiv`, `shv_ukr` e `AMK_Mapping`, e che l'unico feed ALERT sia `nebo_raketa`.
 4. Controllare che `@kyiv_airraid_alert` sia registrato come trigger e non come contenuto.
 5. Verificare che il messaggio tecnico di avvio arrivi soltanto a Ops.
 6. Verificare che le allerte vadano a `TARGET_CHAT_ID` e i riepiloghi a `SUMMARY_CHAT_ID`.
@@ -186,12 +174,11 @@ ANTHROPIC_API_KEY
 
 ## Aggiornamento operativo: riepiloghi e sorgenti
 
-Il ciclo NORMAL usa quattro sorgenti di contenuto:
+Il ciclo NORMAL usa tre sorgenti di contenuto:
 
 - `@kievinfo_kyiv` per disservizi e infrastrutture di Kyiv;
 - `@shv_ukr` per sviluppi politici, economici, diplomatici e nazionali ucraini;
-- `@AMK_Mapping` per analisi militare della guerra Russia-Ucraina;
-- `@Nashee_PPO` per monitoraggio della difesa aerea e riepiloghi numerici degli attacchi.
+- `@AMK_Mapping` per analisi militare della guerra Russia-Ucraina.
 
 Il fuso orario operativo è `Europe/Kyiv`: gli output mostrano automaticamente `EEST` in estate e `EET` in inverno. La pausa notturna 01:00–07:00 segue lo stesso fuso.
 
@@ -207,7 +194,7 @@ I log registrano buffer, tentativi AI, uso del fallback, risultato per sorgente 
 
 Le sorgenti indicano esclusivamente la provenienza dei messaggi. Non esiste più una categoria
 assegnata rigidamente a ciascun canale: a ogni ciclo NORMAL, ciascun messaggio acquisito da
-`@kievinfo_kyiv`, `@shv_ukr`, `@AMK_Mapping` e `@Nashee_PPO` viene valutato contro tutte
+`@kievinfo_kyiv`, `@shv_ukr` e `@AMK_Mapping` viene valutato contro tutte
 le categorie:
 
 - `kyiv_city`: disservizi, infrastrutture e conseguenze concrete sulla vita di Kyiv;
