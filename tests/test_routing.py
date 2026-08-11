@@ -113,23 +113,23 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_actionable_alert_message(unrelated))
         self.assertTrue(monitor.is_actionable_alert_message(terse_follow_up))
 
-    async def test_second_alert_feed_is_alert_only(self):
-        self.assertIn("Nashee_PPO", monitor.ALERT_FEED_CHANNELS)
-        self.assertIn("nebo_raketa", monitor.ALERT_FEED_CHANNELS)
+    async def test_nebo_raketa_is_the_only_alert_feed(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["nebo_raketa"])
         self.assertNotIn("nebo_raketa", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("Nashee_PPO", monitor.ALL_CONTENT_CHANNELS)
 
-    async def test_cross_source_dedup_keeps_first_and_new_information(self):
+    async def test_alert_dedup_keeps_first_and_new_information(self):
         first = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва"
         duplicate = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва!"
         update = "⚠️ 3 шахеди рухаються через Васильків у напрямку Києва"
 
-        self.assertTrue(monitor.should_publish_alert(first, "Nashee_PPO", now=100.0))
+        self.assertTrue(monitor.should_publish_alert(first, "nebo_raketa", now=100.0))
         self.assertFalse(monitor.should_publish_alert(duplicate, "nebo_raketa", now=130.0))
         self.assertTrue(monitor.should_publish_alert(update, "nebo_raketa", now=140.0))
 
     async def test_duplicate_window_expires(self):
         message = "Балістична ціль рухається у напрямку Києва"
-        self.assertTrue(monitor.should_publish_alert(message, "Nashee_PPO", now=100.0))
+        self.assertTrue(monitor.should_publish_alert(message, "nebo_raketa", now=100.0))
         self.assertTrue(monitor.should_publish_alert(message, "nebo_raketa", now=281.0))
 
 
