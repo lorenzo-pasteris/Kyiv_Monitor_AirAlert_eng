@@ -1,8 +1,8 @@
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
-- Normal mode: hourly analysis of 4 channels published in the linked group
-- Alert mode (24/7): @Nashee_PPO + @nebo_raketa with cross-source deduplication
+- Normal mode: hourly analysis of 3 channels published in the news group
+- Alert mode (24/7): only @nebo_raketa in the alert-only channel
 - Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -50,12 +50,11 @@ OPS_CHAT_ID = os.environ.get("OPS_CHAT_ID", OWNER_CHAT_ID)  # operational alerts
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
-MONITOR_CHANNEL = "Nashee_PPO"
-SECONDARY_ALERT_CHANNEL = "nebo_raketa"
+ALERT_FEED_CHANNEL = "nebo_raketa"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
-ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL, MONITOR_CHANNEL]
-ALERT_FEED_CHANNELS = [MONITOR_CHANNEL, SECONDARY_ALERT_CHANNEL]
+ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL]
+ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL]
 
 SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in production
 HEALTH_CHECK_INTERVAL = 43200  # 12 hours
@@ -200,7 +199,8 @@ bot_output_message_ids = set()
 simulator_processed_message_ids = set()
 recent_alert_messages = deque()
 ALERT_DEDUP_WINDOW = 180
-TEST_SOURCE_PREFIX = "[TEST_SOURCE:Nashee_PPO]"
+TEST_SOURCE_PREFIX = "[TEST_SOURCE:nebo_raketa]"
+TEST_BUFFER_CHANNEL = AMK_CHANNEL
 TEST_SAMPLE_MESSAGES = [
     "⚠️ Київщина: зафіксовано рух ударних БпЛА Shahed drone у напрямку Києва.",
     "Ракетна небезпека: missile launch activity зафіксована з північного напрямку.",
@@ -947,7 +947,7 @@ async def health_loop():
 
 
 
-async def handle_alert_message(clean, source=MONITOR_CHANNEL):
+async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL):
     """Deliver low-latency alerts; TEST_MODE uses one Bot API write to avoid group flood limits."""
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     if TEST_MODE:
@@ -999,7 +999,7 @@ async def process_test_source_text(clean):
         return
 
     time_str = datetime.now(TZ).strftime("%H:%M")
-    buffers[MONITOR_CHANNEL].append({"time": time_str, "text": clean[:800]})
+    buffers[TEST_BUFFER_CHANNEL].append({"time": time_str, "text": clean[:800]})
 
 
 async def publish_test_source(client, text):
@@ -1174,7 +1174,7 @@ async def main():
                     asyncio.create_task(handle_alert_message(clean, source=channel))
                 return
 
-            if channel == SECONDARY_ALERT_CHANNEL:
+            if channel == ALERT_FEED_CHANNEL:
                 return
 
             time_str = datetime.now(TZ).strftime("%H:%M")
