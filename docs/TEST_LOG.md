@@ -119,7 +119,10 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Pulizia storico:** inventariati 130 messaggi; 35 copie automatiche ALERT avevano mittente e inoltro entrambi uguali al canale e coincidevano esattamente con l'insieme dei messaggi prefissati `🚨`, `🔴` o `✅`.
 - **Operazione:** eliminate esclusivamente le 35 copie ALERT. Verifica successiva: 95 messaggi totali, zero messaggi ALERT e 91 messaggi NORMAL conservati.
 - **Recuperabilità:** le copie eliminate dal gruppo non sono ripristinabili automaticamente, ma gli originali rimangono nel canale ALERT.
-- **Esito:** superato per separazione Telegram e regressione locale; verifica Railway post-deploy ancora necessaria.
+- **Commit applicativo:** `ed7cc9c914fb78830fd224630c3ae32deb4adf8e`.
+- **Deployment Railway:** `377aee41-74ed-4e57-96ee-73802b28da98` attivo con esito riuscito.
+- **Log post-deploy:** stato Telegram `CLEAR`; sorgenti NORMAL `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping`; unico feed ALERT `nebo_raketa`; pianificazione oraria attiva in `Europe/Kyiv`; nessuna registrazione di `Nashee_PPO`.
+- **Esito:** superato per separazione Telegram, regressione locale e avvio della configurazione definitiva in produzione.
 
 ## Test futuri consigliati
 
