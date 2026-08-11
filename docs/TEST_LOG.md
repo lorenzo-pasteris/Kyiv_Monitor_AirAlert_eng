@@ -110,6 +110,17 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato per build, avvio, risoluzione delle sorgenti e stabilità iniziale del worker.
 - **Limite:** il filtro e la deduplicazione non sono stati provocati con messaggi falsi nel canale pubblico; la loro prova end-to-end definitiva avverrà al prossimo evento reale oppure in un test isolato a due sorgenti.
 
+### 2026-08-11 — Separazione definitiva gruppo NORMAL e canale ALERT
+
+- **Ambiente:** checkout locale, Telegram produzione e sessione Telethon del worker.
+- **Modifica sorgenti:** `@Nashee_PPO` rimosso completamente; `@nebo_raketa` configurato come unico feed ALERT; le sorgenti NORMAL diventano `kievinfo_kyiv`, `shv_ukr` e `AMK_Mapping`.
+- **Test locali:** compilazione Python e 6 test `unittest` superati, inclusi feed ALERT unico, filtro contenuti, deduplicazione e routing casuale su 500 messaggi.
+- **Separazione Telegram:** il gruppo **Kyiv Hourly News 🇺🇦** è stato scollegato dalla funzione Discussion del canale; verifica `linked_chat_id=None`.
+- **Pulizia storico:** inventariati 130 messaggi; 35 copie automatiche ALERT avevano mittente e inoltro entrambi uguali al canale e coincidevano esattamente con l'insieme dei messaggi prefissati `🚨`, `🔴` o `✅`.
+- **Operazione:** eliminate esclusivamente le 35 copie ALERT. Verifica successiva: 95 messaggi totali, zero messaggi ALERT e 91 messaggi NORMAL conservati.
+- **Recuperabilità:** le copie eliminate dal gruppo non sono ripristinabili automaticamente, ma gli originali rimangono nel canale ALERT.
+- **Esito:** superato per separazione Telegram e regressione locale; verifica Railway post-deploy ancora necessaria.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
