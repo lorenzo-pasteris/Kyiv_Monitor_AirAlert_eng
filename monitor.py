@@ -139,8 +139,7 @@ CATEGORY_RESULT_SCHEMA = {
                         },
                         "bullets": {
                             "type": "array",
-                            "maxItems": 5,
-                            "items": {"type": "string", "maxLength": 180},
+                            "items": {"type": "string"},
                         },
                     },
                     "required": ["selected_ids", "bullets"],
