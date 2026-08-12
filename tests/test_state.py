@@ -35,6 +35,25 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         monitor.production_client = self.original_client
         monitor.content_source_entities = self.original_entities
 
+    def test_structured_schema_avoids_unsupported_limit_keywords(self):
+        schema_text = repr(monitor.CATEGORY_RESULT_SCHEMA)
+        self.assertNotIn("maxItems", schema_text)
+        self.assertNotIn("maxLength", schema_text)
+
+    def test_normalizer_caps_bullets_without_schema_limits(self):
+        parsed = {
+            "categories": {
+                key: {"selected_ids": [], "bullets": []}
+                for key in monitor.CATEGORIES
+            }
+        }
+        parsed["categories"]["kyiv_city"]["bullets"] = ["x" * 250] * 7
+
+        normalized = monitor.normalize_category_result(parsed, [])
+
+        self.assertEqual(len(normalized["kyiv_city"]["bullets"]), 5)
+        self.assertTrue(all(len(item) == 180 for item in normalized["kyiv_city"]["bullets"]))
+
     async def test_failed_public_start_does_not_commit_state_and_can_retry(self):
         results = [None, {"message_id": 42}]
 
