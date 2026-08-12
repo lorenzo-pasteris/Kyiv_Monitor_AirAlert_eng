@@ -291,6 +291,16 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_actionable_alert_message(unrelated))
         self.assertTrue(monitor.is_actionable_alert_message(terse_follow_up))
 
+    async def test_alert_source_promotional_footer_is_removed(self):
+        raw = (
+            "Бровари, Бориспіль, Українка – ще до вас!\n\nㅤ\n"
+            "Надіслати новину @novosti_kieva_bot\n👉ПІДПИСАТИСЯ"
+        )
+        self.assertEqual(
+            monitor.clean_alert_source_text(raw),
+            "Бровари, Бориспіль, Українка – ще до вас!",
+        )
+
     async def test_kievreal1_is_the_only_alert_feed(self):
         self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kievreal1"])
         self.assertNotIn("kievreal1", monitor.ALL_CONTENT_CHANNELS)
