@@ -1,3 +1,6 @@
+import time as _telegram_recovery_time
+_telegram_recovery_time.sleep(86400)
+
 # Telegram recovery maintenance deployment 2026-08-12 final
 # Railway stable maintenance marker: 2026-08-12
 """
