@@ -1,3 +1,4 @@
+# Telegram recovery maintenance deployment 2026-08-12 final
 # Railway stable maintenance marker: 2026-08-12
 """
  Railway maintenance redeploy marker: Telegram session recovery 2026-08-12.
