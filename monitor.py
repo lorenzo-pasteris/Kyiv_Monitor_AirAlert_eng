@@ -26,6 +26,7 @@ from alert_rules import classify_telegram_alert
 TELEGRAM_API_ID = int(os.environ["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = os.environ["TELEGRAM_API_HASH"]
 TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
+TEST_TELEGRAM_SESSION = os.environ.get("TEST_TELEGRAM_SESSION")
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USER_ID = int(BOT_TOKEN.split(":", 1)[0])
@@ -1419,11 +1420,32 @@ async def main():
     alert_transition_lock = asyncio.Lock()
     stats_db_ready = initialize_stats_db()
 
-    client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
-    await client.start()
+    client = None
+    if not TEST_MODE or TEST_TELEGRAM_SESSION:
+        session_value = TEST_TELEGRAM_SESSION if TEST_MODE else TELEGRAM_SESSION
+        client = TelegramClient(StringSession(session_value), TELEGRAM_API_ID, TELEGRAM_API_HASH)
+        await client.start()
 
     if not await startup_self_check():
         raise RuntimeError("Startup self-check failed")
+
+    if TEST_MODE and not TEST_TELEGRAM_SESSION:
+        print(
+            f"🧪 TEST_MODE enabled without a Telegram listener. Exclusive output chat: {TEST_CHAT_ID}; "
+            "the production Telethon session is not opened."
+        )
+        await send_to_alert_channel(
+            "🧪 <b>Kyiv Monitor started in isolated TEST_MODE</b>\n"
+            "Real Telegram sources and interactive test commands are disabled."
+        )
+        asyncio.create_task(summary_loop())
+        asyncio.create_task(summary_watchdog_loop())
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await drain_alert_delivery_tasks(timeout=10.0)
+            await http_client.aclose()
+        return
 
     if TEST_MODE:
         print(f"🧪 TEST_MODE enabled. Exclusive chat: {TEST_CHAT_ID}; real Telegram sources are NOT registered.")
