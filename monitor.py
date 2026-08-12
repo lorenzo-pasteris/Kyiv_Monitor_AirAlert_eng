@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.errors import AuthKeyDuplicatedError
 from alert_rules import classify_telegram_alert
 
 # --- Credentials ---
@@ -1562,7 +1563,15 @@ async def main():
     if not TEST_MODE or TEST_TELEGRAM_SESSION:
         session_value = TEST_TELEGRAM_SESSION if TEST_MODE else TELEGRAM_SESSION
         client = TelegramClient(StringSession(session_value), TELEGRAM_API_ID, TELEGRAM_API_HASH)
-        await client.start()
+        try:
+            await client.start()
+        except AuthKeyDuplicatedError:
+            await send_to_owner(
+                "WARNING Telegram session invalidated (AuthKeyDuplicatedError). "
+                "The worker cannot start. Regenerate TELEGRAM_SESSION and redeploy. "
+                "Ensure the session runs from only one place."
+            )
+            raise
 
     if not await startup_self_check():
         raise RuntimeError("Startup self-check failed")
