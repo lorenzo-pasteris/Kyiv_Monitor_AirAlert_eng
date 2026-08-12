@@ -67,6 +67,7 @@ ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL]
 SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in production
 HEALTH_CHECK_INTERVAL = 43200  # 12 hours
 SILENCE_THRESHOLD = 4 * 3600  # 4 hours of total silence = warning
+ALERT_FEED_POLL_INTERVAL = float(os.environ.get("ALERT_FEED_POLL_INTERVAL", "5"))
 
 # --- Timezone / night pause ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
@@ -184,6 +185,7 @@ ALERT_TACTICAL_KEYWORDS = SECURITY_KEYWORDS + [
 ALERT_TERSE_FOLLOWUP_KEYWORDS = [
     "підліта", "в бік", "у бік", "на бориспіль", "на бровари", "від броварів",
     "через водосховище", "уважно", "гучно", "димер", "згурів", "троєщин",
+    "рембаз", "осещин", "тец-6", "березан", "українк",
 ]
 
 # --- State ---
@@ -593,6 +595,21 @@ async def backfill_alert_feed(client, source_entities):
             print(f"[ALERT BACKFILL PROCESSED] @{channel} id={message.id}")
     print(f"[ALERT BACKFILL COMPLETE] delivered={delivered}")
     return delivered
+
+
+async def alert_feed_poll_loop(client, source_entities):
+    """Poll ALERT history so missed Telethon push updates cannot create a blind spot."""
+    while True:
+        try:
+            if alert_active:
+                delivered = await backfill_alert_feed(client, source_entities)
+                if delivered:
+                    print(f"[ALERT POLL RECOVERED] delivered={delivered}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[ALERT POLL ERROR] {type(exc).__name__}: {exc}")
+        await asyncio.sleep(ALERT_FEED_POLL_INTERVAL)
 
 
 def persist_normal_message(channel, message_id, message_at, text):
@@ -1725,6 +1742,10 @@ async def main():
 
         if alert_active:
             await backfill_alert_feed(client, source_entities)
+
+        # Telethon push events are best-effort. The cursor-based poller is the
+        # production safety net and recovers any post the live listener misses.
+        asyncio.create_task(alert_feed_poll_loop(client, source_entities))
 
     asyncio.create_task(summary_loop())
     asyncio.create_task(summary_watchdog_loop())
