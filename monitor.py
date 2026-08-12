@@ -307,16 +307,20 @@ def clean_text(text):
 
 
 def clean_alert_source_text(text):
-    """Remove @kievreal1 promotional footers before filtering and translation."""
+    """Remove promotional lines from alert-source text before filtering and translation."""
     clean = clean_text(text)
-    footer_patterns = (
-        r"(?im)^\s*(?:надіслати новину|send news|report news)\b.*$",
-        r"(?im)^\s*(?:👉\s*)?(?:підписатися|subscribe)\s*$",
-        r"(?im)^\s*ㅤ\s*$",
+    promo_line_patterns = (
+        r"(?i)(?:https?://|www\.|t\.me/|telegram\.me/)",
+        r"(?i)\b(?:надіслати новину|написати нам|підписатися|підпишись|підписуйся)\b",
+        r"(?i)\b(?:send news|report news|subscribe|watch live|live stream|join us)\b",
+        r"(?i)^\s*(?:👉\s*)?live\s*[:!—-]*\s*$",
+        r"^\s*ㅤ\s*$",
     )
-    for pattern in footer_patterns:
-        clean = re.sub(pattern, "", clean)
-    return re.sub(r"\n{3,}", "\n\n", clean).strip()
+    kept_lines = [
+        line for line in clean.splitlines()
+        if not any(re.search(pattern, line) for pattern in promo_line_patterns)
+    ]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
 
 def is_night():
     h = datetime.now(TZ).hour
@@ -426,13 +430,44 @@ async def translate_message(text):
                 "Output ONLY the translation. Never add notes, disclaimers, explanations, alternative "
                 "readings, or comments about OCR/ambiguity. If a word is a place name, keep it as the "
                 "place name. Known place names include: Brovary, Bucha, Irpin, Vyshhorod, Boryspil, "
-                "Obukhiv, Fastiv, Bila Tserkva, Kharkiv, Dnipro, Odesa, Lviv, Zaporizhzhia. "
+                "Obukhiv, Fastiv, Bila Tserkva, Kharkiv, Dnipro, Odesa, Lviv, Zaporizhzhia, "
+                "Bereznyaky, Osokorky, Poznyaky, Troieshchyna, Berezan, Rembaza, Vyshneve, "
+                "Zhuliany, Borshchahivka, Dymer, Boyarka, Yahotyn, Hostomel, Petrivtsi, "
+                "Trebukhov, Zalissia, Dymerka, Slavutych, Nivki, Pochayna, Koncha-Zaspa, Pyrohiv. "
                 "Remove promo/subscribe/LIVE tags. Keep locations, times, quantities, and uncertainty. "
                 "Translation only:\n\n" + text)}]},
             timeout=httpx.Timeout(15.0, connect=5.0)
             )
         r.raise_for_status()
-        return r.json()["content"][0]["text"].strip()
+        result = r.json()["content"][0]["text"].strip()
+        refusal_markers = (
+            "cannot provide a reliable translation",
+            "unable to provide a reliable translation",
+            "cannot provide a meaningful translation",
+            "no meaningful translation",
+            "appears to be incomplete",
+            "text is incomplete",
+            "incomplete or truncated",
+            "appears to be a partial phrase",
+            "text is a fragment",
+            "appears to be a fragment",
+            "i can only see",
+            "full translation would require",
+            "the single word",
+            "the phrase translates to",
+            "this translates to",
+        )
+        lowered = result.lower()
+        if not result or any(m in lowered for m in refusal_markers):
+            print(f"[TRANSLATION SKIPPED] non-translation for input: {text[:120]!r}")
+            try:
+                await send_to_owner(
+                    f"Ops: skipped non-translation.\nInput: {text[:300]}\nModel output: {result[:300]}"
+                )
+            except Exception as ops_err:
+                print(f"Ops notify failed: {ops_err}")
+            return None
+        return result
     except Exception as e:
         print(f"Translation error: {e}")
         return None
@@ -1465,48 +1500,34 @@ def schedule_alert_delivery(clean, source):
 
 
 async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None):
-    """Deliver low-latency alerts; TEST_MODE uses one Bot API write to avoid group flood limits."""
+    """Translate first, then publish one final English alert if it is still current."""
     generation = alert_generation if generation is None else generation
     if generation != alert_generation or not alert_active:
         print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
         return
+
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
-    if TEST_MODE:
-        translation = await translate_message(clean[:1500])
-        if generation != alert_generation or not alert_active:
-            print(f"[ALERT STALE] test translation discarded source=@{source}")
-            return
-        if translation:
-            await safe_send(f"🔴 {html.escape(translation)}")
-        else:
-            await safe_send(f"🔴 ⚠️ Translation unavailable\n\n{html.escape(clean[:1000])}")
-        return
-
-    original = html.escape(clean[:1500])
-    sent = await safe_send(f"🔴 <b>Incoming alert — translating…</b>\n\n{original}")
-    if not sent:
-        return
-
     try:
         translation = await translate_message(clean[:1500])
     except asyncio.CancelledError:
-        await edit_message(
-            ALERT_OUTPUT_CHAT_ID,
-            sent["message_id"],
-            f"🔴 ⚠️ Translation interrupted at alert end\n\n{html.escape(clean[:1000])}",
-        )
+        print(f"[ALERT CANCELLED] translation interrupted source=@{source} generation={generation}")
         raise
+
     if generation != alert_generation or not alert_active:
         print(f"[ALERT STALE] translation discarded source=@{source} generation={generation}")
         return
-    if translation:
-        await edit_message(ALERT_OUTPUT_CHAT_ID, sent["message_id"], f"🔴 {html.escape(translation)}")
-    else:
-        await edit_message(
-            ALERT_OUTPUT_CHAT_ID,
-            sent["message_id"],
-            f"🔴 ⚠️ Translation unavailable\n\n{html.escape(clean[:1000])}",
-        )
+    if not translation:
+        print(f"[ALERT NOT PUBLISHED] translation unavailable source=@{source}")
+        try:
+            await send_to_owner(
+                f"Ops: alert not published because translation was unavailable.\n"
+                f"Source: @{source}\nInput: {clean[:500]}"
+            )
+        except Exception as ops_err:
+            print(f"Ops notify failed: {ops_err}")
+        return
+
+    await safe_send(f"🔴 {html.escape(translation)}")
 
 
 async def process_test_source_text(clean):
