@@ -159,6 +159,22 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato end-to-end nell'ambiente reale per Anthropic e Telegram, con isolamento completo nella chat privata di test.
 - **Limite:** resta da osservare il prossimo allarme esterno reale per provare il listener Telethon e il ciclo pubblico senza simulazioni; il test non ha scritto nulla nel canale pubblico.
 
+### 2026-08-12 — Staging PR 6 e compatibilità Anthropic Structured Outputs
+
+- **Ambiente:** Railway `staging-pr-6`, environment `1f687c32-c70a-4d83-a19a-319f197ce772`, branch `codex/stabilize-monitor`, con `TEST_MODE=true` e output confinati a `TEST_CHAT_ID`.
+- **Configurazione preliminare:** aggiunti esplicitamente `OWNER_CHAT_ID` e `ADMIN_USER_IDS` alle variabili Railway; nessun valore sensibile registrato in questo file.
+- **CI iniziale:** GitHub Actions completata con successo sul candidato iniziale `cf84798f68f1cc86cdb7104284c1b8cb70bec7ea`.
+- **Startup staging:** deployment `203190bb-5e9b-427d-92f8-7a3be51c690a` attivo; self-check SQLite e destinazioni Bot API superato; log `TEST_MODE enabled` e sorgenti Telegram reali non registrate.
+- **Primo test end-to-end:** transizioni NORMAL → ALERT → NORMAL, traduzione dell'aggiornamento `@kyiv_alerts` e quattro consegne Telegram riuscite; il riepilogo ha tuttavia ricevuto HTTP 400 da Anthropic perché `maxItems` non è supportato nello schema JSON. Il fallback ha consegnato un risultato, ma ha classificato erroneamente la notizia metro come `military`.
+- **Esito iniziale:** fallito; il fallback ha evitato la perdita della consegna ma ha rivelato una regressione reale di qualità.
+- **Correzione:** rimossi dallo schema Anthropic `maxItems` e `maxLength`; il limite di cinque bullet da 180 caratteri resta applicato deterministicamente da `normalize_category_result`. Aggiunti due test di regressione. Commit `6178f6a82c0cc99627efd3e68fd7a356150f6f72` e `2b14256ad77101ca9a800145dcc19384676ec211`.
+- **CI finale:** GitHub Actions completata con successo sul commit `2b14256ad77101ca9a800145dcc19384676ec211`; 18 test attesi.
+- **Deployment corretto:** `2675985d-2dd9-43d5-ac7d-d4eb4c6c0bc8`, stato `Active`, worker `Online`, sempre con `TEST_MODE=true`.
+- **Secondo test end-to-end:** marker `STAGING_PR6_E2E_20260812_0835`; transizioni confermate, traduzione ALERT inviata, analisi Anthropic completata senza fallback, notizia metro selezionata esclusivamente come `kyiv_city`, riepilogo consegnato.
+- **Risultato finale:** `STAGING_E2E_FIXED_RESULT True True True True DELIVERIES 4`.
+- **Esito:** superato dopo la correzione; nessun messaggio del test è stato inviato ai canali pubblici.
+- **Limite:** la prova riguarda staging isolato; il merge e il deployment di produzione restano separati.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
