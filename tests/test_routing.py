@@ -35,6 +35,10 @@ def load_monitor():
     httpx_stub = types.ModuleType("httpx")
     telethon_stub = types.ModuleType("telethon")
     telethon_sessions_stub = types.ModuleType("telethon.sessions")
+    telethon_tl_stub = types.ModuleType("telethon.tl")
+    telethon_functions_stub = types.ModuleType("telethon.tl.functions")
+    telethon_channels_stub = types.ModuleType("telethon.tl.functions.channels")
+    telethon_channels_stub.JoinChannelRequest = lambda entity: entity
     telethon_stub.TelegramClient = object
     telethon_stub.events = types.SimpleNamespace()
     telethon_stub.utils = types.SimpleNamespace()
@@ -42,6 +46,9 @@ def load_monitor():
     sys.modules.setdefault("httpx", httpx_stub)
     sys.modules.setdefault("telethon", telethon_stub)
     sys.modules.setdefault("telethon.sessions", telethon_sessions_stub)
+    sys.modules.setdefault("telethon.tl", telethon_tl_stub)
+    sys.modules.setdefault("telethon.tl.functions", telethon_functions_stub)
+    sys.modules.setdefault("telethon.tl.functions.channels", telethon_channels_stub)
 
     path = Path(__file__).parents[1] / "monitor.py"
     spec = importlib.util.spec_from_file_location("monitor_under_test", path)
@@ -299,9 +306,12 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         movement = "Реактивний БпЛА курсом на Бровари"
         defence = "2 БПЛА біля Броварів, працює ППО"
         clear = "❎ М. КИЇВ - ВІДБІЙ ТРИВОГИ"
+        terse_dymer = "Один в бік Димера через водосховище"
+        terse_brovary = "3 підлітають до Броварів"
+        terse_boryspil = "На Бориспіль один від Броварів"
         ordinary_news = "В УЗ повідомили про затримки в русі низки приміських поїздів на Київщині"
 
-        for message in (alert, movement, defence, clear):
+        for message in (alert, movement, defence, clear, terse_dymer, terse_brovary, terse_boryspil):
             self.assertTrue(monitor.is_actionable_alert_message(message))
             self.assertFalse(monitor.is_non_operational_alert_message(message))
         self.assertFalse(monitor.is_actionable_alert_message(ordinary_news))
