@@ -20,6 +20,7 @@ from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import JoinChannelRequest
 from alert_rules import classify_telegram_alert
 
 # --- Credentials ---
@@ -180,6 +181,10 @@ ALERT_TACTICAL_KEYWORDS = SECURITY_KEYWORDS + [
     "летять", "чисто", "знищено", "знищена", "знищений", "збито", "увага",
     "target", "heading", "moving", "destroyed", "shot down", "area clear",
 ]
+ALERT_TERSE_FOLLOWUP_KEYWORDS = [
+    "підліта", "в бік", "у бік", "на бориспіль", "на бровари", "від броварів",
+    "через водосховище", "уважно", "гучно", "димер", "згурів", "троєщин",
+]
 
 # --- State ---
 buffers = {ch: [] for ch in ALL_CONTENT_CHANNELS}
@@ -235,8 +240,10 @@ def is_non_operational_alert_message(text):
     )
 
 def is_actionable_alert_message(text):
-    """Allow tactical alerts and terse follow-ups; reject unrelated feed posts during ALERT."""
-    return contains_any(text, ALERT_TACTICAL_KEYWORDS)
+    """Allow explicit threats plus the terse location/direction follow-ups used by @kievreal1."""
+    if contains_any(text, ALERT_TACTICAL_KEYWORDS):
+        return True
+    return len(clean_text(text)) <= 500 and contains_any(text, ALERT_TERSE_FOLLOWUP_KEYWORDS)
 
 def is_pure_ad(text):
     if contains_any(text, SECURITY_KEYWORDS):
@@ -517,6 +524,75 @@ def persist_trigger_observation(state, message_id, message_at):
         persist_operational_state("telegram_alert_message_id", message_id),
         persist_operational_state("telegram_alert_message_at", utc_iso(message_at)),
     ))
+
+
+def alert_feed_cursor_key(channel):
+    return f"alert_feed_cursor:{channel}"
+
+
+def get_alert_feed_cursor(channel):
+    value = load_operational_state(alert_feed_cursor_key(channel))
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_alert_feed_cursor(channel, message_id):
+    return persist_operational_state(alert_feed_cursor_key(channel), int(message_id))
+
+
+async def ensure_alert_feed_membership(client, source_entities):
+    """Join every ALERT feed; resolving a public channel alone does not deliver live updates."""
+    for channel in ALERT_FEED_CHANNELS:
+        try:
+            await client(JoinChannelRequest(source_entities[channel]))
+            print(f"[ALERT SOURCE MEMBERSHIP] joined=@{channel}")
+        except Exception as exc:
+            if type(exc).__name__ == "UserAlreadyParticipantError":
+                print(f"[ALERT SOURCE MEMBERSHIP] already_joined=@{channel}")
+                continue
+            raise RuntimeError(f"Cannot join required ALERT feed @{channel}") from exc
+
+
+async def backfill_alert_feed(client, source_entities):
+    """Recover tactical posts emitted after the trigger but before listener readiness."""
+    if not alert_active:
+        return 0
+    trigger_at_raw = load_operational_state("telegram_alert_message_at")
+    trigger_at = None
+    if trigger_at_raw:
+        try:
+            trigger_at = datetime.fromisoformat(trigger_at_raw)
+        except ValueError:
+            print(f"[ALERT BACKFILL] invalid trigger timestamp={trigger_at_raw!r}")
+
+    delivered = 0
+    for channel in ALERT_FEED_CHANNELS:
+        cursor = get_alert_feed_cursor(channel)
+        messages = await client.get_messages(source_entities[channel], limit=50)
+        for message in reversed(messages):
+            if message.id <= cursor:
+                continue
+            if trigger_at and message.date and message.date < trigger_at:
+                continue
+            clean = clean_text(message.text or "")
+            if (
+                len(clean) < 5
+                or is_non_operational_alert_message(clean)
+                or is_pure_ad(clean)
+                or not is_actionable_alert_message(clean)
+            ):
+                set_alert_feed_cursor(channel, message.id)
+                print(f"[ALERT BACKFILL FILTERED] @{channel} id={message.id}")
+                continue
+            if should_publish_alert(clean, channel):
+                await handle_alert_message(clean, source=channel, generation=alert_generation)
+                delivered += 1
+            set_alert_feed_cursor(channel, message.id)
+            print(f"[ALERT BACKFILL PROCESSED] @{channel} id={message.id}")
+    print(f"[ALERT BACKFILL COMPLETE] delivered={delivered}")
+    return delivered
 
 
 def persist_normal_message(channel, message_id, message_at, text):
@@ -1532,6 +1608,7 @@ async def main():
         content_source_entities = {
             channel: source_entities[channel] for channel in ALL_CONTENT_CHANNELS
         }
+        await ensure_alert_feed_membership(client, source_entities)
 
         # Establish the Telegram trigger state immediately from its latest explicit event.
         recent_trigger_messages = await client.get_messages(source_entities[BACKUP_TRIGGER_CHANNEL], limit=20)
@@ -1624,8 +1701,10 @@ async def main():
                 return
 
             if alert_active:
-                if channel in ALERT_FEED_CHANNELS and should_publish_alert(clean, channel):
-                    schedule_alert_delivery(clean, source=channel)
+                if channel in ALERT_FEED_CHANNELS:
+                    if should_publish_alert(clean, channel):
+                        schedule_alert_delivery(clean, source=channel)
+                    set_alert_feed_cursor(channel, event.message.id)
                 return
 
             if channel == ALERT_FEED_CHANNEL:
@@ -1643,6 +1722,9 @@ async def main():
             else:
                 channel_buffer.append({"time": time_str, "text": clean[:800]})
                 print(f"[BUFFERED FALLBACK] @{channel}: pending={len(channel_buffer)} text={clean[:80]}")
+
+        if alert_active:
+            await backfill_alert_feed(client, source_entities)
 
     asyncio.create_task(summary_loop())
     asyncio.create_task(summary_watchdog_loop())
