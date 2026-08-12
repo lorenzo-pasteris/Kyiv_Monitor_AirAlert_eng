@@ -175,6 +175,19 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato dopo la correzione; nessun messaggio del test è stato inviato ai canali pubblici.
 - **Limite:** la prova riguarda staging isolato; il merge e il deployment di produzione restano separati.
 
+
+### 2026-08-12 — Cambio feed ALERT a Real Kyiv e isolamento Telethon staging
+
+- **Ambiente:** anteprima pubblica Telegram, GitHub Actions e Railway `staging-pr-6`.
+- **Obiettivo:** sostituire l'unico feed operativo ALERT con `@kievreal1`, mantenere il canale generalista escluso in NORMAL e impedire a staging di aprire la sessione Telethon di produzione.
+- **Verifica della fonte:** la pagina pubblica risolve `@kievreal1` come **Реальний Київ | Украина**; osservati formati reali su movimenti BPLА verso Kyiv/Brovary, attività PПО, esplosioni e cessato allarme. Osservata anche una notizia ferroviaria ordinaria usata come regressione negativa.
+- **Modifica:** `ALERT_FEED_CHANNELS=['kievreal1']`; il filtro accetta soltanto aggiornamenti tattici durante ALERT e ignora completamente la fonte durante CLEAR.
+- **Test automatici:** GitHub Actions run `31568036226`, 18 test superati; inclusi i formati reali di `@kievreal1` e il rifiuto della notizia ordinaria.
+- **Problema scoperto:** il tentativo di verifica Telethon ha rivelato che la stessa `TELEGRAM_SESSION` era condivisa tra staging e produzione. Telegram ha invalidato la chiave con `AuthKeyDuplicatedError`; il deployment staging `06206837-5b55-4c6e-9099-76dc302938f1` e il deployment produzione esistente risultano in crash.
+- **Correzione staging:** con `TEST_MODE=true`, il worker non apre più `TELEGRAM_SESSION`; i comandi interattivi richiedono una distinta `TEST_TELEGRAM_SESSION`. Deployment `bf4fea04-6274-4b1f-a549-e4c2c35e68ad` attivo e Online.
+- **Esito:** superato per codice, CI, formati della fonte e isolamento staging; produzione bloccata.
+- **Blocco produzione:** rigenerare una nuova `TELEGRAM_SESSION` e usarla esclusivamente in produzione prima del merge/deploy. Non è stato inviato alcun falso allarme pubblico.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
