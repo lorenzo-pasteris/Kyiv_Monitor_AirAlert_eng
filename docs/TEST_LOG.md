@@ -215,6 +215,20 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato per recovery, consegna, membership, filtro, CI e avvio della correzione in produzione.
 - **Limite:** al momento della verifica non era ancora apparso un nuovo post sorgente successivo all'avvio del deployment; il backfill è confermato end-to-end, mentre la prova osservabile del nuovo evento live resta il prossimo post reale di `@kievreal1`.
 
+### 2026-08-12 — Polling di sicurezza ALERT e consegna pubblica reale
+
+- **Ambiente:** Telegram e Railway produzione durante un'allerta reale.
+- **Problema confermato:** la sorgente `@kievreal1` era avanzata dal message ID `125071` al `125081`, mentre il worker Online non registrava alcun evento live successivo al backfill iniziale.
+- **Correzione:** polling della cronologia ALERT ogni 5 secondi con cursore persistente, mantenendo il listener Telethon come percorso a bassa latenza; ampliato il filtro per i formati tattici brevi osservati.
+- **Test locali:** compilazione Python e 19/19 test `unittest` superati, incluso recupero simulato di messaggi successivi al cursore.
+- **PR 8:** mergiata con commit `bf5c177a611ea1910c565341fba4ea3f8da54426`.
+- **Deployment Railway:** `54aa8a88-9f5d-4be0-a171-aa093d966f39`, Active e worker Online.
+- **Risultato Railway:** backfill completato con `delivered=22`; cursore avanzato almeno fino al source ID `125089`; successivi cicli ogni 5 secondi senza replay.
+- **Conferma pubblica:** lettura diretta del canale di destinazione ha mostrato i messaggi Telegram `358–371`, tradotti e pubblicati, inclusi aggiornamenti su Troieshchyna, Brovary, TEC-6, Berezan, Hostomel e il riepilogo UAV.
+- **Problema aggiuntivo scoperto:** `На Тарасівку від Боярки` era ricevuto live ma filtrato; aggiunto riconoscimento vincolato del formato direzionale breve `На … від/з …`.
+- **PR 9:** mergiata con commit `4712eb86a942300587ac775e00b48b425c01aab4`; compilazione e 19/19 test nuovamente superati.
+- **Esito:** superato end-to-end sulla destinazione pubblica reale.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
