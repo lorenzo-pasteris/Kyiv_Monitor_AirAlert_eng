@@ -201,6 +201,20 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato per autorizzazione Telegram, CI, merge, avvio produzione e configurazione della sorgente.
 - **Limite:** la ricezione e pubblicazione di un aggiornamento esterno di `@kievreal1` durante un allarme reale deve ancora essere osservata end-to-end; non è stato generato alcun falso allarme pubblico.
 
+### 2026-08-12 — Incidente reale: mancata ricezione da @kievreal1 e hotfix
+
+- **Ambiente:** Telegram e Railway produzione durante un'allerta reale.
+- **Risultato iniziale:** fallito; `@kievreal1` pubblicava aggiornamenti ma il canale Kyiv Air Alert non riceveva i messaggi.
+- **Cause confermate:** la nuova sessione Telethon risolveva il canale ma non risultava iscritta, quindi non riceveva gli eventi live; il trigger canonico `@kyiv_airraid_alert` ha attivato lo stato ALERT alcuni minuti dopo i primi post; il filtro tattico rifiutava follow-up brevi ma validi.
+- **Recupero immediato:** iscrizione esplicita della sessione di produzione a `@kievreal1`; recuperati e inviati attraverso la pipeline reale sei aggiornamenti mancanti, inclusi i messaggi brevi su Dymer, Brovary e Boryspil.
+- **Correzione applicativa:** membership assicurata a ogni avvio, cursore persistente per il feed ALERT, backfill automatico quando il worker riparte durante ALERT e riconoscimento dei follow-up tattici concisi.
+- **Test automatici:** GitHub Actions run `31571605635` completata con successo.
+- **PR e merge:** PR 7 mergiata; squash commit `7a64e27c3dfb629b1e0e7f81749d76954bea7edb`.
+- **Deployment Railway:** `2b783d02-fa3c-42ab-a598-da86638011ff`, stato Active e worker Online.
+- **Verifica post-deploy:** log `[ALERT SOURCE MEMBERSHIP] joined=@kievreal1`; stato ricostruito `ACTIVE`; backfill elaborato fino al message ID `125071`; nessun `Telegram send error` e nessun `Translation error`.
+- **Esito:** superato per recovery, consegna, membership, filtro, CI e avvio della correzione in produzione.
+- **Limite:** al momento della verifica non era ancora apparso un nuovo post sorgente successivo all'avvio del deployment; il backfill è confermato end-to-end, mentre la prova osservabile del nuovo evento live resta il prossimo post reale di `@kievreal1`.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
