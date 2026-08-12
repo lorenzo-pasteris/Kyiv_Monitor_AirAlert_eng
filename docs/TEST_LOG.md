@@ -188,6 +188,19 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato per codice, CI, formati della fonte e isolamento staging; produzione bloccata.
 - **Blocco produzione:** rigenerare una nuova `TELEGRAM_SESSION` e usarla esclusivamente in produzione prima del merge/deploy. Non è stato inviato alcun falso allarme pubblico.
 
+
+### 2026-08-12 — Rigenerazione Telethon e deploy produzione `@kievreal1`
+
+- **Ambiente:** Telegram, Railway produzione e GitHub `main`.
+- **Obiettivo:** sostituire la sessione Telethon invalidata, completare il merge della PR 6 e attivare `@kievreal1` come unico feed degli aggiornamenti ALERT.
+- **Sessione:** nuova autorizzazione completata tramite OTP; `TELEGRAM_SESSION` sostituita esclusivamente nelle variabili Railway di produzione. Il valore non è stato registrato nel repository o in questo file.
+- **Recupero preliminare:** deployment `9cdc7d85-45de-46ba-a3e1-5455fb49ed9f` Active e worker Online; stato Telegram `CLEAR`; nessun nuovo `AuthKeyDuplicatedError`.
+- **CI e merge:** GitHub Actions run `31568184712` superata con 18 test; PR 6 mergiata con squash commit `fe1e36c752d41f79253e181ef0b6476031520b32`.
+- **Deployment finale:** `d71b7f27-f7d7-426b-b630-65ff35bef2b5`, stato Active, worker Online.
+- **Log osservati:** SQLite pronto; stato Telegram caricato `CLEAR`; sorgenti NORMAL `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping`; trigger `@kyiv_airraid_alert`; unico feed ALERT `['kievreal1']`.
+- **Esito:** superato per autorizzazione Telegram, CI, merge, avvio produzione e configurazione della sorgente.
+- **Limite:** la ricezione e pubblicazione di un aggiornamento esterno di `@kievreal1` durante un allarme reale deve ancora essere osservata end-to-end; non è stato generato alcun falso allarme pubblico.
+
 ## Test futuri consigliati
 
 1. ALERT reale o controllato: inizio, aggiornamento tradotto e cessato allarme nel canale; nessun riepilogo durante ALERT.
