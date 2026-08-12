@@ -1,1 +1,1 @@
-worker: python monitor.py
+worker: sleep infinity
