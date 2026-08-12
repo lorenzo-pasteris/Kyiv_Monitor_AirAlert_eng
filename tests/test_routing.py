@@ -27,6 +27,8 @@ def load_monitor():
         "TARGET_CHAT_ID": ALERT_CHAT_ID,
         "SUMMARY_CHAT_ID": SUMMARY_CHAT_ID,
         "SUMMARY_CHAT_LINK": SUMMARY_CHAT_LINK,
+        "OWNER_CHAT_ID": "392256147",
+        "ADMIN_USER_IDS": "392256147",
         "TEST_MODE": "false",
     })
 
@@ -131,6 +133,19 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
             [101, 102, 103],
         )
         self.assertEqual(monitor.get_source_cursor(monitor.KYIV_INFO_CHANNEL), 103)
+
+    async def test_bootstrap_advances_cursor_when_all_messages_are_old(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        channel = monitor.KYIV_INFO_CHANNEL
+        entities = {name: name for name in monitor.ALL_CONTENT_CHANNELS}
+        client = FakeHistoryClient({name: [] for name in monitor.ALL_CONTENT_CHANNELS})
+        client.messages_by_channel[channel] = [
+            FakeTelegramMessage(901, "Old but valid Kyiv message.", old)
+        ]
+
+        self.assertTrue(await monitor.sync_normal_history(client, entities))
+        self.assertEqual(monitor.load_pending_normal_messages(), [])
+        self.assertEqual(monitor.get_source_cursor(channel), 901)
 
     async def test_failed_delivery_retains_pending_and_success_marks_processed(self):
         channel = monitor.KYIV_INFO_CHANNEL
@@ -274,6 +289,10 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("nebo_raketa", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("Nashee_PPO", monitor.ALL_CONTENT_CHANNELS)
+
+    async def test_manual_override_admin_allowlist(self):
+        self.assertTrue(monitor.is_authorized_admin(392256147))
+        self.assertFalse(monitor.is_authorized_admin(999999999))
 
     async def test_kyiv_alerts_real_message_shapes_are_actionable(self):
         alert = "тривога на сході області на мопеди. Поки без загроз."

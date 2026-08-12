@@ -1,5 +1,30 @@
 # Kyiv Monitor — Next steps, implementazioni e migliorie
 
+## Stabilizzazione proposta nel branch `codex/stabilize-monitor` (2026-08-12)
+
+Questa revisione affronta i rischi immediati senza effettuare automaticamente il
+deploy di produzione:
+
+- ricostruzione obbligatoria dello stato Telegram all'avvio, con arresto fail-safe se
+  non è possibile determinare ACTIVE/CLEAR;
+- ripristino silenzioso di ALERT dopo restart, con notifica tecnica a Ops e senza
+  duplicare il messaggio pubblico;
+- transizioni serializzate e confermate da Telegram prima di modificare lo stato
+  effettivo;
+- allowlist `ADMIN_USER_IDS` per `/alert` e `/normal`;
+- tracciamento dei task ALERT e scarto delle traduzioni appartenenti a una sessione
+  ormai terminata;
+- persistenza dello stato operativo minimo e dell'evento trigger canonico;
+- self-check di SQLite e destinazioni Bot API prima dell'avvio operativo;
+- WAL e timeout SQLite, limite esplicito alla dimensione dei bullet, correzione del
+  cursore bootstrap quando la cronologia è interamente vecchia;
+- estrazione del classificatore puro in `alert_rules.py`;
+- CI GitHub, `.env.example`, README e nuovi test di regressione.
+
+Restano attività di piattaforma non applicabili dal solo repository: abilitare branch
+protection, richiedere il check CI, creare un servizio Railway staging separato e
+disabilitare l'auto-deploy di branch non protetti.
+
 ## Scopo del documento
 
 Questo documento raccoglie lo stato compreso del progetto, le discrepanze individuate tra documentazione e codice e una proposta ordinata per le prossime implementazioni.
