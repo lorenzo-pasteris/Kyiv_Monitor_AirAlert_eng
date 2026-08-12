@@ -131,7 +131,7 @@ Questo canale deve essere usato soltanto come trigger e non come sorgente di con
 
 - All'inizio dell'allerta i buffer NORMAL vengono svuotati.
 - Viene pubblicato un messaggio unico di inizio allerta.
-- Soltanto i nuovi messaggi di `@kyiv_alerts` vengono processati.
+- Soltanto i nuovi messaggi di `@kievreal1` vengono processati.
 - Il messaggio originale appare inizialmente come contenuto in traduzione e viene poi sostituito dalla versione inglese.
 - Pubblicità e messaggi non pertinenti vengono scartati.
 - Al cessato allarme viene pubblicato `ALL CLEAR — KYIV` e il sistema torna in NORMAL.
