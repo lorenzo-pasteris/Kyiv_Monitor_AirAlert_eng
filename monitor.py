@@ -1,10 +1,4 @@
-import time as _telegram_recovery_time
-_telegram_recovery_time.sleep(86400)
-
-# Telegram recovery maintenance deployment 2026-08-12 final
-# Railway stable maintenance marker: 2026-08-12
 """
- Railway maintenance redeploy marker: Telegram session recovery 2026-08-12.
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
 - Normal mode: hourly analysis of 3 channels published in the news group
