@@ -68,6 +68,7 @@ SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in pr
 HEALTH_CHECK_INTERVAL = 43200  # 12 hours
 SILENCE_THRESHOLD = 4 * 3600  # 4 hours of total silence = warning
 ALERT_FEED_POLL_INTERVAL = float(os.environ.get("ALERT_FEED_POLL_INTERVAL", "5"))
+ALERT_RECOVERY_MAX_MESSAGES = int(os.environ.get("ALERT_RECOVERY_MAX_MESSAGES", "3"))
 
 # --- Timezone / night pause ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
@@ -300,6 +301,19 @@ def clean_text(text):
     text = re.sub(r'\s*#\w+\s*', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+
+def clean_alert_source_text(text):
+    """Remove @kievreal1 promotional footers before filtering and translation."""
+    clean = clean_text(text)
+    footer_patterns = (
+        r"(?im)^\s*(?:надіслати новину|send news|report news)\b.*$",
+        r"(?im)^\s*(?:👉\s*)?(?:підписатися|subscribe)\s*$",
+        r"(?im)^\s*ㅤ\s*$",
+    )
+    for pattern in footer_patterns:
+        clean = re.sub(pattern, "", clean)
+    return re.sub(r"\n{3,}", "\n\n", clean).strip()
 
 def is_night():
     h = datetime.now(TZ).hour
@@ -580,12 +594,24 @@ async def backfill_alert_feed(client, source_entities):
     for channel in ALERT_FEED_CHANNELS:
         cursor = get_alert_feed_cursor(channel)
         messages = await client.get_messages(source_entities[channel], limit=50)
-        for message in reversed(messages):
+        pending = [message for message in reversed(messages) if message.id > cursor]
+        if len(pending) > ALERT_RECOVERY_MAX_MESSAGES:
+            skipped = pending[:-ALERT_RECOVERY_MAX_MESSAGES]
+            set_alert_feed_cursor(channel, skipped[-1].id)
+            print(
+                f"[ALERT BACKFILL COLLAPSED] @{channel} skipped={len(skipped)} "
+                f"through_id={skipped[-1].id}"
+            )
+            pending = pending[-ALERT_RECOVERY_MAX_MESSAGES:]
+        for message in pending:
+            if not alert_active:
+                print(f"[ALERT BACKFILL STOPPED] @{channel} reason=clear")
+                return delivered
             if message.id <= cursor:
                 continue
             if trigger_at and message.date and message.date < trigger_at:
                 continue
-            clean = clean_text(message.text or "")
+            clean = clean_alert_source_text(message.text or "")
             if (
                 len(clean) < 5
                 or is_non_operational_alert_message(clean)
@@ -605,9 +631,19 @@ async def backfill_alert_feed(client, source_entities):
 
 
 async def alert_feed_poll_loop(client, source_entities):
-    """Poll ALERT history so missed Telethon push updates cannot create a blind spot."""
+    """Poll trigger and ALERT history so missed push updates cannot create a blind spot."""
     while True:
         try:
+            global telegram_alert_state
+            latest_trigger = await client.get_messages(source_entities[BACKUP_TRIGGER_CHANNEL], limit=1)
+            if latest_trigger:
+                trigger = latest_trigger[0]
+                observed = classify_telegram_alert(trigger.text or "")
+                if observed is not None and observed != telegram_alert_state:
+                    telegram_alert_state = observed
+                    persist_trigger_observation(observed, trigger.id, trigger.date)
+                    print(f"[TRIGGER POLL] {'ACTIVE' if observed else 'CLEAR'} id={trigger.id}")
+                    await reconcile_alert_state(f"poll:@{BACKUP_TRIGGER_CHANNEL}")
             if alert_active:
                 delivered = await backfill_alert_feed(client, source_entities)
                 if delivered:
@@ -1702,7 +1738,7 @@ async def main():
             if channel is None:
                 print(f"[IGNORED UNKNOWN CHAT] chat_id={event.chat_id}")
                 return
-            clean = clean_text(raw_text)
+            clean = clean_alert_source_text(raw_text) if channel in ALERT_FEED_CHANNELS else clean_text(raw_text)
 
             if channel == BACKUP_TRIGGER_CHANNEL:
                 state = classify_telegram_alert(clean)
