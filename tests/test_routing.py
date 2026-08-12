@@ -312,11 +312,14 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         terse_rembaza = "На Рембазу!"
         terse_tec = "На ТЕЦ-6 знову"
         terse_oseshtyna = "На Осещину поворот"
+        terse_direction = "На Тарасівку від Боярки"
+        terse_direction_two = "Ще на Яготин з південного напрямку"
         ordinary_news = "В УЗ повідомили про затримки в русі низки приміських поїздів на Київщині"
 
         for message in (
             alert, movement, defence, clear, terse_dymer, terse_brovary,
             terse_boryspil, terse_rembaza, terse_tec, terse_oseshtyna,
+            terse_direction, terse_direction_two,
         ):
             self.assertTrue(monitor.is_actionable_alert_message(message))
             self.assertFalse(monitor.is_non_operational_alert_message(message))
