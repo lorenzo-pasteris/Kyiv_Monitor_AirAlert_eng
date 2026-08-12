@@ -26,9 +26,11 @@ the state is committed, and stale translations are discarded after the alert end
 
 ### TEST
 
-`TEST_MODE=true` disables real-source handlers and confines input and output to
-`TEST_CHAT_ID`. Available commands are `/test_start`, `/test_message`,
-`/test_burst N`, `/test_end`, and `/test_summary`.
+`TEST_MODE=true` disables real-source handlers and confines output to `TEST_CHAT_ID`.
+By default it does not open `TELEGRAM_SESSION`, preventing staging from invalidating the
+production authorization key. Interactive test commands require a separate
+`TEST_TELEGRAM_SESSION`; never reuse the production session. Available commands are
+`/test_start`, `/test_message`, `/test_burst N`, `/test_end`, and `/test_summary`.
 
 ## Architecture
 
