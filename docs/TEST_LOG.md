@@ -251,3 +251,16 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Identificativi:** commit, deployment o message ID non sensibili.
 - **Limiti o problemi scoperti:**
 ```
+
+
+### 2026-08-12 — Recupero sessione Telegram e audit completo di avvio
+
+- **Ambiente:** Railway produzione e suite locale isolata.
+- **Obiettivo:** ripristinare il worker dopo `AuthKeyDuplicatedError`, impedire login interattivi in produzione e verificare separazione/routing, persistenza, filtri e ciclo ALERT/CLEAR.
+- **Procedura:** rigenerata una nuova Telethon `StringSession` tramite OTP dentro il container Railway; salvata direttamente in `TELEGRAM_SESSION`; aggiunta validazione non interattiva con `connect()` + `is_user_authorized()`; eseguiti unit test, compilazione Python e controllo dei log del deployment.
+- **Risultato osservato:** deployment `f30dada4` ACTIVE; database `/data/kyiv_monitor_category_stats.sqlite3` pronto; Bot API e destinazioni pronte; membership `@kievreal1` confermata; trigger `@kyiv_airraid_alert` caricato in stato CLEAR; fonti NORMAL `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping` separate dal feed ALERT; nessun `AuthKeyDuplicatedError`, `EOFError` o prompt interattivo.
+- **Test automatici:** 20/20 superati; `py_compile` superato.
+- **Controlli regressione:** deduplicazione, filtro donazioni/engagement, rimozione footer promozionali, feed ALERT unico `@kievreal1`, recupero via polling/cursore, limite backlog, scarto traduzioni stale dopo CLEAR, separazione casuale delle destinazioni e persistenza NORMAL.
+- **Esito:** superato per startup, stato CLEAR e invarianti di routing.
+- **Identificativi:** PR #19; commit `4c54ecb6921323ed49e8899bc423d01b8da1aeeb`; deployment `f30dada4`.
+- **Limiti:** non è stato simulato un ALERT sul canale pubblico. Il prossimo allarme reale dovrà confermare end-to-end apertura, messaggi tradotti da `@kievreal1`, arresto immediato su CLEAR e link al gruppo.
