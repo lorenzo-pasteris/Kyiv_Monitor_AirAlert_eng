@@ -1,1 +1,1 @@
-worker: python -c "import time; time.sleep(86400)"
+worker: python monitor.py

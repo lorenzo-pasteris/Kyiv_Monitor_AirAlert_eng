@@ -43,8 +43,12 @@ def load_monitor():
     telethon_stub.events = types.SimpleNamespace()
     telethon_stub.utils = types.SimpleNamespace()
     telethon_sessions_stub.StringSession = object
+    telethon_errors_stub = types.ModuleType("telethon.errors")
+    telethon_errors_stub.AuthKeyDuplicatedError = type("AuthKeyDuplicatedError", (Exception,), {})
+    telethon_stub.errors = telethon_errors_stub
     sys.modules.setdefault("httpx", httpx_stub)
     sys.modules.setdefault("telethon", telethon_stub)
+    sys.modules.setdefault("telethon.errors", telethon_errors_stub)
     sys.modules.setdefault("telethon.sessions", telethon_sessions_stub)
     sys.modules.setdefault("telethon.tl", telethon_tl_stub)
     sys.modules.setdefault("telethon.tl.functions", telethon_functions_stub)
