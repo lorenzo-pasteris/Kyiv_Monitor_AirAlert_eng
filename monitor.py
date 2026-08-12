@@ -1,6 +1,3 @@
-import time as _telegram_recovery_time
-_telegram_recovery_time.sleep(86400)
-
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
@@ -1586,7 +1583,12 @@ async def main():
         session_value = TEST_TELEGRAM_SESSION if TEST_MODE else TELEGRAM_SESSION
         client = TelegramClient(StringSession(session_value), TELEGRAM_API_ID, TELEGRAM_API_HASH)
         try:
-            await client.start()
+            await client.connect()
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                raise RuntimeError(
+                    "TELEGRAM_SESSION is not authorized; regenerate it instead of using interactive login"
+                )
         except AuthKeyDuplicatedError:
             await send_to_owner(
                 "WARNING Telegram session invalidated (AuthKeyDuplicatedError). "
