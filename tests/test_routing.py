@@ -309,12 +309,59 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         terse_dymer = "Один в бік Димера через водосховище"
         terse_brovary = "3 підлітають до Броварів"
         terse_boryspil = "На Бориспіль один від Броварів"
+        terse_rembaza = "На Рембазу!"
+        terse_tec = "На ТЕЦ-6 знову"
+        terse_oseshtyna = "На Осещину поворот"
         ordinary_news = "В УЗ повідомили про затримки в русі низки приміських поїздів на Київщині"
 
-        for message in (alert, movement, defence, clear, terse_dymer, terse_brovary, terse_boryspil):
+        for message in (
+            alert, movement, defence, clear, terse_dymer, terse_brovary,
+            terse_boryspil, terse_rembaza, terse_tec, terse_oseshtyna,
+        ):
             self.assertTrue(monitor.is_actionable_alert_message(message))
             self.assertFalse(monitor.is_non_operational_alert_message(message))
         self.assertFalse(monitor.is_actionable_alert_message(ordinary_news))
+
+    async def test_alert_poller_recovers_messages_after_cursor(self):
+        now = datetime.now(timezone.utc)
+        channel = monitor.ALERT_FEED_CHANNEL
+        entities = {channel: channel}
+        client = FakeHistoryClient({channel: [
+            FakeTelegramMessage(125071, "Залісся – уважно по БпЛА", now - timedelta(minutes=2)),
+            FakeTelegramMessage(125072, "1 на Троєщину! 1 на Бровари", now - timedelta(minutes=1)),
+            FakeTelegramMessage(125073, "На Осещину поворот", now),
+        ]})
+        original_active = monitor.alert_active
+        original_generation = monitor.alert_generation
+        original_handler = monitor.handle_alert_message
+        original_get_cursor = monitor.get_alert_feed_cursor
+        original_set_cursor = monitor.set_alert_feed_cursor
+        delivered = []
+        cursors = {channel: 125071}
+
+        async def fake_handler(text, source, generation):
+            delivered.append((text, source, generation))
+
+        try:
+            monitor.alert_active = True
+            monitor.alert_generation = 7
+            monitor.handle_alert_message = fake_handler
+            monitor.get_alert_feed_cursor = lambda name: cursors.get(name, 0)
+            monitor.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
+            count = await monitor.backfill_alert_feed(client, entities)
+        finally:
+            monitor.alert_active = original_active
+            monitor.alert_generation = original_generation
+            monitor.handle_alert_message = original_handler
+            monitor.get_alert_feed_cursor = original_get_cursor
+            monitor.set_alert_feed_cursor = original_set_cursor
+
+        self.assertEqual(count, 2)
+        self.assertEqual([item[0] for item in delivered], [
+            "1 на Троєщину! 1 на Бровари",
+            "На Осещину поворот",
+        ])
+        self.assertEqual(cursors[channel], 125073)
 
     async def test_alert_dedup_keeps_first_and_new_information(self):
         first = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва"
