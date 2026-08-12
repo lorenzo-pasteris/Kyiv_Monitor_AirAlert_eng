@@ -1,3 +1,6 @@
+import time as _telegram_recovery_time
+_telegram_recovery_time.sleep(86400)
+
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
