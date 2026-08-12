@@ -2,7 +2,7 @@
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
 - Normal mode: hourly analysis of 3 channels published in the news group
-- Alert mode (24/7): only @kyiv_alerts in the alert-only channel
+- Alert mode (24/7): only @kievreal1 in the alert-only channel
 - Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -20,11 +20,13 @@ from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
+from alert_rules import classify_telegram_alert
 
 # --- Credentials ---
 TELEGRAM_API_ID = int(os.environ["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = os.environ["TELEGRAM_API_HASH"]
 TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
+TEST_TELEGRAM_SESSION = os.environ.get("TEST_TELEGRAM_SESSION")
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USER_ID = int(BOT_TOKEN.split(":", 1)[0])
@@ -45,12 +47,17 @@ if not TEST_MODE and SUMMARY_CHAT_ID == ALERT_CHANNEL_ID:
     raise RuntimeError("SUMMARY_CHAT_ID must differ from TARGET_CHAT_ID")
 ALERT_OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else ALERT_CHANNEL_ID
 SUMMARY_OUTPUT_CHAT_ID = TEST_CHAT_ID if TEST_MODE else SUMMARY_CHAT_ID
-OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "392256147")
+OWNER_CHAT_ID = os.environ["OWNER_CHAT_ID"]
 OPS_CHAT_ID = os.environ.get("OPS_CHAT_ID", OWNER_CHAT_ID)  # operational alerts; legacy fallback
+ADMIN_USER_IDS = {
+    int(value.strip())
+    for value in os.environ.get("ADMIN_USER_IDS", OWNER_CHAT_ID).split(",")
+    if value.strip()
+}
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
-ALERT_FEED_CHANNEL = "kyiv_alerts"
+ALERT_FEED_CHANNEL = "kievreal1"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL]
@@ -157,9 +164,6 @@ NORMAL_HISTORY_BOOTSTRAP_HOURS = 1
 NORMAL_MESSAGE_RETENTION_DAYS = 7
 
 # --- Pre-filters ---
-KYIV_CITY_KEYWORDS = ["kyiv","kiev","київ","киев","києві","києва","street","road","traffic","metro","subway","protest","demonstration","rally","power","water","heating","emergency","accident","fire","police","curfew","shelter","evacuation","bridge","district","avenue","closure","closed","block","disruption","delay","cancelled","train","bus","tram","вулиця","дорога","рух","затор","затори","метро","протест","мітинг","світло","електроенергія","відключення","вода","опалення","аварія","пожежа","поліція","комендантська","укриття","евакуація","міст","перекриття","перекрито","закрито","район","проспект","затримка","скасовано","поїзд","автобус","трамвай"]
-MIDDLE_EAST_KEYWORDS = ["israel","iran","gaza","palestine","lebanon","hamas","hezbollah","yemen","houthi","idf","tehran","jerusalem","beirut","middle east","west bank"]
-MILITARY_KEYWORDS = ["troop","movement","concentration","deployment","preparation","offensive","attack","shelling","drone","missile","launch","russian","belarus","border","military","convoy","equipment","tank","armored","artillery","mlrs","iskander","kinzhal","calibr","oniks","zircon","bomb","glide","fab","umpb","lancet","orlan","zala","reconnaissance","satellite","fortification","trenches","dragon teeth","digging","barracks","railway","ukraine","ukrainian"]
 AD_INDICATORS = ["#реклама","реклама","знижк","розпродаж","промокод","купуй","придбай","акція","магазин","замовляй","доставка"]
 DONATION_INDICATORS = [
     "донат", "донатів", "підтримати", "підтримайте", "підтримку", "підтримкою",
@@ -176,8 +180,6 @@ ALERT_TACTICAL_KEYWORDS = SECURITY_KEYWORDS + [
     "летять", "чисто", "знищено", "знищена", "знищений", "збито", "увага",
     "target", "heading", "moving", "destroyed", "shot down", "area clear",
 ]
-ALERT_START_UA = ["тривога"]
-ALERT_END_UA = ["відбій"]
 
 # --- State ---
 buffers = {ch: [] for ch in ALL_CONTENT_CHANNELS}
@@ -199,11 +201,14 @@ send_lock = None
 test_command_lock = None
 translation_slots = None
 summary_lock = None
+alert_transition_lock = None
 bot_output_message_ids = set()
 simulator_processed_message_ids = set()
 recent_alert_messages = deque()
+alert_delivery_tasks = set()
+alert_generation = 0
 ALERT_DEDUP_WINDOW = 180
-TEST_SOURCE_PREFIX = "[TEST_SOURCE:kyiv_alerts]"
+TEST_SOURCE_PREFIX = "[TEST_SOURCE:kievreal1]"
 TEST_BUFFER_CHANNEL = AMK_CHANNEL
 TEST_SAMPLE_MESSAGES = [
     "⚠️ Київщина: зафіксовано рух ударних БпЛА Shahed drone у напрямку Києва.",
@@ -214,6 +219,10 @@ TEST_SAMPLE_MESSAGES = [
 
 def contains_any(text, keywords):
     return any(k.lower() in text.lower() for k in keywords)
+
+
+def is_authorized_admin(sender_id):
+    return sender_id in ADMIN_USER_IDS
 
 def is_non_operational_alert_message(text):
     """Reject fundraising, payment details, thanks and greeting posts even if they mention attacks."""
@@ -287,86 +296,90 @@ def seconds_until_next_hour():
     elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
     return max(0.1, 3600 - elapsed)
 
-def check_alert_trigger(text):
-    """Classify Kyiv alert-channel messages without depending on one exact phrase."""
-    global alert_active
-    t = text.lower()
-    mentions_kyiv = contains_any(t, ["kyiv", "kiev", "київ", "києв", "киев"])
-    is_clear = contains_any(t, ["all clear", "clear", "cancelled", "canceled", "ended", "відбій"])
-    is_alert = (
-        ("air" in t and contains_any(t, ["siren", "raid", "alert"]))
-        or contains_any(t, ["повітряна тривога", "тривога"])
-    )
-
-    if mentions_kyiv and is_clear:
-        if alert_active:
-            alert_active = False
-            m = re.search(r'Duration:\s*(.+)', text, re.IGNORECASE)
-            return "end", (m.group(1).strip() if m else "unknown")
-    elif mentions_kyiv and is_alert:
-        if not alert_active:
-            alert_active = True
-            return "start", None
-    return None, None
-
-def check_ua_trigger(text):
-    """Backup trigger, accepted only when the message explicitly mentions Kyiv."""
-    global alert_active
-    if not contains_any(text, ["київ", "києв", "киев", "kyiv", "kiev"]):
-        return None
-    if contains_any(text, ALERT_END_UA):
-        if alert_active:
-            alert_active = False
-            return "end"
-    elif contains_any(text, ALERT_START_UA):
-        if not alert_active:
-            alert_active = True
-            return "start"
-    return None
-
-
-def classify_telegram_alert(text):
-    """Return True/False for an explicit Kyiv alert/clear message, otherwise None."""
-    t = text.lower()
-    if not contains_any(t, ["kyiv", "kiev", "київ", "києв", "киев"]):
-        return None
-    if contains_any(t, ["all clear", "clear", "cancelled", "canceled", "ended", "відбій"]):
-        return False
-    if (("air" in t and contains_any(t, ["siren", "raid", "alert"]))
-            or contains_any(t, ["повітряна тривога", "тривога"])):
-        return True
-    return None
-
-
 async def reconcile_alert_state(source):
-    """Use the explicit Kyiv state published by @kyiv_airraid_alert."""
-    global alert_active, alert_started_at
-    if telegram_alert_state is None:
+    """Apply the explicit trigger state and retry when public delivery fails."""
+    return await apply_alert_state(telegram_alert_state, source)
+
+
+def set_alert_state(new_state, reason):
+    """The only function allowed to mutate the effective alert state."""
+    global alert_active, alert_started_at, alert_generation
+    if new_state == alert_active:
+        return False
+    previous = alert_active
+    alert_active = new_state
+    alert_started_at = time.monotonic() if new_state else None
+    alert_generation += 1
+    persist_operational_state("alert_active", "1" if new_state else "0")
+    print(
+        f"[ALERT STATE] {previous} -> {new_state} reason={reason} "
+        f"generation={alert_generation}"
+    )
+    return True
+
+
+async def drain_alert_delivery_tasks(timeout=5.0):
+    """Finish or cancel translations before publishing ALL CLEAR."""
+    active = [task for task in alert_delivery_tasks if not task.done()]
+    if not active:
+        return
+    done, pending = await asyncio.wait(active, timeout=timeout)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    print(f"[ALERT TASKS] completed={len(done)} cancelled={len(pending)}")
+
+
+async def apply_alert_state(desired, source, *, startup=False, public_message=None):
+    """Serialize an alert transition and commit it only after delivery succeeds."""
+    global alert_transition_lock
+    if desired is None:
         print("⚠️ No valid Telegram alert state; preserving last known state")
-        return
+        return False
+    if alert_transition_lock is None:
+        alert_transition_lock = asyncio.Lock()
+    async with alert_transition_lock:
+        if desired == alert_active:
+            return True
 
-    desired = telegram_alert_state
-    if desired == alert_active:
-        return
+        if startup:
+            set_alert_state(desired, f"startup:{source}")
+            if desired:
+                recent_alert_messages.clear()
+                for channel_name in ALL_CONTENT_CHANNELS:
+                    buffers[channel_name].clear()
+                discard_pending_normal_messages(f"startup_alert:{source}")
+                await send_to_owner(
+                    "⚠️ <b>ALERT state restored after restart</b>\n"
+                    "The worker entered ALERT without duplicating the public start message."
+                )
+            return True
 
-    if desired:
-        alert_active = True
-        alert_started_at = time.monotonic()
-        recent_alert_messages.clear()
-        for channel_name in ALL_CONTENT_CHANNELS:
-            buffers[channel_name].clear()
-        discard_pending_normal_messages(f"alert_started:{source}")
-        await send_to_alert_channel(ALERT_START_MESSAGE)
-        print(f"🚨 Effective alert state started via {source}")
-    else:
-        alert_started_at = None
-        if production_client and content_source_entities:
+        if not desired:
+            await drain_alert_delivery_tasks()
+        message = public_message or (ALERT_START_MESSAGE if desired else build_all_clear_message())
+        delivered = await send_to_alert_channel(message)
+        if not delivered:
+            await send_to_owner(
+                "🚨 <b>Alert transition delivery failed</b>\n"
+                f"Requested state: {'ALERT' if desired else 'NORMAL'}; source: {html.escape(source)}. "
+                "The transition was not committed and will be retried on the next trigger."
+            )
+            return False
+
+        set_alert_state(desired, source)
+        if desired:
+            recent_alert_messages.clear()
+            for channel_name in ALL_CONTENT_CHANNELS:
+                buffers[channel_name].clear()
+            discard_pending_normal_messages(f"alert_started:{source}")
+        elif production_client and content_source_entities:
             await advance_normal_cursors_to_latest(
                 production_client, content_source_entities, f"alert_ended:{source}"
             )
-        alert_active = False
-        await send_to_alert_channel(build_all_clear_message())
-        print(f"✅ Effective alert state ended via {source}")
+        print(f"[ALERT TRANSITION] committed={'ALERT' if desired else 'NORMAL'} source={source}")
+        return True
 
 
 async def translate_message(text):
@@ -398,6 +411,8 @@ def initialize_stats_db():
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
         with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA busy_timeout=5000")
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS hourly_category_stats (
                     run_at TEXT NOT NULL,
@@ -440,6 +455,13 @@ def initialize_stats_db():
                     updated_at TEXT NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS operational_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
         print(f"[STATS DB] ready path={CATEGORY_STATS_DB_PATH}")
         return True
     except Exception as exc:
@@ -453,6 +475,48 @@ def utc_iso(value=None):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def persist_operational_state(key, value):
+    """Persist small restart-sensitive state without storing credentials."""
+    if not stats_db_ready:
+        return False
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+            connection.execute(
+                """INSERT INTO operational_state (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                       value = excluded.value, updated_at = excluded.updated_at""",
+                (key, str(value), utc_iso()),
+            )
+        return True
+    except Exception as exc:
+        print(f"[STATE DB ERROR] key={key}: {type(exc).__name__}: {exc}")
+        return False
+
+
+def load_operational_state(key):
+    if not stats_db_ready:
+        return None
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+            row = connection.execute(
+                "SELECT value FROM operational_state WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+    except Exception as exc:
+        print(f"[STATE DB ERROR] read key={key}: {type(exc).__name__}: {exc}")
+        return None
+
+
+def persist_trigger_observation(state, message_id, message_at):
+    """Record the canonical trigger event used to reconstruct the effective mode."""
+    return all((
+        persist_operational_state("telegram_alert_state", "1" if state else "0"),
+        persist_operational_state("telegram_alert_message_id", message_id),
+        persist_operational_state("telegram_alert_message_at", utc_iso(message_at)),
+    ))
 
 
 def persist_normal_message(channel, message_id, message_at, text):
@@ -600,9 +664,14 @@ async def sync_normal_history(client, source_entities):
         cursor = get_source_cursor(channel)
         try:
             if cursor is None:
-                fetched = list(await client.get_messages(source_entities[channel], limit=500))
+                bootstrap_messages = list(
+                    await client.get_messages(source_entities[channel], limit=500)
+                )
+                latest_id = max(
+                    (int(message.id) for message in bootstrap_messages), default=None
+                )
                 fetched = [
-                    message for message in reversed(fetched)
+                    message for message in reversed(bootstrap_messages)
                     if getattr(message, "date", bootstrap_cutoff) >= bootstrap_cutoff
                 ]
             else:
@@ -612,7 +681,7 @@ async def sync_normal_history(client, source_entities):
                     )
                 ]
 
-            latest_id = cursor
+                latest_id = cursor
             rows = []
             for message in fetched:
                 latest_id = max(latest_id or 0, int(message.id))
@@ -749,7 +818,7 @@ def normalize_category_result(parsed, messages):
         normalized[category_key] = {
             "selected_ids": list(dict.fromkeys(selected_ids)),
             "bullets": [
-                bullet.strip().lstrip("•- ").strip()
+                bullet.strip().lstrip("•- ").strip()[:180]
                 for bullet in bullets
                 if bullet.strip()
             ][:5],
@@ -988,6 +1057,38 @@ async def send_to_owner(text):
     return await send_message(OPS_CHAT_ID, text)
 
 
+async def startup_self_check():
+    """Validate persistent storage and Bot API destinations before going operational."""
+    failures = []
+    if not stats_db_ready:
+        failures.append("persistent SQLite database is unavailable")
+    else:
+        marker = f"startup-{time.time_ns()}"
+        if not persist_operational_state("startup_self_check", marker):
+            failures.append("persistent SQLite database is not writable")
+        elif load_operational_state("startup_self_check") != marker:
+            failures.append("persistent SQLite database read-after-write failed")
+
+    destinations = {
+        "alert": ALERT_OUTPUT_CHAT_ID,
+        "summary": SUMMARY_OUTPUT_CHAT_ID,
+        "ops": OPS_CHAT_ID,
+    }
+    for name, chat_id in destinations.items():
+        if not await telegram_request("getChat", {"chat_id": chat_id}):
+            failures.append(f"Bot API cannot access the {name} destination")
+
+    if failures:
+        message = "🚨 <b>Startup self-check failed</b>\n" + "\n".join(
+            f"• {html.escape(failure)}" for failure in failures
+        )
+        print("[STARTUP CHECK] " + "; ".join(failures))
+        await send_to_owner(message)
+        return False
+    print("[STARTUP CHECK] storage and Bot API destinations are ready")
+    return True
+
+
 async def safe_send(text):
     global last_send_time
     async with send_lock:
@@ -1215,11 +1316,27 @@ async def health_loop():
 
 
 
-async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL):
+def schedule_alert_delivery(clean, source):
+    """Track background delivery so transitions and shutdown can drain it safely."""
+    generation = alert_generation
+    task = asyncio.create_task(handle_alert_message(clean, source=source, generation=generation))
+    alert_delivery_tasks.add(task)
+    task.add_done_callback(alert_delivery_tasks.discard)
+    return task
+
+
+async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None):
     """Deliver low-latency alerts; TEST_MODE uses one Bot API write to avoid group flood limits."""
+    generation = alert_generation if generation is None else generation
+    if generation != alert_generation or not alert_active:
+        print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
+        return
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     if TEST_MODE:
         translation = await translate_message(clean[:1500])
+        if generation != alert_generation or not alert_active:
+            print(f"[ALERT STALE] test translation discarded source=@{source}")
+            return
         if translation:
             await safe_send(f"🔴 {html.escape(translation)}")
         else:
@@ -1231,7 +1348,18 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL):
     if not sent:
         return
 
-    translation = await translate_message(clean[:1500])
+    try:
+        translation = await translate_message(clean[:1500])
+    except asyncio.CancelledError:
+        await edit_message(
+            ALERT_OUTPUT_CHAT_ID,
+            sent["message_id"],
+            f"🔴 ⚠️ Translation interrupted at alert end\n\n{html.escape(clean[:1000])}",
+        )
+        raise
+    if generation != alert_generation or not alert_active:
+        print(f"[ALERT STALE] translation discarded source=@{source} generation={generation}")
+        return
     if translation:
         await edit_message(ALERT_OUTPUT_CHAT_ID, sent["message_id"], f"🔴 {html.escape(translation)}")
     else:
@@ -1263,7 +1391,7 @@ async def process_test_source_text(clean):
 
     if alert_active:
         if should_publish_alert(clean, "test"):
-            asyncio.create_task(handle_alert_message(clean, source="test"))
+            schedule_alert_delivery(clean, source="test")
         return
 
     time_str = datetime.now(TZ).strftime("%H:%M")
@@ -1279,6 +1407,7 @@ async def publish_test_source(client, text):
 
 async def main():
     global http_client, send_lock, test_command_lock, translation_slots, summary_lock
+    global alert_transition_lock
     global telegram_alert_state, stats_db_ready, production_client, content_source_entities
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
@@ -1288,10 +1417,35 @@ async def main():
     test_command_lock = asyncio.Lock()
     translation_slots = asyncio.Semaphore(8)
     summary_lock = asyncio.Lock()
+    alert_transition_lock = asyncio.Lock()
     stats_db_ready = initialize_stats_db()
 
-    client = TelegramClient(StringSession(TELEGRAM_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
-    await client.start()
+    client = None
+    if not TEST_MODE or TEST_TELEGRAM_SESSION:
+        session_value = TEST_TELEGRAM_SESSION if TEST_MODE else TELEGRAM_SESSION
+        client = TelegramClient(StringSession(session_value), TELEGRAM_API_ID, TELEGRAM_API_HASH)
+        await client.start()
+
+    if not await startup_self_check():
+        raise RuntimeError("Startup self-check failed")
+
+    if TEST_MODE and not TEST_TELEGRAM_SESSION:
+        print(
+            f"🧪 TEST_MODE enabled without a Telegram listener. Exclusive output chat: {TEST_CHAT_ID}; "
+            "the production Telethon session is not opened."
+        )
+        await send_to_alert_channel(
+            "🧪 <b>Kyiv Monitor started in isolated TEST_MODE</b>\n"
+            "Real Telegram sources and interactive test commands are disabled."
+        )
+        asyncio.create_task(summary_loop())
+        asyncio.create_task(summary_watchdog_loop())
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await drain_alert_delivery_tasks(timeout=10.0)
+            await http_client.aclose()
+        return
 
     if TEST_MODE:
         print(f"🧪 TEST_MODE enabled. Exclusive chat: {TEST_CHAT_ID}; real Telegram sources are NOT registered.")
@@ -1303,7 +1457,7 @@ async def main():
 
         @client.on(events.NewMessage(chats=int(TEST_CHAT_ID)))
         async def test_command_handler(event):
-            global alert_active, last_message_time
+            global last_message_time
             raw = (event.message.text or "").strip()
             command = raw.lower()
             if event.sender_id == BOT_USER_ID or event.message.id in bot_output_message_ids:
@@ -1311,10 +1465,11 @@ async def main():
 
             if command == "/test_start":
                 async with test_command_lock:
-                    alert_active = True
-                    for channel_name in ALL_CONTENT_CHANNELS:
-                        buffers[channel_name].clear()
-                    await send_to_alert_channel("🚨 <b>TEST AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME test mode active")
+                    await apply_alert_state(
+                        True,
+                        "test_command",
+                        public_message="🚨 <b>TEST AIR ALERT — KYIV</b>\n\n⚡ REAL-TIME test mode active",
+                    )
                 return
 
             if command == "/test_message":
@@ -1334,8 +1489,11 @@ async def main():
 
             if command == "/test_end":
                 async with test_command_lock:
-                    alert_active = False
-                    await send_to_alert_channel("✅ <b>TEST ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL test mode")
+                    await apply_alert_state(
+                        False,
+                        "test_command",
+                        public_message="✅ <b>TEST ALL CLEAR — KYIV</b>\n\n📋 Back to NORMAL test mode",
+                    )
                 return
 
             if command == "/test_summary":
@@ -1381,36 +1539,54 @@ async def main():
             state = classify_telegram_alert(recent.text or "")
             if state is not None:
                 telegram_alert_state = state
+                persist_trigger_observation(state, recent.id, recent.date)
                 print(f"✅ Telegram alert state loaded: {'ACTIVE' if state else 'CLEAR'}")
                 break
+
+        if telegram_alert_state is None:
+            await send_to_owner(
+                "🚨 <b>Startup self-check failed</b>\n"
+                f"No explicit Kyiv state found in the latest @{BACKUP_TRIGGER_CHANNEL} messages. "
+                "The worker stopped instead of assuming NORMAL."
+            )
+            raise RuntimeError("Cannot establish initial Kyiv alert state")
+
+        await apply_alert_state(telegram_alert_state, f"@{BACKUP_TRIGGER_CHANNEL}", startup=True)
 
         print(
             f"✅ Connected in production. Alert trigger: @{BACKUP_TRIGGER_CHANNEL}; "
             f"content sources: {ALL_CONTENT_CHANNELS}; alert feeds: {ALERT_FEED_CHANNELS}"
         )
         await send_to_owner(
-            "🟢 <b>Kyiv Normal Monitor started</b>\n"
-            "Mode: NORMAL (hourly summaries)\n"
+            "🟢 <b>Kyiv Monitor started</b>\n"
+            f"Mode: {'ALERT' if alert_active else 'NORMAL'}\n"
             "Night pause: 01:00–07:00 EET/EEST"
         )
 
         @client.on(events.NewMessage(chats=int(ALERT_CHANNEL_ID)))
         async def production_command_handler(event):
-            global alert_active
             text = (event.message.text or "").strip().lower()
-            if text == "/alert":
-                alert_active = True
-                recent_alert_messages.clear()
-                for channel_name in ALL_CONTENT_CHANNELS:
-                    buffers[channel_name].clear()
-                discard_pending_normal_messages("manual_alert")
-                await send_to_alert_channel("🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode")
-            elif text == "/normal":
-                await advance_normal_cursors_to_latest(
-                    production_client, content_source_entities, "manual_normal"
+            if text not in {"/alert", "/normal"}:
+                return
+            if not is_authorized_admin(event.sender_id):
+                print(f"[COMMAND DENIED] sender_id={event.sender_id} command={text}")
+                await send_to_owner(
+                    "⚠️ <b>Unauthorized monitor command rejected</b>\n"
+                    f"Sender ID: <code>{event.sender_id}</code>; command: <code>{html.escape(text)}</code>"
                 )
-                alert_active = False
-                await send_to_alert_channel("✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode")
+                return
+            if text == "/alert":
+                await apply_alert_state(
+                    True,
+                    f"manual:{event.sender_id}",
+                    public_message="🚨 <b>MANUAL OVERRIDE</b>\n⚡ Switched to REAL-TIME mode",
+                )
+            elif text == "/normal":
+                await apply_alert_state(
+                    False,
+                    f"manual:{event.sender_id}",
+                    public_message="✅ <b>MANUAL OVERRIDE</b>\n📋 Back to NORMAL mode",
+                )
 
         @client.on(events.NewMessage(chats=list(source_entities.values())))
         async def production_source_handler(event):
@@ -1431,6 +1607,7 @@ async def main():
                 state = classify_telegram_alert(clean)
                 if state is not None:
                     telegram_alert_state = state
+                    persist_trigger_observation(state, event.message.id, event.message.date)
                     print(f"Telegram trigger update: {'ACTIVE' if state else 'CLEAR'}")
                     await reconcile_alert_state(f"@{BACKUP_TRIGGER_CHANNEL}")
                 return
@@ -1448,7 +1625,7 @@ async def main():
 
             if alert_active:
                 if channel in ALERT_FEED_CHANNELS and should_publish_alert(clean, channel):
-                    asyncio.create_task(handle_alert_message(clean, source=channel))
+                    schedule_alert_delivery(clean, source=channel)
                 return
 
             if channel == ALERT_FEED_CHANNEL:
@@ -1475,6 +1652,7 @@ async def main():
     try:
         await client.run_until_disconnected()
     finally:
+        await drain_alert_delivery_tasks(timeout=10.0)
         await http_client.aclose()
 
 

@@ -27,6 +27,8 @@ def load_monitor():
         "TARGET_CHAT_ID": ALERT_CHAT_ID,
         "SUMMARY_CHAT_ID": SUMMARY_CHAT_ID,
         "SUMMARY_CHAT_LINK": SUMMARY_CHAT_LINK,
+        "OWNER_CHAT_ID": "392256147",
+        "ADMIN_USER_IDS": "392256147",
         "TEST_MODE": "false",
     })
 
@@ -131,6 +133,19 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
             [101, 102, 103],
         )
         self.assertEqual(monitor.get_source_cursor(monitor.KYIV_INFO_CHANNEL), 103)
+
+    async def test_bootstrap_advances_cursor_when_all_messages_are_old(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        channel = monitor.KYIV_INFO_CHANNEL
+        entities = {name: name for name in monitor.ALL_CONTENT_CHANNELS}
+        client = FakeHistoryClient({name: [] for name in monitor.ALL_CONTENT_CHANNELS})
+        client.messages_by_channel[channel] = [
+            FakeTelegramMessage(901, "Old but valid Kyiv message.", old)
+        ]
+
+        self.assertTrue(await monitor.sync_normal_history(client, entities))
+        self.assertEqual(monitor.load_pending_normal_messages(), [])
+        self.assertEqual(monitor.get_source_cursor(channel), 901)
 
     async def test_failed_delivery_retains_pending_and_success_marks_processed(self):
         channel = monitor.KYIV_INFO_CHANNEL
@@ -269,34 +284,41 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_actionable_alert_message(unrelated))
         self.assertTrue(monitor.is_actionable_alert_message(terse_follow_up))
 
-    async def test_kyiv_alerts_is_the_only_alert_feed(self):
-        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyiv_alerts"])
-        self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
+    async def test_kievreal1_is_the_only_alert_feed(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kievreal1"])
+        self.assertNotIn("kievreal1", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("nebo_raketa", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("Nashee_PPO", monitor.ALL_CONTENT_CHANNELS)
 
-    async def test_kyiv_alerts_real_message_shapes_are_actionable(self):
-        alert = "тривога на сході області на мопеди. Поки без загроз."
-        clear = "Відбій балістичної загрози по всій Україні."
+    async def test_manual_override_admin_allowlist(self):
+        self.assertTrue(monitor.is_authorized_admin(392256147))
+        self.assertFalse(monitor.is_authorized_admin(999999999))
 
-        self.assertTrue(monitor.is_actionable_alert_message(alert))
-        self.assertTrue(monitor.is_actionable_alert_message(clear))
-        self.assertFalse(monitor.is_non_operational_alert_message(alert))
-        self.assertFalse(monitor.is_non_operational_alert_message(clear))
+    async def test_kievreal1_real_message_shapes_are_actionable(self):
+        alert = "5 БПЛА з Чернігівщини на Київщину"
+        movement = "Реактивний БпЛА курсом на Бровари"
+        defence = "2 БПЛА біля Броварів, працює ППО"
+        clear = "❎ М. КИЇВ - ВІДБІЙ ТРИВОГИ"
+        ordinary_news = "В УЗ повідомили про затримки в русі низки приміських поїздів на Київщині"
+
+        for message in (alert, movement, defence, clear):
+            self.assertTrue(monitor.is_actionable_alert_message(message))
+            self.assertFalse(monitor.is_non_operational_alert_message(message))
+        self.assertFalse(monitor.is_actionable_alert_message(ordinary_news))
 
     async def test_alert_dedup_keeps_first_and_new_information(self):
         first = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва"
         duplicate = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва!"
         update = "⚠️ 3 шахеди рухаються через Васильків у напрямку Києва"
 
-        self.assertTrue(monitor.should_publish_alert(first, "kyiv_alerts", now=100.0))
-        self.assertFalse(monitor.should_publish_alert(duplicate, "kyiv_alerts", now=130.0))
-        self.assertTrue(monitor.should_publish_alert(update, "kyiv_alerts", now=140.0))
+        self.assertTrue(monitor.should_publish_alert(first, "kievreal1", now=100.0))
+        self.assertFalse(monitor.should_publish_alert(duplicate, "kievreal1", now=130.0))
+        self.assertTrue(monitor.should_publish_alert(update, "kievreal1", now=140.0))
 
     async def test_duplicate_window_expires(self):
         message = "Балістична ціль рухається у напрямку Києва"
-        self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=100.0))
-        self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=281.0))
+        self.assertTrue(monitor.should_publish_alert(message, "kievreal1", now=100.0))
+        self.assertTrue(monitor.should_publish_alert(message, "kievreal1", now=281.0))
 
 
 if __name__ == "__main__":
