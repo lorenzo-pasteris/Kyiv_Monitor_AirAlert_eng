@@ -245,7 +245,14 @@ def is_actionable_alert_message(text):
     """Allow explicit threats plus the terse location/direction follow-ups used by @kievreal1."""
     if contains_any(text, ALERT_TACTICAL_KEYWORDS):
         return True
-    return len(clean_text(text)) <= 500 and contains_any(text, ALERT_TERSE_FOLLOWUP_KEYWORDS)
+    clean = clean_text(text)
+    if len(clean) > 500:
+        return False
+    if contains_any(clean, ALERT_TERSE_FOLLOWUP_KEYWORDS):
+        return True
+    # @kievreal1 frequently posts terse course updates such as
+    # "На Тарасівку від Боярки" without repeating "БпЛА".
+    return bool(re.match(r"^(?:ще\s+)?на\s+.{2,80}\s+(?:від|з|із|зі)\s+.{2,80}[.!]?\s*$", clean, re.I))
 
 def is_pure_ad(text):
     if contains_any(text, SECURITY_KEYWORDS):
