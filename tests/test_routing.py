@@ -305,9 +305,10 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Бровари, Бориспіль, Українка – ще до вас!",
         )
 
-    async def test_kievreal1_is_the_only_alert_feed(self):
-        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kievreal1"])
-        self.assertNotIn("kievreal1", monitor.ALL_CONTENT_CHANNELS)
+    async def test_kyiv_alerts_is_the_only_alert_feed(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyiv_alerts"])
+        self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("kievreal1", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("nebo_raketa", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("Nashee_PPO", monitor.ALL_CONTENT_CHANNELS)
 
@@ -315,7 +316,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.is_authorized_admin(392256147))
         self.assertFalse(monitor.is_authorized_admin(999999999))
 
-    async def test_kievreal1_real_message_shapes_are_actionable(self):
+    async def test_alert_feed_real_message_shapes_are_actionable(self):
+        # Terse course/direction updates observed on the operational alert feed.
         alert = "5 БПЛА з Чернігівщини на Київщину"
         movement = "Реактивний БпЛА курсом на Бровари"
         defence = "2 БПЛА біля Броварів, працює ППО"
@@ -328,12 +330,16 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         terse_oseshtyna = "На Осещину поворот"
         terse_direction = "На Тарасівку від Боярки"
         terse_direction_two = "Ще на Яготин з південного напрямку"
+        # Real shapes observed on @kyiv_alerts.
+        kyiv_alerts_alert = "тривога на сході області на мопеди. Поки без загроз."
+        kyiv_alerts_clear = "Відбій балістичної загрози по всій Україні."
         ordinary_news = "В УЗ повідомили про затримки в русі низки приміських поїздів на Київщині"
 
         for message in (
             alert, movement, defence, clear, terse_dymer, terse_brovary,
             terse_boryspil, terse_rembaza, terse_tec, terse_oseshtyna,
             terse_direction, terse_direction_two,
+            kyiv_alerts_alert, kyiv_alerts_clear,
         ):
             self.assertTrue(monitor.is_actionable_alert_message(message))
             self.assertFalse(monitor.is_non_operational_alert_message(message))
@@ -385,14 +391,37 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         duplicate = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва!"
         update = "⚠️ 3 шахеди рухаються через Васильків у напрямку Києва"
 
-        self.assertTrue(monitor.should_publish_alert(first, "kievreal1", now=100.0))
-        self.assertFalse(monitor.should_publish_alert(duplicate, "kievreal1", now=130.0))
-        self.assertTrue(monitor.should_publish_alert(update, "kievreal1", now=140.0))
+        self.assertTrue(monitor.should_publish_alert(first, "kyiv_alerts", now=100.0))
+        self.assertFalse(monitor.should_publish_alert(duplicate, "kyiv_alerts", now=130.0))
+        self.assertTrue(monitor.should_publish_alert(update, "kyiv_alerts", now=140.0))
 
     async def test_duplicate_window_expires(self):
         message = "Балістична ціль рухається у напрямку Києва"
-        self.assertTrue(monitor.should_publish_alert(message, "kievreal1", now=100.0))
-        self.assertTrue(monitor.should_publish_alert(message, "kievreal1", now=281.0))
+        self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=100.0))
+        self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=281.0))
+
+
+class AlertLiveCursorGuardTests(unittest.TestCase):
+    """Late Telethon replays must not republish what the poller already covered."""
+
+    def setUp(self):
+        self.original_get_cursor = monitor.get_alert_feed_cursor
+        self.cursors = {monitor.ALERT_FEED_CHANNEL: 125073}
+        monitor.get_alert_feed_cursor = lambda name: self.cursors.get(name, 0)
+
+    def tearDown(self):
+        monitor.get_alert_feed_cursor = self.original_get_cursor
+
+    def test_message_at_or_before_cursor_is_stale(self):
+        self.assertTrue(monitor.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125073))
+        self.assertTrue(monitor.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125000))
+
+    def test_message_after_cursor_is_fresh(self):
+        self.assertFalse(monitor.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125074))
+
+    def test_without_cursor_nothing_is_stale(self):
+        self.cursors.clear()
+        self.assertFalse(monitor.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 5))
 
 
 if __name__ == "__main__":

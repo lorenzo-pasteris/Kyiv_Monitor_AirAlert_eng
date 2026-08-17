@@ -1,5 +1,16 @@
 # Kyiv Monitor — Next steps, implementazioni e migliorie
 
+## Changelog — rientro a `@kyiv_alerts` e guardia anti-replay (2026-08-17)
+
+Intervento su `main` in un singolo lavoro, con test e documentazione aggiornati nello stesso passaggio:
+
+- **Feed ALERT riportato a `@kyiv_alerts`**: `ALERT_FEED_CHANNEL`, `TEST_SOURCE_PREFIX` e i riferimenti testuali tornano al canale `https://t.me/kyiv_alerts`. `@kievreal1`, `@nebo_raketa` e `@Nashee_PPO` non sono registrati dal worker.
+- **Guardia anti-replay nel listener live**: il listener Telethon ora scarta i messaggi del feed ALERT con ID minore o uguale al cursore persistente (`is_stale_alert_feed_message`), la stessa regola già applicata dal poller. La deduplicazione in memoria a 180 secondi resta come secondo livello, ma non è più l'unica difesa contro gli eventi live consegnati in ritardo dopo una riconnessione Telethon.
+- **Test aggiunti**: `AlertLiveCursorGuardTests` copre messaggio al cursore, prima del cursore, dopo il cursore e assenza di cursore; i formati reali di `@kyiv_alerts` (`тривога…`, `Відбій…`) rientrano nei casi accettati del filtro tattico.
+- **Documentazione**: `README.md` aggiornato al feed ripristinato; `docs/PROJECT_ARCHITECTURE.md` e `docs/SELF_HEALING_LOOPS.md` citavano già `@kyiv_alerts` e tornano allineati senza modifiche; `docs/TEST_LOG.md` registra l'esecuzione locale.
+
+Nota documentale preesistente: `docs/PROJECT_ARCHITECTURE.md` non descrive ancora il poller a 5 secondi, il cursore persistente del feed ALERT e il backfill; un aggiornamento dedicato resta consigliato.
+
 ## Stabilizzazione proposta nel branch `codex/stabilize-monitor` (2026-08-12)
 
 Questa revisione affronta i rischi immediati senza effettuare automaticamente il
@@ -131,7 +142,7 @@ Questo canale deve essere usato soltanto come trigger e non come sorgente di con
 
 - All'inizio dell'allerta i buffer NORMAL vengono svuotati.
 - Viene pubblicato un messaggio unico di inizio allerta.
-- Soltanto i nuovi messaggi di `@kievreal1` vengono processati.
+- Soltanto i nuovi messaggi di `@kyiv_alerts` vengono processati.
 - Il messaggio originale appare inizialmente come contenuto in traduzione e viene poi sostituito dalla versione inglese.
 - Pubblicità e messaggi non pertinenti vengono scartati.
 - Al cessato allarme viene pubblicato `ALL CLEAR — KYIV` e il sistema torna in NORMAL.
@@ -148,7 +159,7 @@ Comandi disponibili:
 - `/test_end`
 - `/test_summary`
 
-Il riepilogo automatico viene eseguito ogni tre minuti. Il sistema esclude i propri output ed elimina marcatori interni come `[TEST_SOURCE:Nashee_PPO]` e `[burst N/M]`.
+Il riepilogo automatico viene eseguito ogni tre minuti. Il sistema esclude i propri output ed elimina marcatori interni come `[TEST_SOURCE:kyiv_alerts]` e `[burst N/M]`.
 
 ## Problemi e discrepanze individuati
 
