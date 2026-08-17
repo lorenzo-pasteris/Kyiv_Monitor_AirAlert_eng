@@ -264,3 +264,14 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato per startup, stato CLEAR e invarianti di routing.
 - **Identificativi:** PR #19; commit `4c54ecb6921323ed49e8899bc423d01b8da1aeeb`; deployment `f30dada4`.
 - **Limiti:** non è stato simulato un ALERT sul canale pubblico. Il prossimo allarme reale dovrà confermare end-to-end apertura, messaggi tradotti da `@kievreal1`, arresto immediato su CLEAR e link al gruppo.
+
+### 2026-08-17 — Rientro a `@kyiv_alerts` e guardia anti-replay nel listener live
+
+- **Ambiente:** GitHub Actions su pull request; compilazione locale.
+- **Obiettivo:** riportare l'unico feed ALERT a `@kyiv_alerts` (https://t.me/kyiv_alerts) e chiudere i messaggi duplicati causati da replay Telethon in ritardo oltre la finestra dedup di 180 secondi.
+- **Modifica:** `ALERT_FEED_CHANNEL = "kyiv_alerts"`, `TEST_SOURCE_PREFIX` e riferimenti testuali aggiornati; nuova funzione `is_stale_alert_feed_message` — il listener live scarta i messaggi del feed ALERT con ID minore o uguale al cursore persistente del poller; senza cursore il comportamento precedente è preservato.
+- **Procedura:** `py_compile` superato in locale sui file modificati; apertura della PR #21 dal branch `fix/kyiv-alerts-feed-dedup-guard`; esecuzione della suite in CI.
+- **Risultato osservato:** GitHub Actions run `32036359222` (job `test`) completata con esito `success` sulla PR #21; include i nuovi `AlertLiveCursorGuardTests` (messaggio al cursore, prima del cursore, dopo il cursore, assenza di cursore) e i formati reali di `@kyiv_alerts`.
+- **Esito:** superato per compilazione locale e CI.
+- **Identificativi:** PR #21; branch `fix/kyiv-alerts-feed-dedup-guard`; ultimo commit del branch `e43b6b1`.
+- **Limiti:** la verifica end-to-end reale (nessun duplicato durante un allarme vero con `@kyiv_alerts`) sarà confermata solo dopo merge e deploy Railway; il merge su `main` scatena l'auto-deploy in produzione.
