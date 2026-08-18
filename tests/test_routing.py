@@ -308,12 +308,14 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_alert_source_promotional_footer_is_removed(self):
         raw = (
-            "Бровари, Бориспіль, Українка – ще до вас!\n\nㅤ\n"
+            "🔴 Ballistic ballistics from the east\n"
+            "💙 Dnipro Alerts • 💛 Kyiv Alerts\n"
+            "ℹ️ Alerts Live • 🤙 Feedback\n\nㅤ\n"
             "Надіслати новину @novosti_kieva_bot\n👉ПІДПИСАТИСЯ"
         )
         self.assertEqual(
             monitor.clean_alert_source_text(raw),
-            "Бровари, Бориспіль, Українка – ще до вас!",
+            "🔴 Ballistic ballistics from the east",
         )
 
     async def test_alert_source_keeps_linked_tactical_text(self):

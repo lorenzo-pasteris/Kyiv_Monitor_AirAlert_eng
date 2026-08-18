@@ -319,6 +319,8 @@ def clean_alert_source_text(text):
     promo_line_patterns = (
         r"(?i)\b(?:надіслати новину|написати нам|підписатися|підпишись|підписуйся)\b",
         r"(?i)\b(?:send news|report news|subscribe|watch live|live stream|join us)\b",
+        r"(?i)^\s*(?:💙\s*)?dnipro alerts\s*•\s*(?:💛\s*)?kyiv alerts\s*$",
+        r"(?i)^\s*(?:ℹ️\s*)?alerts live\s*•\s*(?:🤙\s*)?feedback\s*$",
         r"(?i)^\s*(?:👉\s*)?live\s*[:!—-]*\s*$",
         r"^\s*ㅤ\s*$",
     )
