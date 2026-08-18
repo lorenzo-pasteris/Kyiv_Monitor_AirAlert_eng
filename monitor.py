@@ -7,6 +7,7 @@
 - Health check every 12h: private warning to owner if channels go silent
 """
 import asyncio
+import fcntl
 import hashlib
 import html
 import json
@@ -165,6 +166,7 @@ CATEGORY_RESULT_SCHEMA = {
 CATEGORY_STATS_DB_PATH = os.environ.get(
     "CATEGORY_STATS_DB_PATH", "/data/kyiv_monitor_category_stats.sqlite3"
 )
+TELETHON_SESSION_LOCK_PATH = f"{CATEGORY_STATS_DB_PATH}.telethon.lock"
 NORMAL_HISTORY_BOOTSTRAP_HOURS = 1
 NORMAL_MESSAGE_RETENTION_DAYS = 7
 
@@ -563,6 +565,23 @@ def initialize_stats_db():
     except Exception as exc:
         print(f"[STATS DB ERROR] persistence unavailable: {type(exc).__name__}: {exc}")
         return False
+
+
+def acquire_telethon_session_lock(path=TELETHON_SESSION_LOCK_PATH, *, blocking=True):
+    """Prevent two production containers from opening the same Telegram session."""
+    lock_dir = os.path.dirname(path)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+    handle = open(path, "a+", encoding="utf-8")
+    operation = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+    try:
+        print(f"[TELETHON SESSION LOCK] waiting path={path}")
+        fcntl.flock(handle, operation)
+    except Exception:
+        handle.close()
+        raise
+    print(f"[TELETHON SESSION LOCK] acquired path={path}")
+    return handle
 
 
 def utc_iso(value=None):
@@ -1693,7 +1712,10 @@ async def main():
     stats_db_ready = initialize_stats_db()
 
     client = None
+    session_lock = None
     if not TEST_MODE or TEST_TELEGRAM_SESSION:
+        if not TEST_MODE:
+            session_lock = acquire_telethon_session_lock()
         session_value = TEST_TELEGRAM_SESSION if TEST_MODE else TELEGRAM_SESSION
         client = TelegramClient(StringSession(session_value), TELEGRAM_API_ID, TELEGRAM_API_HASH)
         try:
