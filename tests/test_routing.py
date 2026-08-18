@@ -239,6 +239,14 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
             monitor.utc_iso(observed_at),
         )
 
+    async def test_alert_delivery_claim_survives_restart_and_releases_on_failure(self):
+        text = "Балістична загроза зі сходу"
+        self.assertTrue(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text))
+        self.assertFalse(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text))
+        monitor.release_alert_feed_delivery("kyiv_alerts", 123, text)
+        self.assertTrue(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text))
+        self.assertTrue(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text + "! Нова інформація"))
+
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -417,8 +425,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         original_generation = monitor.alert_generation
         original_get_cursor = monitor.get_alert_feed_cursor
         original_set_cursor = monitor.set_alert_feed_cursor
+        original_claim = monitor.claim_alert_feed_delivery
+        original_release = monitor.release_alert_feed_delivery
         original_schedule = monitor.schedule_alert_delivery
         cursors = {channel: 18368}
+        claims = set()
         delivered = []
         delivery_results = iter((True, False, True))
 
@@ -431,6 +442,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.alert_generation = 3
             monitor.get_alert_feed_cursor = lambda name: cursors.get(name, 0)
             monitor.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
+            monitor.claim_alert_feed_delivery = lambda name, message_id, text: (
+                False if (name, message_id, monitor.normalize_alert_for_dedup(text)) in claims
+                else not claims.add((name, message_id, monitor.normalize_alert_for_dedup(text)))
+            )
+            monitor.release_alert_feed_delivery = lambda name, message_id, text: claims.discard(
+                (name, message_id, monitor.normalize_alert_for_dedup(text))
+            )
             monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
                 fake_delivery(text, source)
             )
@@ -450,7 +468,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 edit_date=now,
             )
             self.assertTrue(await monitor.process_alert_feed_message(edited, channel, edited=True))
-            self.assertFalse(await monitor.process_alert_feed_message(edited, channel))
+            monitor.recent_alert_messages.clear()  # simulate a new worker after deploy
+            self.assertFalse(await monitor.process_alert_feed_message(edited, channel, edited=True))
 
             failed = FakeTelegramMessage(18370, "БпЛА рухається на Київ.", now)
             self.assertFalse(await monitor.process_alert_feed_message(failed, channel))
@@ -461,6 +480,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.alert_generation = original_generation
             monitor.get_alert_feed_cursor = original_get_cursor
             monitor.set_alert_feed_cursor = original_set_cursor
+            monitor.claim_alert_feed_delivery = original_claim
+            monitor.release_alert_feed_delivery = original_release
             monitor.schedule_alert_delivery = original_schedule
 
         self.assertEqual(cursors[channel], 18370)

@@ -7,6 +7,7 @@
 - Health check every 12h: private warning to owner if channels go silent
 """
 import asyncio
+import hashlib
 import html
 import json
 import os
@@ -548,6 +549,15 @@ def initialize_stats_db():
                     updated_at TEXT NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS alert_feed_deliveries (
+                    channel TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    claimed_at TEXT NOT NULL,
+                    PRIMARY KEY (channel, message_id, fingerprint)
+                )"""
+            )
         print(f"[STATS DB] ready path={CATEGORY_STATS_DB_PATH}")
         return True
     except Exception as exc:
@@ -635,6 +645,41 @@ def get_alert_feed_cursor(channel):
 
 def set_alert_feed_cursor(channel, message_id):
     return persist_operational_state(alert_feed_cursor_key(channel), int(message_id))
+
+
+def claim_alert_feed_delivery(channel, message_id, text):
+    """Atomically reserve one source-message version across worker restarts."""
+    if not stats_db_ready:
+        return True
+    fingerprint = hashlib.sha256(normalize_alert_for_dedup(text).encode()).hexdigest()
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO alert_feed_deliveries
+                   (channel, message_id, fingerprint, claimed_at)
+                   VALUES (?, ?, ?, ?)""",
+                (channel, int(message_id), fingerprint, utc_iso()),
+            )
+        return cursor.rowcount == 1
+    except Exception as exc:
+        print(f"[ALERT CLAIM DB ERROR] @{channel} id={message_id}: {type(exc).__name__}: {exc}")
+        return True
+
+
+def release_alert_feed_delivery(channel, message_id, text):
+    """Release a failed reservation so the same message version can retry."""
+    if not stats_db_ready:
+        return
+    fingerprint = hashlib.sha256(normalize_alert_for_dedup(text).encode()).hexdigest()
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+            connection.execute(
+                """DELETE FROM alert_feed_deliveries
+                   WHERE channel = ? AND message_id = ? AND fingerprint = ?""",
+                (channel, int(message_id), fingerprint),
+            )
+    except Exception as exc:
+        print(f"[ALERT CLAIM DB ERROR] release @{channel} id={message_id}: {type(exc).__name__}: {exc}")
 
 
 def is_stale_alert_feed_message(channel, message_id):
@@ -1580,6 +1625,9 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT FILTERED] @{channel} id={message.id}")
         return False
+    if not claim_alert_feed_delivery(channel, message.id, clean):
+        print(f"[ALERT SKIPPED DELIVERED] @{channel} id={message.id} edited={edited}")
+        return False
     if not should_publish_alert(clean, channel):
         set_alert_feed_cursor(channel, max(cursor, message.id))
         return False
@@ -1589,6 +1637,7 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
     else:
+        release_alert_feed_delivery(channel, message.id, clean)
         forget_failed_alert(clean, channel)
     return delivered
 
