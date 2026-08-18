@@ -247,6 +247,17 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text))
         self.assertTrue(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text + "! Нова інформація"))
 
+    async def test_telethon_session_lock_allows_only_one_worker(self):
+        path = str(Path(self.temp_dir.name) / "telethon.lock")
+        first = monitor.acquire_telethon_session_lock(path)
+        try:
+            with self.assertRaises(BlockingIOError):
+                monitor.acquire_telethon_session_lock(path, blocking=False)
+        finally:
+            first.close()
+        replacement = monitor.acquire_telethon_session_lock(path, blocking=False)
+        replacement.close()
+
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

@@ -81,6 +81,10 @@ pushes to `main`. Configure GitHub branch protection so `main` requires the `tes
 check and at least one review. Railway should deploy production only from protected
 `main`; use a separate Railway service/environment with `TEST_MODE=true` for staging.
 
+Production acquires an exclusive lock on the persistent `/data` volume before opening
+Telethon. A replacement container waits for the previous worker to exit, preventing
+rolling deploys from invalidating `TELEGRAM_SESSION` through simultaneous connections.
+
 Do not test manual alert commands in the production channel. Verify the candidate
 commit in staging, merge only after green checks, and retain the preceding Railway
 deployment for rollback.
