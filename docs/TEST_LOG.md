@@ -280,7 +280,7 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 
 - **Ambiente:** suite locale isolata.
 - **Obiettivo:** elaborare gli edit di `@kyiv_alerts`, conservare testo tattico con link e non consumare il cursore quando Telegram non conferma la consegna.
-- **Procedura:** unificati listener e backfill in `process_alert_feed_message`; aggiunto `MessageEdited`; simulati edit sullo stesso ID e invio fallito sull'ID successivo.
-- **Risultato osservato:** edit pubblicato una volta; cursore invariato dopo invio fallito; URL rimosso senza eliminare il testo della riga; poll vuoti non registrati.
-- **Esito:** `py_compile` superato; 25/25 test `unittest` superati.
+- **Procedura:** unificati listener e backfill in `process_alert_feed_message`; aggiunto `MessageEdited`; simulata la sequenza messaggio filtrato → edit tattico → consegna → replay → invio fallito → retry.
+- **Risultato osservato:** edit pubblicato una volta; replay scartato; cursore invariato dopo invio fallito e avanzato dopo il retry riuscito; URL rimosso senza eliminare il testo della riga; poll vuoti non registrati.
+- **Esito:** `py_compile` superato; 26/26 test `unittest` superati.
 - **Limiti:** resta necessaria la verifica staging con un edit Telegram reale prima del merge in produzione.

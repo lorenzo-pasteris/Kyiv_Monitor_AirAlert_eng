@@ -297,6 +297,15 @@ def should_publish_alert(text, source, now=None):
     recent_alert_messages.append((timestamp, source, normalized, tokens))
     return True
 
+
+def forget_failed_alert(text, source):
+    """Allow a failed delivery to be retried instead of deduplicated."""
+    normalized = normalize_alert_for_dedup(text)
+    for item in reversed(recent_alert_messages):
+        if item[1] == source and item[2] == normalized:
+            recent_alert_messages.remove(item)
+            break
+
 def clean_text(text):
     text = re.sub(r'^\s*#\w+\s*', '', text)
     text = re.sub(r'\s*#\w+\s*', ' ', text)
@@ -1577,6 +1586,8 @@ async def process_alert_feed_message(message, channel, *, edited=False):
     if delivered:
         set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
+    else:
+        forget_failed_alert(clean, channel)
     return delivered
 
 

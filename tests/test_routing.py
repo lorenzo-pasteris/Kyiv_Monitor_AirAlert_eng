@@ -408,7 +408,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(cursors[channel], 125073)
 
-    async def test_edited_alert_is_reprocessed_but_failed_delivery_is_not_checkpointed(self):
+    async def test_filtered_message_edit_delivery_cursor_replay_and_retry(self):
         now = datetime.now(timezone.utc)
         channel = monitor.ALERT_FEED_CHANNEL
         original_active = monitor.alert_active
@@ -416,12 +416,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         original_get_cursor = monitor.get_alert_feed_cursor
         original_set_cursor = monitor.set_alert_feed_cursor
         original_schedule = monitor.schedule_alert_delivery
-        cursors = {channel: 18369}
+        cursors = {channel: 18368}
         delivered = []
+        delivery_results = iter((True, False, True))
 
         async def fake_delivery(text, source):
             delivered.append(text)
-            return len(delivered) == 1
+            return next(delivery_results)
 
         try:
             monitor.alert_active = True
@@ -432,6 +433,14 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 fake_delivery(text, source)
             )
 
+            original = FakeTelegramMessage(
+                18369,
+                "Вишгород жовтогарячий 🟧, дорозвідка.",
+                now,
+            )
+            self.assertFalse(await monitor.process_alert_feed_message(original, channel))
+            self.assertEqual(cursors[channel], 18369)
+
             edited = FakeTelegramMessage(
                 18369,
                 "Вишгород жовтогарячий. Троєщина та Бровари червоний.",
@@ -439,9 +448,12 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 edit_date=now,
             )
             self.assertTrue(await monitor.process_alert_feed_message(edited, channel, edited=True))
+            self.assertFalse(await monitor.process_alert_feed_message(edited, channel))
 
             failed = FakeTelegramMessage(18370, "БпЛА рухається на Київ.", now)
             self.assertFalse(await monitor.process_alert_feed_message(failed, channel))
+            self.assertEqual(cursors[channel], 18369)
+            self.assertTrue(await monitor.process_alert_feed_message(failed, channel))
         finally:
             monitor.alert_active = original_active
             monitor.alert_generation = original_generation
@@ -449,8 +461,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.set_alert_feed_cursor = original_set_cursor
             monitor.schedule_alert_delivery = original_schedule
 
-        self.assertEqual(cursors[channel], 18369)
-        self.assertEqual(len(delivered), 2)
+        self.assertEqual(cursors[channel], 18370)
+        self.assertEqual(len(delivered), 3)
 
     async def test_alert_dedup_keeps_first_and_new_information(self):
         first = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва"
