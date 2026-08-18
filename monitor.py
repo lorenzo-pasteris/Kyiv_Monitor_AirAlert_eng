@@ -2,7 +2,7 @@
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
 - Normal mode: hourly analysis of 3 channels published in the news group
-- Alert mode (24/7): only @kievreal1 in the alert-only channel
+- Alert mode (24/7): only @kyiv_alerts in the alert-only channel
 - Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -59,7 +59,7 @@ ADMIN_USER_IDS = {
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
-ALERT_FEED_CHANNEL = "kievreal1"
+ALERT_FEED_CHANNEL = "kyiv_alerts"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
 ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL]
@@ -217,7 +217,7 @@ recent_alert_messages = deque()
 alert_delivery_tasks = set()
 alert_generation = 0
 ALERT_DEDUP_WINDOW = 180
-TEST_SOURCE_PREFIX = "[TEST_SOURCE:kievreal1]"
+TEST_SOURCE_PREFIX = "[TEST_SOURCE:kyiv_alerts]"
 TEST_BUFFER_CHANNEL = AMK_CHANNEL
 TEST_SAMPLE_MESSAGES = [
     "⚠️ Київщина: зафіксовано рух ударних БпЛА Shahed drone у напрямку Києва.",
@@ -244,7 +244,7 @@ def is_non_operational_alert_message(text):
     )
 
 def is_actionable_alert_message(text):
-    """Allow explicit threats plus the terse location/direction follow-ups used by @kievreal1."""
+    """Allow explicit threats plus the terse location/direction follow-ups used by the alert feed."""
     if contains_any(text, ALERT_TACTICAL_KEYWORDS):
         return True
     clean = clean_text(text)
@@ -252,7 +252,7 @@ def is_actionable_alert_message(text):
         return False
     if contains_any(clean, ALERT_TERSE_FOLLOWUP_KEYWORDS):
         return True
-    # @kievreal1 frequently posts terse course updates such as
+    # The alert feed frequently posts terse course updates such as
     # "На Тарасівку від Боярки" without repeating "БпЛА".
     return bool(re.match(r"^(?:ще\s+)?на\s+.{2,80}\s+(?:від|з|із|зі)\s+.{2,80}[.!]?\s*$", clean, re.I))
 
@@ -599,6 +599,17 @@ def get_alert_feed_cursor(channel):
 
 def set_alert_feed_cursor(channel, message_id):
     return persist_operational_state(alert_feed_cursor_key(channel), int(message_id))
+
+
+def is_stale_alert_feed_message(channel, message_id):
+    """True when the cursor-based pipeline has already covered this Telegram message id.
+
+    The live Telethon listener and the 5-second poller ingest the same feed. The
+    180-second in-memory dedup cannot catch a live event replayed minutes later
+    (typical after a reconnection), so the durable cursor is the authoritative
+    guard. A missing cursor (0) keeps the previous behaviour: nothing is stale.
+    """
+    return int(message_id) <= get_alert_feed_cursor(channel)
 
 
 async def ensure_alert_feed_membership(client, source_entities):
@@ -1797,6 +1808,12 @@ async def main():
 
             if alert_active:
                 if channel in ALERT_FEED_CHANNELS:
+                    if is_stale_alert_feed_message(channel, event.message.id):
+                        # Late Telethon replay of a post already covered by the
+                        # poller/live path: the in-memory dedup window (180s)
+                        # cannot catch replays after a reconnection.
+                        print(f"[ALERT LIVE SKIPPED STALE] @{channel} id={event.message.id}")
+                        return
                     if should_publish_alert(clean, channel):
                         schedule_alert_delivery(clean, source=channel)
                     set_alert_feed_cursor(channel, event.message.id)
