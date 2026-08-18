@@ -308,16 +308,25 @@ def clean_alert_source_text(text):
     """Remove promotional lines from alert-source text before filtering and translation."""
     clean = clean_text(text)
     promo_line_patterns = (
-        r"(?i)(?:https?://|www\.|t\.me/|telegram\.me/)",
         r"(?i)\b(?:надіслати новину|написати нам|підписатися|підпишись|підписуйся)\b",
         r"(?i)\b(?:send news|report news|subscribe|watch live|live stream|join us)\b",
         r"(?i)^\s*(?:👉\s*)?live\s*[:!—-]*\s*$",
         r"^\s*ㅤ\s*$",
     )
-    kept_lines = [
-        line for line in clean.splitlines()
-        if not any(re.search(pattern, line) for pattern in promo_line_patterns)
-    ]
+    kept_lines = []
+    for line in clean.splitlines():
+        line = re.sub(
+            r"(?i)\[([^\]]+)\]\((?:https?://|www\.|(?:t|telegram)\.me/)\S+\)",
+            r"\1",
+            line,
+        )
+        line = re.sub(
+            r"(?i)(?:https?://|www\.|(?:t|telegram)\.me/)\S+",
+            "",
+            line,
+        ).strip()
+        if line and not any(re.search(pattern, line) for pattern in promo_line_patterns):
+            kept_lines.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
 
 def is_night():
@@ -578,11 +587,27 @@ def load_operational_state(key):
 
 def persist_trigger_observation(state, message_id, message_at):
     """Record the canonical trigger event used to reconstruct the effective mode."""
-    return all((
-        persist_operational_state("telegram_alert_state", "1" if state else "0"),
-        persist_operational_state("telegram_alert_message_id", message_id),
-        persist_operational_state("telegram_alert_message_at", utc_iso(message_at)),
-    ))
+    if not stats_db_ready:
+        return False
+    updated_at = utc_iso()
+    values = (
+        ("telegram_alert_state", "1" if state else "0", updated_at),
+        ("telegram_alert_message_id", str(message_id), updated_at),
+        ("telegram_alert_message_at", utc_iso(message_at), updated_at),
+    )
+    try:
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+            connection.executemany(
+                """INSERT INTO operational_state (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                       value = excluded.value, updated_at = excluded.updated_at""",
+                values,
+            )
+        return True
+    except Exception as exc:
+        print(f"[STATE DB ERROR] trigger observation: {type(exc).__name__}: {exc}")
+        return False
 
 
 def alert_feed_cursor_key(channel):
@@ -654,26 +679,12 @@ async def backfill_alert_feed(client, source_entities):
             if not alert_active:
                 print(f"[ALERT BACKFILL STOPPED] @{channel} reason=clear")
                 return delivered
-            if message.id <= cursor:
-                continue
             if trigger_at and message.date and message.date < trigger_at:
                 continue
-            clean = clean_alert_source_text(message.text or "")
-            if (
-                len(clean) < 5
-                or is_non_operational_alert_message(clean)
-                or is_pure_ad(clean)
-                or not is_actionable_alert_message(clean)
-            ):
-                set_alert_feed_cursor(channel, message.id)
-                print(f"[ALERT BACKFILL FILTERED] @{channel} id={message.id}")
-                continue
-            if should_publish_alert(clean, channel):
-                await handle_alert_message(clean, source=channel, generation=alert_generation)
+            if await process_alert_feed_message(message, channel):
                 delivered += 1
-            set_alert_feed_cursor(channel, message.id)
-            print(f"[ALERT BACKFILL PROCESSED] @{channel} id={message.id}")
-    print(f"[ALERT BACKFILL COMPLETE] delivered={delivered}")
+    if delivered:
+        print(f"[ALERT BACKFILL COMPLETE] delivered={delivered}")
     return delivered
 
 
@@ -1513,7 +1524,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
     generation = alert_generation if generation is None else generation
     if generation != alert_generation or not alert_active:
         print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
-        return
+        return False
 
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     try:
@@ -1524,7 +1535,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
 
     if generation != alert_generation or not alert_active:
         print(f"[ALERT STALE] translation discarded source=@{source} generation={generation}")
-        return
+        return False
     if not translation:
         print(f"[ALERT NOT PUBLISHED] translation unavailable source=@{source}")
         try:
@@ -1534,9 +1545,39 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
             )
         except Exception as ops_err:
             print(f"Ops notify failed: {ops_err}")
-        return
+        return False
 
-    await safe_send(f"🔴 {html.escape(translation)}")
+    return bool(await safe_send(f"🔴 {html.escape(translation)}"))
+
+
+async def process_alert_feed_message(message, channel, *, edited=False):
+    """Filter, deliver and checkpoint one ALERT-feed message."""
+    if not alert_active:
+        return False
+    if not edited and is_stale_alert_feed_message(channel, message.id):
+        print(f"[ALERT SKIPPED STALE] @{channel} id={message.id}")
+        return False
+
+    clean = clean_alert_source_text(message.text or "")
+    cursor = get_alert_feed_cursor(channel)
+    if (
+        len(clean) < 5
+        or is_non_operational_alert_message(clean)
+        or is_pure_ad(clean)
+        or not is_actionable_alert_message(clean)
+    ):
+        set_alert_feed_cursor(channel, max(cursor, message.id))
+        print(f"[ALERT FILTERED] @{channel} id={message.id}")
+        return False
+    if not should_publish_alert(clean, channel):
+        set_alert_feed_cursor(channel, max(cursor, message.id))
+        return False
+
+    delivered = bool(await schedule_alert_delivery(clean, source=channel))
+    if delivered:
+        set_alert_feed_cursor(channel, max(cursor, message.id))
+        print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
+    return delivered
 
 
 async def process_test_source_text(clean):
@@ -1772,6 +1813,7 @@ async def main():
                 )
 
         @client.on(events.NewMessage(chats=list(source_entities.values())))
+        @client.on(events.MessageEdited(chats=[source_entities[channel] for channel in ALERT_FEED_CHANNELS]))
         async def production_source_handler(event):
             global alert_active, alert_started_at, last_message_time, telegram_alert_state
             last_message_time = time.time()
@@ -1795,11 +1837,13 @@ async def main():
                     await reconcile_alert_state(f"@{BACKUP_TRIGGER_CHANNEL}")
                 return
 
-            if alert_active and channel in ALERT_FEED_CHANNELS and is_non_operational_alert_message(clean):
-                print(f"[FILTERED NON-OPERATIONAL ALERT] @{channel}: {clean[:80]}")
-                return
-            if alert_active and channel in ALERT_FEED_CHANNELS and not is_actionable_alert_message(clean):
-                print(f"[FILTERED NON-TACTICAL ALERT] @{channel}: {clean[:80]}")
+            if channel in ALERT_FEED_CHANNELS:
+                if alert_active:
+                    await process_alert_feed_message(
+                        event.message,
+                        channel,
+                        edited=bool(getattr(event.message, "edit_date", None)),
+                    )
                 return
 
             if is_pure_ad(clean):
@@ -1807,19 +1851,6 @@ async def main():
                 return
 
             if alert_active:
-                if channel in ALERT_FEED_CHANNELS:
-                    if is_stale_alert_feed_message(channel, event.message.id):
-                        # Late Telethon replay of a post already covered by the
-                        # poller/live path: the in-memory dedup window (180s)
-                        # cannot catch replays after a reconnection.
-                        print(f"[ALERT LIVE SKIPPED STALE] @{channel} id={event.message.id}")
-                        return
-                    if should_publish_alert(clean, channel):
-                        schedule_alert_delivery(clean, source=channel)
-                    set_alert_feed_cursor(channel, event.message.id)
-                return
-
-            if channel == ALERT_FEED_CHANNEL:
                 return
 
             time_str = datetime.now(TZ).strftime("%H:%M")
