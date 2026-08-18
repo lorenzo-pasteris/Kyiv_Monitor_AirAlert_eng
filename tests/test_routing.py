@@ -65,10 +65,11 @@ monitor = load_monitor()
 
 
 class FakeTelegramMessage:
-    def __init__(self, message_id, text, date):
+    def __init__(self, message_id, text, date, edit_date=None):
         self.id = message_id
         self.text = text
         self.date = date
+        self.edit_date = edit_date
 
 
 class FakeHistoryClient:
@@ -228,6 +229,16 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
             [800, 801, 802],
         )
 
+    async def test_trigger_observation_is_persisted_as_one_state_snapshot(self):
+        observed_at = datetime.now(timezone.utc)
+        self.assertTrue(monitor.persist_trigger_observation(True, 991, observed_at))
+        self.assertEqual(monitor.load_operational_state("telegram_alert_state"), "1")
+        self.assertEqual(monitor.load_operational_state("telegram_alert_message_id"), "991")
+        self.assertEqual(
+            monitor.load_operational_state("telegram_alert_message_at"),
+            monitor.utc_iso(observed_at),
+        )
+
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -305,6 +316,16 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Бровари, Бориспіль, Українка – ще до вас!",
         )
 
+    async def test_alert_source_keeps_linked_tactical_text(self):
+        raw = (
+            "Вишгород жовтогарячий 🟧, дорозвідка.\n\n"
+            "[Троєщина](https://t.me/kyiv_alerts) та Бровари червоний 🟥."
+        )
+        self.assertEqual(
+            monitor.clean_alert_source_text(raw),
+            "Вишгород жовтогарячий 🟧, дорозвідка.\nТроєщина та Бровари червоний 🟥.",
+        )
+
     async def test_kyiv_alerts_is_the_only_alert_feed(self):
         self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyiv_alerts"])
         self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
@@ -364,6 +385,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_handler(text, source, generation):
             delivered.append((text, source, generation))
+            return True
 
         try:
             monitor.alert_active = True
@@ -385,6 +407,62 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "На Осещину поворот",
         ])
         self.assertEqual(cursors[channel], 125073)
+
+    async def test_filtered_message_edit_delivery_cursor_replay_and_retry(self):
+        now = datetime.now(timezone.utc)
+        channel = monitor.ALERT_FEED_CHANNEL
+        original_active = monitor.alert_active
+        original_generation = monitor.alert_generation
+        original_get_cursor = monitor.get_alert_feed_cursor
+        original_set_cursor = monitor.set_alert_feed_cursor
+        original_schedule = monitor.schedule_alert_delivery
+        cursors = {channel: 18368}
+        delivered = []
+        delivery_results = iter((True, False, True))
+
+        async def fake_delivery(text, source):
+            delivered.append(text)
+            return next(delivery_results)
+
+        try:
+            monitor.alert_active = True
+            monitor.alert_generation = 3
+            monitor.get_alert_feed_cursor = lambda name: cursors.get(name, 0)
+            monitor.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
+            monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
+                fake_delivery(text, source)
+            )
+
+            original = FakeTelegramMessage(
+                18369,
+                "Вишгород жовтогарячий 🟧, дорозвідка.",
+                now,
+            )
+            self.assertFalse(await monitor.process_alert_feed_message(original, channel))
+            self.assertEqual(cursors[channel], 18369)
+
+            edited = FakeTelegramMessage(
+                18369,
+                "Вишгород жовтогарячий. Троєщина та Бровари червоний.",
+                now,
+                edit_date=now,
+            )
+            self.assertTrue(await monitor.process_alert_feed_message(edited, channel, edited=True))
+            self.assertFalse(await monitor.process_alert_feed_message(edited, channel))
+
+            failed = FakeTelegramMessage(18370, "БпЛА рухається на Київ.", now)
+            self.assertFalse(await monitor.process_alert_feed_message(failed, channel))
+            self.assertEqual(cursors[channel], 18369)
+            self.assertTrue(await monitor.process_alert_feed_message(failed, channel))
+        finally:
+            monitor.alert_active = original_active
+            monitor.alert_generation = original_generation
+            monitor.get_alert_feed_cursor = original_get_cursor
+            monitor.set_alert_feed_cursor = original_set_cursor
+            monitor.schedule_alert_delivery = original_schedule
+
+        self.assertEqual(cursors[channel], 18370)
+        self.assertEqual(len(delivered), 3)
 
     async def test_alert_dedup_keeps_first_and_new_information(self):
         first = "⚠️ 2 шахеди рухаються через Бровари у напрямку Києва"

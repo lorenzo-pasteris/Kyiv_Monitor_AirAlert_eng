@@ -275,3 +275,12 @@ Un test non deve essere dichiarato riuscito soltanto perché il codice compila o
 - **Esito:** superato per compilazione locale e CI.
 - **Identificativi:** PR #21; branch `fix/kyiv-alerts-feed-dedup-guard`; ultimo commit del branch `e43b6b1`.
 - **Limiti:** la verifica end-to-end reale (nessun duplicato durante un allarme vero con `@kyiv_alerts`) sarà confermata solo dopo merge e deploy Railway; il merge su `main` scatena l'auto-deploy in produzione.
+
+### 2026-08-18 — Edit Telegram e checkpoint dopo consegna
+
+- **Ambiente:** suite locale isolata.
+- **Obiettivo:** elaborare gli edit di `@kyiv_alerts`, conservare testo tattico con link e non consumare il cursore quando Telegram non conferma la consegna.
+- **Procedura:** unificati listener e backfill in `process_alert_feed_message`; aggiunto `MessageEdited`; simulata la sequenza messaggio filtrato → edit tattico → consegna → replay → invio fallito → retry.
+- **Risultato osservato:** edit pubblicato una volta; replay scartato; cursore invariato dopo invio fallito e avanzato dopo il retry riuscito; URL rimosso senza eliminare il testo della riga; poll vuoti non registrati.
+- **Esito:** `py_compile` superato; 26/26 test `unittest` superati.
+- **Limiti:** resta necessaria la verifica staging con un edit Telegram reale prima del merge in produzione.
