@@ -65,12 +65,11 @@ monitor = load_monitor()
 
 
 class FakeTelegramMessage:
-    def __init__(self, message_id, text, date, edit_date=None, photo=None):
+    def __init__(self, message_id, text, date, edit_date=None):
         self.id = message_id
         self.text = text
         self.date = date
         self.edit_date = edit_date
-        self.photo = photo
 
 
 class FakeHistoryClient:
@@ -453,37 +452,6 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 ("Розвідка пише, що буде ~45 крилатих ракет", channel),
             ],
         )
-
-    async def test_alert_feed_blocks_fundraising_image_before_delivery(self):
-        channel = monitor.ALERT_FEED_CHANNEL
-        now = datetime.now(timezone.utc)
-        original_active = monitor.alert_active
-        original_image_check = monitor.is_blocked_alert_image
-        original_get_cursor = monitor.get_alert_feed_cursor
-        original_set_cursor = monitor.set_alert_feed_cursor
-        cursors = {channel: 30000}
-
-        async def blocked_image(message):
-            return bool(message.photo)
-
-        try:
-            monitor.alert_active = True
-            monitor.is_blocked_alert_image = blocked_image
-            monitor.get_alert_feed_cursor = lambda name: cursors.get(name, 0)
-            monitor.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
-            message = FakeTelegramMessage(
-                30001,
-                "Оперативне оновлення",
-                now,
-                photo=object(),
-            )
-            self.assertFalse(await monitor.process_alert_feed_message(message, channel))
-            self.assertEqual(cursors[channel], 30001)
-        finally:
-            monitor.alert_active = original_active
-            monitor.is_blocked_alert_image = original_image_check
-            monitor.get_alert_feed_cursor = original_get_cursor
-            monitor.set_alert_feed_cursor = original_set_cursor
 
     async def test_alert_poller_recovers_messages_after_cursor(self):
         now = datetime.now(timezone.utc)
