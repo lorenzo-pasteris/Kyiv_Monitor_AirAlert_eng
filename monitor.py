@@ -25,6 +25,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.errors import AuthKeyDuplicatedError
 from alert_rules import classify_telegram_alert
+from predeploy_check import validate_environment
 
 # --- Credentials ---
 TELEGRAM_API_ID = int(os.environ["TELEGRAM_API_ID"])
@@ -1977,4 +1978,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    validate_environment(os.environ)
     asyncio.run(main())
