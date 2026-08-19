@@ -38,14 +38,6 @@ jobs:
       - name: Install Railway CLI
         run: npm install --global @railway/cli
 
-      - name: Link production service
-        run: >-
-          railway link
-          --project "$RAILWAY_PROJECT_ID"
-          --environment "$RAILWAY_ENVIRONMENT_ID"
-          --service "$RAILWAY_SERVICE_ID"
-          --json
-
       - name: Stop the active worker
         run: railway down --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --yes
 
