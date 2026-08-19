@@ -320,6 +320,14 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(monitor.is_non_operational_alert_message(donation))
         self.assertTrue(monitor.is_non_operational_alert_message(thanks))
+        for gratitude in (
+            "Оболонь, подякував❤️",
+            "Оболонь, дякую ❤️",
+            "Оболонь, спасибо ❤️",
+            "Obolon, thank you ❤️",
+            "Obolon, thanks ❤️",
+        ):
+            self.assertTrue(monitor.is_non_operational_alert_message(gratitude))
         self.assertFalse(monitor.is_non_operational_alert_message(operational))
         self.assertFalse(monitor.is_pure_ad(donation))  # security words no longer bypass the ALERT-only filter
         self.assertFalse(monitor.is_actionable_alert_message(unrelated))
