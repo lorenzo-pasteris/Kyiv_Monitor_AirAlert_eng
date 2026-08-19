@@ -185,7 +185,8 @@ DONATION_INDICATORS = [
 ]
 ENGAGEMENT_INDICATORS = [
     "щиро вдяч", "дуже вдяч", "вдячн", "дяку", "подяку", "спасиб",
-    "thank you", "thanks", "ви найкращі", "тримаємось",
+    "thank you", "thanks", "ви найкращі", "найкращі підписники",
+    "всіх бачу", "best subscribers", "i can see everyone", "тримаємось",
     "з днем", "вітаємо", "вітаю", "найкращі були та будете",
 ]
 SECURITY_KEYWORDS = ["тривога","відбій","балістика","ракета","шахед","шахеди","бпла","вибух","вибухи","ппо","повітряна ціль","укриття","загроза","обстріл","приліт","дрон","дрони","mig","міг","siren","raid","missile","drone","explosion","alert","attack","ballistic","shahed","interception","strike"]
