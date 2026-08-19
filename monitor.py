@@ -1,7 +1,7 @@
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
-- Normal mode: hourly analysis of 3 channels published in the news group
+- Normal mode: hourly analysis of 4 channels published in the news group
 - Alert mode (24/7): only @kyivnebomonitoring in the alert-only channel
 - Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
 - Health check every 12h: private warning to owner if channels go silent
@@ -61,10 +61,16 @@ ADMIN_USER_IDS = {
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
+INSIDER_UA_CHANNEL = "insiderukr"
 ALERT_FEED_CHANNEL = "kyivnebomonitoring"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
-ALL_CONTENT_CHANNELS = [KYIV_INFO_CHANNEL, UKRAINE_NEWS_CHANNEL, AMK_CHANNEL]
+ALL_CONTENT_CHANNELS = [
+    KYIV_INFO_CHANNEL,
+    UKRAINE_NEWS_CHANNEL,
+    AMK_CHANNEL,
+    INSIDER_UA_CHANNEL,
+]
 ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL]
 
 SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in production
