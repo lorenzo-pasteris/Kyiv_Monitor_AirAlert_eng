@@ -1639,7 +1639,6 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         len(clean) < 5
         or is_non_operational_alert_message(clean)
         or is_pure_ad(clean)
-        or not is_actionable_alert_message(clean)
     ):
         set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT FILTERED] @{channel} id={message.id}")
