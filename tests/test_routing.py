@@ -390,6 +390,55 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(monitor.is_non_operational_alert_message(message))
         self.assertFalse(monitor.is_actionable_alert_message(ordinary_news))
 
+    async def test_alert_feed_publishes_operational_posts_without_keyword_allowlist(self):
+        channel = monitor.ALERT_FEED_CHANNEL
+        now = datetime.now(timezone.utc)
+        original_active = monitor.alert_active
+        original_get_cursor = monitor.get_alert_feed_cursor
+        original_set_cursor = monitor.set_alert_feed_cursor
+        original_claim = monitor.claim_alert_feed_delivery
+        original_schedule = monitor.schedule_alert_delivery
+        delivered = []
+
+        async def fake_delivery(text, source):
+            delivered.append((text, source))
+            return True
+
+        try:
+            monitor.alert_active = True
+            monitor.get_alert_feed_cursor = lambda name: 0
+            monitor.set_alert_feed_cursor = lambda name, value: True
+            monitor.claim_alert_feed_delivery = lambda name, message_id, text: True
+            monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
+                fake_delivery(text, source)
+            )
+            monitor.recent_alert_messages.clear()
+
+            bomber_count = FakeTelegramMessage(
+                20001, "В повітрі 7 бортів Ту-95мс та 2 борти Ту-160", now
+            )
+            missile_estimate = FakeTelegramMessage(
+                20002, "Розвідка пише, що буде ~45 крилатих ракет", now
+            )
+
+            self.assertTrue(await monitor.process_alert_feed_message(bomber_count, channel))
+            self.assertTrue(await monitor.process_alert_feed_message(missile_estimate, channel))
+        finally:
+            monitor.alert_active = original_active
+            monitor.get_alert_feed_cursor = original_get_cursor
+            monitor.set_alert_feed_cursor = original_set_cursor
+            monitor.claim_alert_feed_delivery = original_claim
+            monitor.schedule_alert_delivery = original_schedule
+            monitor.recent_alert_messages.clear()
+
+        self.assertEqual(
+            delivered,
+            [
+                ("В повітрі 7 бортів Ту-95мс та 2 борти Ту-160", channel),
+                ("Розвідка пише, що буде ~45 крилатих ракет", channel),
+            ],
+        )
+
     async def test_alert_poller_recovers_messages_after_cursor(self):
         now = datetime.now(timezone.utc)
         channel = monitor.ALERT_FEED_CHANNEL
@@ -469,7 +518,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
             original = FakeTelegramMessage(
                 18369,
-                "Вишгород жовтогарячий 🟧, дорозвідка.",
+                "Підтримайте збір на евакуаційний автомобіль.",
                 now,
             )
             self.assertFalse(await monitor.process_alert_feed_message(original, channel))
