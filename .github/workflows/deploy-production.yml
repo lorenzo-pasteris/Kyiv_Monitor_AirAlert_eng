@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      recovery:
+        description: "Redeploy while the service is already offline"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,10 +43,15 @@ jobs:
       - name: Install Railway CLI
         run: npm install --global @railway/cli
 
+      - name: Stamp the deployment archive
+        run: "printf '\\n# Deployment run: %s\\n' \"$GITHUB_RUN_ID\" >> monitor.py"
+
       - name: Stop the active worker
+        if: github.event_name == 'push' || inputs.recovery == false
         run: railway down --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --yes
 
       - name: Allow Telegram to release the previous connection
+        if: github.event_name == 'push' || inputs.recovery == false
         run: sleep 15
 
       - name: Deploy this tested commit
