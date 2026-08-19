@@ -7,7 +7,6 @@
 - Health check every 12h: private warning to owner if channels go silent
 """
 import asyncio
-import base64
 import fcntl
 import hashlib
 import html
@@ -272,57 +271,6 @@ def is_pure_ad(text):
     if contains_any(text, SECURITY_KEYWORDS):
         return False
     return contains_any(text, AD_INDICATORS)
-
-
-async def is_blocked_alert_image(message):
-    """Use vision to reject fundraising, advertising and social-only alert images."""
-    if not getattr(message, "photo", None) or production_client is None:
-        return False
-    try:
-        image_bytes = await production_client.download_media(message, bytes, thumb=-1)
-        if not image_bytes:
-            return False
-        response = await http_client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": MODEL,
-                "max_tokens": 10,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": base64.b64encode(image_bytes).decode("ascii"),
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                "Classify this Telegram alert-feed image. Reply BLOCK only if it "
-                                "prominently requests money/donations, shows payment details or a "
-                                "fundraising QR/card/jar, advertises something, thanks supporters, "
-                                "or is purely social/engagement content. Otherwise reply ALLOW."
-                            ),
-                        },
-                    ],
-                }],
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        verdict = response.json()["content"][0]["text"].strip().upper()
-        return verdict.startswith("BLOCK")
-    except Exception as exc:
-        print(f"[ALERT IMAGE CHECK ERROR] {type(exc).__name__}: {exc}")
-        return False
 
 def normalize_alert_for_dedup(text):
     """Normalize formatting noise while retaining locations, targets and quantities."""
@@ -810,19 +758,14 @@ async def backfill_alert_feed(client, source_entities):
                 f"through_id={skipped[-1].id}"
             )
             pending = pending[-ALERT_RECOVERY_MAX_MESSAGES:]
-        eligible = [
-            message for message in pending
-            if not trigger_at or not message.date or message.date >= trigger_at
-        ]
-        if not alert_active:
-            print(f"[ALERT BACKFILL STOPPED] @{channel} reason=clear")
-            return delivered
-        if eligible:
-            results = await asyncio.gather(*(
-                process_alert_feed_message(message, channel)
-                for message in eligible
-            ))
-            delivered += sum(bool(result) for result in results)
+        for message in pending:
+            if not alert_active:
+                print(f"[ALERT BACKFILL STOPPED] @{channel} reason=clear")
+                return delivered
+            if trigger_at and message.date and message.date < trigger_at:
+                continue
+            if await process_alert_feed_message(message, channel):
+                delivered += 1
     if delivered:
         print(f"[ALERT BACKFILL COMPLETE] delivered={delivered}")
     return delivered
@@ -1700,10 +1643,6 @@ async def process_alert_feed_message(message, channel, *, edited=False):
 
     clean = clean_alert_source_text(message.text or "")
     cursor = get_alert_feed_cursor(channel)
-    if await is_blocked_alert_image(message):
-        set_alert_feed_cursor(channel, max(cursor, message.id))
-        print(f"[ALERT FILTERED IMAGE] @{channel} id={message.id}")
-        return False
     if (
         len(clean) < 5
         or is_non_operational_alert_message(clean)
