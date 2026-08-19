@@ -70,7 +70,7 @@ The tests stub external services and do not send Telegram or Anthropic requests.
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 -m py_compile monitor.py alert_rules.py
+python3 -m py_compile monitor.py alert_rules.py predeploy_check.py
 python3 -m unittest discover -s tests -v
 ```
 
@@ -80,6 +80,11 @@ GitHub Actions runs syntax checks and the complete test suite for pull requests 
 pushes to `main`. Configure GitHub branch protection so `main` requires the `test`
 check and at least one review. Railway should deploy production only from protected
 `main`; use a separate Railway service/environment with `TEST_MODE=true` for staging.
+
+`railway.json` runs `predeploy_check.py` before promotion. It rejects missing or
+malformed production configuration—including an invalid Telethon StringSession—without
+printing secret values, so a bad configuration cannot replace a running deployment.
+Failed workers are limited to three restart attempts instead of looping indefinitely.
 
 Production acquires an exclusive lock on the persistent `/data` volume before opening
 Telethon. A replacement container waits for the previous worker to exit, preventing
