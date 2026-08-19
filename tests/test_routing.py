@@ -326,6 +326,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Оболонь, спасибо ❤️",
             "Obolon, thank you ❤️",
             "Obolon, thanks ❤️",
+            "Всіх бачу, найкращі підписники❤️🥹",
+            "I can see everyone, best subscribers❤️🥹",
         ):
             self.assertTrue(monitor.is_non_operational_alert_message(gratitude))
         self.assertFalse(monitor.is_non_operational_alert_message(operational))
