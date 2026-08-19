@@ -65,11 +65,12 @@ monitor = load_monitor()
 
 
 class FakeTelegramMessage:
-    def __init__(self, message_id, text, date, edit_date=None):
+    def __init__(self, message_id, text, date, edit_date=None, photo=None):
         self.id = message_id
         self.text = text
         self.date = date
         self.edit_date = edit_date
+        self.photo = photo
 
 
 class FakeHistoryClient:
@@ -452,6 +453,39 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 ("Розвідка пише, що буде ~45 крилатих ракет", channel),
             ],
         )
+
+    async def test_alert_image_is_filtered_in_background(self):
+        channel = monitor.ALERT_FEED_CHANNEL
+        gate = asyncio.Event()
+        cursors = {channel: 30000}
+        original_image_check = monitor.is_blocked_alert_image
+        original_get_cursor = monitor.get_alert_feed_cursor
+        original_set_cursor = monitor.set_alert_feed_cursor
+
+        async def blocked_after_delay(message):
+            await gate.wait()
+            return True
+
+        try:
+            monitor.is_blocked_alert_image = blocked_after_delay
+            monitor.get_alert_feed_cursor = lambda name: cursors[name]
+            monitor.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
+            message = FakeTelegramMessage(
+                30001, "Оперативне оновлення", datetime.now(timezone.utc), photo=object()
+            )
+            task = monitor.schedule_alert_image_processing(
+                message, channel, message.text, False
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            cursors[channel] = 30002
+            gate.set()
+            self.assertFalse(await task)
+            self.assertEqual(cursors[channel], 30002)
+        finally:
+            monitor.is_blocked_alert_image = original_image_check
+            monitor.get_alert_feed_cursor = original_get_cursor
+            monitor.set_alert_feed_cursor = original_set_cursor
 
     async def test_alert_poller_recovers_messages_after_cursor(self):
         now = datetime.now(timezone.utc)
