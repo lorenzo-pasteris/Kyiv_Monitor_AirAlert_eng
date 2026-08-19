@@ -347,9 +347,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Вишгород жовтогарячий 🟧, дорозвідка.\nТроєщина та Бровари червоний 🟥.",
         )
 
-    async def test_kyiv_alerts_is_the_only_alert_feed(self):
-        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyiv_alerts"])
+    async def test_kyiv_de_zagroza_chat_is_the_only_alert_feed(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["KyivDeZagrozaCHAT"])
+        self.assertNotIn("KyivDeZagrozaCHAT", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("kyiv_alerts", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("kievreal1", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("nebo_raketa", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("Nashee_PPO", monitor.ALL_CONTENT_CHANNELS)
