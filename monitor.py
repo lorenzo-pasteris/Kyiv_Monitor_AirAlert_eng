@@ -80,6 +80,7 @@ HEALTH_CHECK_INTERVAL = 43200  # 12 hours
 SILENCE_THRESHOLD = 4 * 3600  # 4 hours of total silence = warning
 ALERT_FEED_POLL_INTERVAL = float(os.environ.get("ALERT_FEED_POLL_INTERVAL", "5"))
 ALERT_RECOVERY_MAX_MESSAGES = int(os.environ.get("ALERT_RECOVERY_MAX_MESSAGES", "3"))
+TELETHON_HANDOFF_DELAY = float(os.environ.get("TELETHON_HANDOFF_DELAY", "15"))
 
 # --- Timezone / night pause ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
@@ -1808,6 +1809,12 @@ async def main():
     if not TEST_MODE or TEST_TELEGRAM_SESSION:
         if not TEST_MODE:
             session_lock = acquire_telethon_session_lock()
+            if TELETHON_HANDOFF_DELAY:
+                print(
+                    f"[TELETHON HANDOFF] waiting {TELETHON_HANDOFF_DELAY:g}s "
+                    "for the previous Railway deployment to stop"
+                )
+                await asyncio.sleep(TELETHON_HANDOFF_DELAY)
         session_value = TEST_TELEGRAM_SESSION if TEST_MODE else TELEGRAM_SESSION
         client = TelegramClient(StringSession(session_value), TELEGRAM_API_ID, TELEGRAM_API_HASH)
         try:
