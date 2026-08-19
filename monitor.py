@@ -80,7 +80,7 @@ HEALTH_CHECK_INTERVAL = 43200  # 12 hours
 SILENCE_THRESHOLD = 4 * 3600  # 4 hours of total silence = warning
 ALERT_FEED_POLL_INTERVAL = float(os.environ.get("ALERT_FEED_POLL_INTERVAL", "5"))
 ALERT_RECOVERY_MAX_MESSAGES = int(os.environ.get("ALERT_RECOVERY_MAX_MESSAGES", "3"))
-TELETHON_HANDOFF_DELAY = float(os.environ.get("TELETHON_HANDOFF_DELAY", "15"))
+TELETHON_HANDOFF_DELAY = float(os.environ.get("TELETHON_HANDOFF_DELAY", "15.0"))
 
 # --- Timezone / night pause ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
