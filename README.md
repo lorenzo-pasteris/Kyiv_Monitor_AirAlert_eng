@@ -20,7 +20,7 @@ is paused and the accumulated material is used for the morning recap.
 ### ALERT
 
 The explicit Kyiv state from `@kyiv_airraid_alert` controls the mode. While active,
-actionable new messages and edits from `@kyiv_alerts` enter the low-latency translation
+actionable new messages and edits from `@KyivDeZagrozaCHAT` enter the low-latency translation
 pipeline. Alert transitions are serialized, public delivery must be confirmed before
 the state is committed, and stale translations are discarded after the alert ends.
 
