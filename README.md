@@ -13,7 +13,7 @@ Ukrainian civil-defence instructions or local emergency alerts.
 
 ### NORMAL
 
-Messages from `@kievinfo_kyiv`, `@shv_ukr`, and `@AMK_Mapping` are persisted in
+Messages from `@kievinfo_kyiv`, `@shv_ukr`, `@AMK_Mapping`, and `@insiderukr` are persisted in
 SQLite and summarized hourly. Between 01:00 and 07:00 Europe/Kyiv, hourly publishing
 is paused and the accumulated material is used for the morning recap.
 

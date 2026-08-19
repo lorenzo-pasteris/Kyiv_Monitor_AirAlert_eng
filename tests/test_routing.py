@@ -226,7 +226,7 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [monitor.get_source_cursor(channel) for channel in monitor.ALL_CONTENT_CHANNELS],
-            [800, 801, 802],
+            [800 + index for index, _ in enumerate(monitor.ALL_CONTENT_CHANNELS)],
         )
 
     async def test_trigger_observation_is_persisted_as_one_state_snapshot(self):
@@ -356,6 +356,10 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("kievreal1", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("nebo_raketa", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("Nashee_PPO", monitor.ALL_CONTENT_CHANNELS)
+
+    async def test_insider_ua_is_an_hourly_content_source_only(self):
+        self.assertIn("insiderukr", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("insiderukr", monitor.ALERT_FEED_CHANNELS)
 
     async def test_manual_override_admin_allowlist(self):
         self.assertTrue(monitor.is_authorized_admin(392256147))
