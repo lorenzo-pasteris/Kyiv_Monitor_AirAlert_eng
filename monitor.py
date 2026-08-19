@@ -7,6 +7,7 @@
 - Health check every 12h: private warning to owner if channels go silent
 """
 import asyncio
+import base64
 import fcntl
 import hashlib
 import html
@@ -272,6 +273,55 @@ def is_pure_ad(text):
     if contains_any(text, SECURITY_KEYWORDS):
         return False
     return contains_any(text, AD_INDICATORS)
+
+
+async def is_blocked_alert_image(message):
+    """Reject fundraising, advertising and engagement-only alert images."""
+    if not getattr(message, "photo", None) or production_client is None:
+        return False
+    try:
+        image_bytes = await production_client.download_media(message, bytes, thumb=-1)
+        if not image_bytes:
+            return False
+        response = await http_client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": MODEL,
+                "max_tokens": 10,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": base64.b64encode(image_bytes).decode("ascii"),
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "Reply BLOCK only if this image prominently requests donations or money, "
+                                "shows payment details, a fundraising QR/card/jar, advertising, thanks "
+                                "supporters, or is purely social engagement. Otherwise reply ALLOW."
+                            ),
+                        },
+                    ],
+                }],
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()["content"][0]["text"].strip().upper().startswith("BLOCK")
+    except Exception as exc:
+        print(f"[ALERT IMAGE CHECK ERROR] {type(exc).__name__}: {exc}")
+        return False
 
 def normalize_alert_for_dedup(text):
     """Normalize formatting noise while retaining locations, targets and quantities."""
@@ -1603,6 +1653,35 @@ def schedule_alert_delivery(clean, source):
     return task
 
 
+def schedule_alert_image_processing(message, channel, clean, edited):
+    """Analyze an image without holding up later alert-feed messages."""
+    task = asyncio.create_task(
+        process_alert_image_message(message, channel, clean, edited)
+    )
+    alert_delivery_tasks.add(task)
+    task.add_done_callback(alert_delivery_tasks.discard)
+    return task
+
+
+async def process_alert_image_message(message, channel, clean, edited):
+    try:
+        if await is_blocked_alert_image(message):
+            set_alert_feed_cursor(channel, max(get_alert_feed_cursor(channel), message.id))
+            print(f"[ALERT FILTERED IMAGE] @{channel} id={message.id}")
+            return False
+        delivered = bool(await schedule_alert_delivery(clean, source=channel))
+        if delivered:
+            set_alert_feed_cursor(channel, max(get_alert_feed_cursor(channel), message.id))
+            print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
+        else:
+            release_alert_feed_delivery(channel, message.id, clean)
+            forget_failed_alert(clean, channel)
+        return delivered
+    except asyncio.CancelledError:
+        release_alert_feed_delivery(channel, message.id, clean)
+        raise
+
+
 async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None):
     """Translate first, then publish one final English alert if it is still current."""
     generation = alert_generation if generation is None else generation
@@ -1658,6 +1737,11 @@ async def process_alert_feed_message(message, channel, *, edited=False):
     if not should_publish_alert(clean, channel):
         set_alert_feed_cursor(channel, max(cursor, message.id))
         return False
+
+    if getattr(message, "photo", None):
+        schedule_alert_image_processing(message, channel, clean, edited)
+        print(f"[ALERT IMAGE QUEUED] @{channel} id={message.id}")
+        return True
 
     delivered = bool(await schedule_alert_delivery(clean, source=channel))
     if delivered:
