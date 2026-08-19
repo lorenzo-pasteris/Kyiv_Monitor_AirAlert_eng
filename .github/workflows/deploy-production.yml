@@ -1,0 +1,63 @@
+name: Deploy production safely
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  RAILWAY_PROJECT_ID: 09fb396b-d91b-41b8-a70b-dd033d408e7d
+  RAILWAY_ENVIRONMENT_ID: 661e15ae-8aad-4f10-9135-abe2adfdea92
+  RAILWAY_SERVICE_ID: ed89feb6-f6a9-4cf4-8dbb-159de7439349
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: python -m pip install -r requirements.txt
+      - run: python -m py_compile monitor.py alert_rules.py predeploy_check.py
+      - run: python -m unittest discover -s tests -v
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Link production service
+        run: >-
+          railway link
+          --project "$RAILWAY_PROJECT_ID"
+          --environment "$RAILWAY_ENVIRONMENT_ID"
+          --service "$RAILWAY_SERVICE_ID"
+          --json
+
+      - name: Stop the active worker
+        run: railway down --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --yes
+
+      - name: Allow Telegram to release the previous connection
+        run: sleep 15
+
+      - name: Deploy this tested commit
+        run: >-
+          railway up
+          --project "$RAILWAY_PROJECT_ID"
+          --environment "$RAILWAY_ENVIRONMENT_ID"
+          --service "$RAILWAY_SERVICE_ID"
+          --ci
+          --message "GitHub Actions $GITHUB_SHA"
+
+      - name: Verify production status
+        run: railway status --json
