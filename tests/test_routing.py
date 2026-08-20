@@ -31,6 +31,7 @@ def load_monitor():
         "ADMIN_USER_IDS": "392256147",
         "TEST_MODE": "false",
     })
+    os.environ.pop("UKRAINE_ALARM_API_KEY", None)
 
     httpx_stub = types.ModuleType("httpx")
     telethon_stub = types.ModuleType("telethon")
@@ -261,6 +262,26 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ukraine_alarm_parser_selects_kyiv_city_air_only(self):
+        response = [
+            {
+                "regionName": "Київська область",
+                "regionEngName": "Kyiv region",
+                "activeAlerts": [{"type": "AIR"}],
+            },
+            {
+                "regionName": "м. Київ",
+                "regionEngName": "Kyiv",
+                "activeAlerts": [{"type": "INFO"}],
+            },
+        ]
+        self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
+        response[1]["activeAlerts"].append({"type": "AIR"})
+        self.assertTrue(monitor.parse_ukraine_alarm_kyiv_state(response))
+
+        with self.assertRaisesRegex(ValueError, "Kyiv City"):
+            monitor.parse_ukraine_alarm_kyiv_state(response[:1])
+
     async def asyncSetUp(self):
         self.sent = []
         monitor.recent_alert_messages.clear()
