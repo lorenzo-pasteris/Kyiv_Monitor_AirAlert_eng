@@ -7,7 +7,7 @@ import urllib.request
 
 key = os.environ["UKRAINE_ALARM_API_KEY"].strip()
 request = urllib.request.Request(
-    "https://api.ukrainealarm.com/api/v3/alerts",
+    "https://api.ukrainealarm.com/api/v3/alerts/31",
     headers={"Authorization": key, "Accept": "application/json"},
 )
 with urllib.request.urlopen(request, timeout=15) as response:
