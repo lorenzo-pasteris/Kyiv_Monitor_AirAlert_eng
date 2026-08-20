@@ -406,10 +406,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_actionable_alert_message(ordinary_news))
 
     async def test_translation_prompt_covers_observed_alert_jargon(self):
-        source = "Реактивні БпЛА. Мінус. 4 посилки на Бровари."
+        source = "Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів"
         prompt = monitor.build_alert_translation_prompt(source)
         self.assertIn("jet-powered UAV(s)", prompt)
         self.assertIn("cruise missile(s)", prompt)
+        self.assertIn("S8000 Banderol cruise missile(s)", prompt)
+        self.assertIn("never parcel, package, or UAV", prompt)
+        self.assertIn("No threat from S8000 Banderol cruise missiles", prompt)
         self.assertIn("never 'minus'", prompt)
         self.assertIn("never translate them literally as gifts or parcels", prompt)
         self.assertTrue(prompt.endswith(source))
