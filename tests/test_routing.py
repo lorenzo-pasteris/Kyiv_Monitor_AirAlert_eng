@@ -438,6 +438,26 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("never translate them literally as gifts or parcels", prompt)
         self.assertTrue(prompt.endswith(source))
 
+    async def test_known_terse_alert_fragments_never_need_model_context(self):
+        self.assertEqual(monitor.translate_known_terse_fragment("Дарниця"), "Darnytsia")
+        self.assertEqual(monitor.translate_known_terse_fragment("ТЕЦ-5"), "CHP-5")
+        self.assertEqual(monitor.translate_known_terse_fragment("Збили"), "Shot down")
+        self.assertEqual(await monitor.translate_message("Збили"), "Shot down")
+        prompt = monitor.build_alert_translation_prompt("Дарниця")
+        self.assertIn("Never ask for more context", prompt)
+        self.assertIn("'Дарниця' = 'Darnytsia'", prompt)
+
+    async def test_model_meta_commentary_can_never_be_published_as_translation(self):
+        bad_outputs = (
+            'No translation provided. The source message contains only "Darnytsia".',
+            "I'm ready to translate, but the source message appears incomplete.",
+            'I need the source message to translate. You\'ve provided only "Збили".',
+            "Please provide the complete Ukrainian/Russian message.",
+        )
+        for output in bad_outputs:
+            self.assertTrue(monitor.is_translation_meta_output(output))
+        self.assertFalse(monitor.is_translation_meta_output("2 UAVs heading toward Brovary"))
+
     async def test_alert_feed_publishes_operational_posts_without_keyword_allowlist(self):
         channel = monitor.ALERT_FEED_CHANNEL
         now = datetime.now(timezone.utc)
