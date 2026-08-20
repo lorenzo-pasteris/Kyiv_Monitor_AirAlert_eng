@@ -35,6 +35,8 @@ TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
 TEST_TELEGRAM_SESSION = os.environ.get("TEST_TELEGRAM_SESSION")
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 UKRAINE_ALARM_API_KEY = os.environ.get("UKRAINE_ALARM_API_KEY", "").strip()
+if UKRAINE_ALARM_API_KEY == "disabled":
+    UKRAINE_ALARM_API_KEY = ""
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USER_ID = int(BOT_TOKEN.split(":", 1)[0])
 TEST_MODE = os.environ.get("TEST_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
