@@ -500,23 +500,48 @@ async def apply_alert_state(desired, source, *, startup=False, public_message=No
         return True
 
 
+def build_alert_translation_prompt(text):
+    """Build a concise, domain-aware translation request for Ukrainian alert jargon."""
+    return (
+        "Translate this Ukrainian/Russian air-defence update into concise, natural English for "
+        "civilians in Kyiv. Translate the operational meaning, not word-for-word. Output ONLY the "
+        "translation; no notes, disclaimers, alternatives, labels, or quotation marks. Preserve every "
+        "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
+        "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
+        "Mandatory alert glossary:\n"
+        "- крилата ракета / крилаті / крилатих = cruise missile(s), never 'winged'\n"
+        "- реактивний БпЛА / реактивні БпЛА / реактив = jet-powered UAV(s), never aircraft or reactor\n"
+        "- БпЛА / шахед / мопед = UAV / Shahed drone as context permits\n"
+        "- мінус = intercepted or neutralized threat, never 'minus'\n"
+        "- чисто / не спостерігається = clear / no threats currently observed\n"
+        "- відбій = all clear\n"
+        "- ППО працює = air defence is engaging\n"
+        "- пуск / повторні пуски = launch / repeated launches\n"
+        "- курсом на / в напрямку = heading toward\n"
+        "- Бандероль / бандеролі / бандеролям = S8000 Banderol cruise missile(s), "
+        "never parcel, package, or UAV\n"
+        "- подарунки / посилки can be alert-channel euphemisms for incoming threats; never translate "
+        "them literally as gifts or parcels. Name UAVs or missiles only when the source establishes it.\n\n"
+        "Example: 'Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів' means "
+        "'No threat from S8000 Banderol cruise missiles. The alert was issued for a jet-powered UAV "
+        "heading toward Brovary.'\n\n"
+        "Keep terse fragments terse. Retain Ukrainian place names using standard transliteration. Remove "
+        "promo, subscribe, and LIVE tags. Known spellings include Kyiv, Brovary, Boryspil, Obukhiv, "
+        "Vyshhorod, Bucha, Irpin, Fastiv, Bila Tserkva, Berezniaky, Osokorky, Pozniaky, Troieshchyna, "
+        "Vyshneve, Dymer, Boyarka, Yahotyn, Hostomel, Rembaza, and Koncha-Zaspa.\n\n"
+        "Source message:\n" + text
+    )
+
+
 async def translate_message(text):
     try:
         async with translation_slots:
             r = await http_client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 1000, "messages": [{"role": "user", "content": (
-                "Translate this Ukrainian/Russian military-alert message into English. "
-                "Output ONLY the translation. Never add notes, disclaimers, explanations, alternative "
-                "readings, or comments about OCR/ambiguity. If a word is a place name, keep it as the "
-                "place name. Known place names include: Brovary, Bucha, Irpin, Vyshhorod, Boryspil, "
-                "Obukhiv, Fastiv, Bila Tserkva, Kharkiv, Dnipro, Odesa, Lviv, Zaporizhzhia, "
-                "Bereznyaky, Osokorky, Poznyaky, Troieshchyna, Berezan, Rembaza, Vyshneve, "
-                "Zhuliany, Borshchahivka, Dymer, Boyarka, Yahotyn, Hostomel, Petrivtsi, "
-                "Trebukhov, Zalissia, Dymerka, Slavutych, Nivki, Pochayna, Koncha-Zaspa, Pyrohiv. "
-                "Remove promo/subscribe/LIVE tags. Keep locations, times, quantities, and uncertainty. "
-                "Translation only:\n\n" + text)}]},
+            json={"model": MODEL, "max_tokens": 500, "messages": [{
+                "role": "user", "content": build_alert_translation_prompt(text)
+            }]},
             timeout=httpx.Timeout(15.0, connect=5.0)
             )
         r.raise_for_status()
