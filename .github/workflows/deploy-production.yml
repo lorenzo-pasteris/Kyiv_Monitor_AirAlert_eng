@@ -50,8 +50,8 @@ jobs:
           if [ -n "$UKRAINE_ALARM_API_KEY" ]; then
             printf '%s' "$UKRAINE_ALARM_API_KEY" | railway variable set UKRAINE_ALARM_API_KEY --stdin --skip-deploys --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
           else
-            printf '' | railway variable set UKRAINE_ALARM_API_KEY --stdin --skip-deploys --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
-            echo "UKRAINE_ALARM_API_KEY cleared in Railway; shadow mode disabled."
+            printf 'disabled' | railway variable set UKRAINE_ALARM_API_KEY --stdin --skip-deploys --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
+            echo "UkraineAlarm credential removed from Railway; shadow mode disabled."
           fi
 
       - name: Stamp the deployment archive
