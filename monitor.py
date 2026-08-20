@@ -605,7 +605,10 @@ def build_alert_translation_prompt(text):
         "Example: 'Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів' means "
         "'No threat from S8000 Banderol cruise missiles. The alert was issued for a jet-powered UAV "
         "heading toward Brovary.'\n\n"
-        "Keep terse fragments terse. Retain Ukrainian place names using standard transliteration. Remove "
+        "Never ask for more context. A one-word place, target, or outcome is intentional and must be "
+        "translated as a one-word fragment. Examples: 'Дарниця' = 'Darnytsia'; 'ТЕЦ-5' = "
+        "'CHP-5'; 'Збили' = 'Shot down'. Keep terse fragments terse. Retain Ukrainian place "
+        "names using standard transliteration. Remove "
         "promo, subscribe, and LIVE tags. Known spellings include Kyiv, Brovary, Boryspil, Obukhiv, "
         "Vyshhorod, Bucha, Irpin, Fastiv, Bila Tserkva, Berezniaky, Osokorky, Pozniaky, Troieshchyna, "
         "Vyshneve, Dymer, Boyarka, Yahotyn, Hostomel, Rembaza, and Koncha-Zaspa.\n\n"
@@ -613,7 +616,47 @@ def build_alert_translation_prompt(text):
     )
 
 
+def translate_known_terse_fragment(text):
+    """Translate common one-line tactical fragments without model interpretation."""
+    normalized = re.sub(r"[.!…\s]+$", "", text.strip()).casefold()
+    return {
+        "дарниця": "Darnytsia",
+        "тец-5": "CHP-5",
+        "тец 5": "CHP-5",
+        "збили": "Shot down",
+        "збито": "Shot down",
+    }.get(normalized)
+
+
+def is_translation_meta_output(text):
+    """Reject model commentary, refusals, and requests for more source context."""
+    lowered = text.strip().casefold()
+    forbidden = (
+        "translation",
+        "translate",
+        "source message",
+        "source text",
+        "please provide",
+        "need the full",
+        "need more context",
+        "no operational",
+        "cannot provide",
+        "unable to provide",
+        "appears to be incomplete",
+        "appears to be a partial",
+        "appears to be a fragment",
+        "i can only see",
+        "i need the",
+        "i'm ready",
+        "you've provided",
+    )
+    return not lowered or any(marker in lowered for marker in forbidden)
+
+
 async def translate_message(text):
+    known_fragment = translate_known_terse_fragment(text)
+    if known_fragment:
+        return known_fragment
     try:
         async with translation_slots:
             r = await http_client.post(
@@ -626,25 +669,7 @@ async def translate_message(text):
             )
         r.raise_for_status()
         result = r.json()["content"][0]["text"].strip()
-        refusal_markers = (
-            "cannot provide a reliable translation",
-            "unable to provide a reliable translation",
-            "cannot provide a meaningful translation",
-            "no meaningful translation",
-            "appears to be incomplete",
-            "text is incomplete",
-            "incomplete or truncated",
-            "appears to be a partial phrase",
-            "text is a fragment",
-            "appears to be a fragment",
-            "i can only see",
-            "full translation would require",
-            "the single word",
-            "the phrase translates to",
-            "this translates to",
-        )
-        lowered = result.lower()
-        if not result or any(m in lowered for m in refusal_markers):
+        if is_translation_meta_output(result):
             print(f"[TRANSLATION SKIPPED] non-translation for input: {text[:120]!r}")
             try:
                 await send_to_owner(
