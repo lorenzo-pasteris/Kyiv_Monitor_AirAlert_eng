@@ -456,7 +456,15 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         for output in bad_outputs:
             self.assertTrue(monitor.is_translation_meta_output(output))
+            self.assertEqual(
+                monitor.safe_translation_or_source(output, "Важливе повідомлення"),
+                "Важливе повідомлення",
+            )
         self.assertFalse(monitor.is_translation_meta_output("2 UAVs heading toward Brovary"))
+        self.assertEqual(
+            monitor.safe_translation_or_source("2 UAVs heading toward Brovary", "source"),
+            "2 UAVs heading toward Brovary",
+        )
 
     async def test_alert_feed_publishes_operational_posts_without_keyword_allowlist(self):
         channel = monitor.ALERT_FEED_CHANNEL

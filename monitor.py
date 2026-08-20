@@ -653,6 +653,11 @@ def is_translation_meta_output(text):
     return not lowered or any(marker in lowered for marker in forbidden)
 
 
+def safe_translation_or_source(model_output, source):
+    """Never publish model commentary and never lose the original alert."""
+    return source.strip() if is_translation_meta_output(model_output) else model_output.strip()
+
+
 async def translate_message(text):
     known_fragment = translate_known_terse_fragment(text)
     if known_fragment:
@@ -670,18 +675,18 @@ async def translate_message(text):
         r.raise_for_status()
         result = r.json()["content"][0]["text"].strip()
         if is_translation_meta_output(result):
-            print(f"[TRANSLATION SKIPPED] non-translation for input: {text[:120]!r}")
+            print(f"[TRANSLATION FALLBACK] publishing original input: {text[:120]!r}")
             try:
                 await send_to_owner(
-                    f"Ops: skipped non-translation.\nInput: {text[:300]}\nModel output: {result[:300]}"
+                    f"Ops: translation unavailable; original alert preserved.\n"
+                    f"Input: {text[:300]}\nModel output rejected: {result[:300]}"
                 )
             except Exception as ops_err:
                 print(f"Ops notify failed: {ops_err}")
-            return None
-        return result
+        return safe_translation_or_source(result, text)
     except Exception as e:
         print(f"Translation error: {e}")
-        return None
+        return text.strip()
 
 def initialize_stats_db():
     """Create the persistent statistics and NORMAL-message store."""
