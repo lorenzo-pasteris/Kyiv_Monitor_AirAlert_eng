@@ -357,6 +357,20 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_actionable_alert_message(unrelated))
         self.assertTrue(monitor.is_actionable_alert_message(terse_follow_up))
 
+    async def test_commentary_filter_shadow_detects_opinion_without_hiding_updates(self):
+        commentary = (
+            "If anything, the all clear should have been given half an hour ago. "
+            "I don't know why they're keeping the alert on. Maybe the guy on the button fell asleep."
+        )
+        rhetorical = (
+            "Минуло більше години, біля Києва чисто, то чому не можуть дати відбій?"
+        )
+        operational = "2 БПЛА біля Броварів, працює ППО"
+
+        self.assertTrue(monitor.is_commentary_alert_message(commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(rhetorical))
+        self.assertFalse(monitor.is_commentary_alert_message(operational))
+
     async def test_alert_source_promotional_footer_is_removed(self):
         raw = (
             "🔴 Ballistic ballistics from the east\n"

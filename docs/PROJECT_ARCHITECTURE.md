@@ -148,6 +148,8 @@ ANTHROPIC_API_KEY
 
 `TARGET_CHAT_ID`, `SUMMARY_CHAT_ID` e `SUMMARY_CHAT_LINK` sono obbligatori in produzione; i due ID devono essere differenti e `SUMMARY_CHAT_LINK` deve puntare al gruppo, mai al canale `@kyivairalert`. `OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. Il canale e il gruppo pubblico non ricevono messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
 
+`COMMENTARY_FILTER_SHADOW=true` rileva opinioni, domande retoriche e supposizioni nel feed di allerta e ne invia una copia a `OPS_CHAT_ID` come “would hide”. In questa fase osservativa il messaggio continua invariato verso il canale pubblico: il filtro non può ancora causare la perdita di un aggiornamento operativo.
+
 ## Protezioni operative
 
 - Retry limitati per le richieste Telegram.
