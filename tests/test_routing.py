@@ -357,7 +357,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_actionable_alert_message(unrelated))
         self.assertTrue(monitor.is_actionable_alert_message(terse_follow_up))
 
-    async def test_commentary_filter_shadow_detects_opinion_without_hiding_updates(self):
+    async def test_commentary_filter_hides_opinion_in_public_and_sends_it_to_ops(self):
         commentary = (
             "If anything, the all clear should have been given half an hour ago. "
             "I don't know why they're keeping the alert on. Maybe the guy on the button fell asleep."
@@ -370,6 +370,18 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.is_commentary_alert_message(commentary))
         self.assertTrue(monitor.is_commentary_alert_message(rhetorical))
         self.assertFalse(monitor.is_commentary_alert_message(operational))
+
+        original_active = monitor.alert_active
+        try:
+            monitor.alert_active = True
+            self.assertTrue(await monitor.handle_alert_message(commentary))
+        finally:
+            monitor.alert_active = original_active
+
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][0], monitor.OPS_CHAT_ID)
+        self.assertIn("<b>COMMENTO</b>", self.sent[0][1])
+        self.assertNotEqual(self.sent[0][0], monitor.ALERT_OUTPUT_CHAT_ID)
 
     async def test_alert_source_promotional_footer_is_removed(self):
         raw = (

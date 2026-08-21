@@ -86,9 +86,6 @@ ALERT_RECOVERY_MAX_MESSAGES = int(os.environ.get("ALERT_RECOVERY_MAX_MESSAGES", 
 TELETHON_HANDOFF_DELAY = float(os.environ.get("TELETHON_HANDOFF_DELAY", "15.0"))
 UKRAINE_ALARM_POLL_INTERVAL = float(os.environ.get("UKRAINE_ALARM_POLL_INTERVAL", "30"))
 UKRAINE_ALARM_REGION_ID = os.environ.get("UKRAINE_ALARM_REGION_ID", "31").strip()
-COMMENTARY_FILTER_SHADOW = os.environ.get(
-    "COMMENTARY_FILTER_SHADOW", "true"
-).strip().lower() in {"1", "true", "yes", "on"}
 UKRAINE_ALARM_URL = (
     f"https://api.ukrainealarm.com/api/v3/alerts/{UKRAINE_ALARM_REGION_ID}"
 )
@@ -1814,23 +1811,6 @@ def schedule_alert_image_processing(message, channel, clean, edited):
     return task
 
 
-def schedule_commentary_shadow_notice(clean, source):
-    """Report a shadow match without delaying the public alert pipeline."""
-    async def notify():
-        try:
-            await send_to_owner(
-                "🧪 <b>Commentary filter shadow</b> — would hide from public\n"
-                f"Source: @{html.escape(source)}\n"
-                f"Original: {html.escape(clean[:1000])}"
-            )
-        except Exception as exc:
-            print(f"Commentary shadow notify failed: {exc}")
-
-    task = asyncio.create_task(notify())
-    alert_delivery_tasks.add(task)
-    task.add_done_callback(alert_delivery_tasks.discard)
-
-
 async def process_alert_image_message(message, channel, clean, edited):
     try:
         if await is_blocked_alert_image(message):
@@ -1857,8 +1837,13 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
         return False
 
-    if COMMENTARY_FILTER_SHADOW and is_commentary_alert_message(clean):
-        schedule_commentary_shadow_notice(clean, source)
+    if is_commentary_alert_message(clean):
+        print(f"[ALERT COMMENTARY] hidden from public source=@{source}: {clean[:100]}")
+        return bool(await send_to_owner(
+            "💬 <b>COMMENTO</b> — non pubblicato nel canale\n"
+            f"Source: @{html.escape(source)}\n"
+            f"Original: {html.escape(clean[:1000])}"
+        ))
 
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     try:
