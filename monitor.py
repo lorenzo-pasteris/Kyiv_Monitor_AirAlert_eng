@@ -217,6 +217,10 @@ COMMENTARY_PATTERNS = (
     r"\b(?:i don['’]t know|i think|in my opinion|why|what are they waiting for)\b",
     r"\b(?:повинні були|мали б|should have|can['’]t they|keeping the alert on)\b",
     r"\b(?:заснув|уснул|fell asleep)\b",
+    r"\b(?:всі спустились|все спустились|на вулицю не йдемо|на улицу не ид[её]м)\b",
+    r"\b(?:менш\s+ефектив\w*|менее\s+эффектив\w*|less\s+effective)\b.*\b(?:ніж|чем|than)\b",
+    r"\b(?:віримо в медиків|верим в медиков|we believe in the medics)\b",
+    r"^\s*бандероль\s*[-—:=]\s*крилата ракета\s*[.!]?\s*$",
 )
 
 # --- State ---
@@ -405,6 +409,7 @@ def clean_alert_source_text(text):
         r"(?i)^\s*(?:💙\s*)?dnipro alerts\s*•\s*(?:💛\s*)?kyiv alerts\s*$",
         r"(?i)^\s*(?:ℹ️\s*)?alerts live\s*•\s*(?:🤙\s*)?feedback\s*$",
         r"(?i)^\s*(?:👉\s*)?live\s*[:!—-]*\s*$",
+        r"(?i)^\s*(?:уся|вся|вся інформація|all information)\s+(?:інформація\s+)?(?:з|из|from)\s+київ\s*[|—:-]*\s*де\s+загроза\s*$",
         r"^\s*ㅤ\s*$",
     )
     kept_lines = []
@@ -596,26 +601,34 @@ def build_alert_translation_prompt(text):
     """Build a concise, domain-aware translation request for Ukrainian alert jargon."""
     return (
         "Translate this Ukrainian/Russian air-defence update into concise, natural English for "
-        "civilians in Kyiv. Translate the operational meaning, not word-for-word. Output ONLY the "
-        "translation; no notes, disclaimers, alternatives, labels, or quotation marks. Preserve every "
+        "civilians in Kyiv. Use only facts explicitly present in the source. Never add a weapon type, "
+        "destination, attribution, channel name, explanation, or missing context. Output ONLY English "
+        "translation; no notes, disclaimers, alternatives, labels, quotation marks, or Cyrillic. Preserve every "
         "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
         "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
         "Mandatory alert glossary:\n"
+        "- ракета / ракети = missile(s), NEVER cruise missile(s) unless the source says крилата or Бандероль\n"
         "- крилата ракета / крилаті / крилатих = cruise missile(s), never 'winged'\n"
+        "- циркон / циркони = Zircon missile(s), never Circon or Circone\n"
         "- реактивний БпЛА / реактивні БпЛА / реактив = jet-powered UAV(s), never aircraft or reactor\n"
         "- БпЛА / шахед / мопед = UAV / Shahed drone as context permits\n"
         "- мінус = intercepted or neutralized threat, never 'minus'\n"
         "- чисто / не спостерігається = clear / no threats currently observed\n"
         "- відбій = all clear\n"
+        "- відбій по балістиці = ballistic threat all clear, not all clear on ballistic missiles\n"
+        "- локаційно втрачено = no longer tracked, never location lost\n"
+        "- зникла = no longer observed/tracked, never lost\n"
+        "- відвернула = turned away, never diverted or intercepted\n"
+        "- без швидкісних = no high-speed targets, never no jet-powered UAVs\n"
+        "- є влучання = an impact is reported; preserve singular and never add 'direct'\n"
         "- ППО працює = air defence is engaging\n"
         "- пуск / повторні пуски = launch / repeated launches\n"
         "- курсом на / в напрямку = heading toward\n"
-        "- Бандероль / бандеролі / бандеролям = S8000 Banderol cruise missile(s), "
-        "never parcel, package, or UAV\n"
+        "- Бандероль / бандеролі / бандеролям = cruise missile(s), never S8000, parcel, package, or UAV\n"
         "- подарунки / посилки can be alert-channel euphemisms for incoming threats; never translate "
         "them literally as gifts or parcels. Name UAVs or missiles only when the source establishes it.\n\n"
         "Example: 'Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів' means "
-        "'No threat from S8000 Banderol cruise missiles. The alert was issued for a jet-powered UAV "
+        "'No threat from cruise missiles. The alert was issued for a jet-powered UAV "
         "heading toward Brovary.'\n\n"
         "Never ask for more context. A one-word place, target, or outcome is intentional and must be "
         "translated as a one-word fragment. Examples: 'Дарниця' = 'Darnytsia'; 'ТЕЦ-5' = "
@@ -637,6 +650,10 @@ def translate_known_terse_fragment(text):
         "тец 5": "CHP-5",
         "збили": "Shot down",
         "збито": "Shot down",
+        "балістика на київ": "Ballistic threat to Kyiv!",
+        "відбій по балістиці": "The ballistic threat has been lifted.",
+        "по балістиці очікуємо на відбій": "The ballistic threat is expected to be lifted shortly.",
+        "поки просто чекаємо на відбої по балістиці": "We are waiting for the ballistic threat to be lifted.",
     }.get(normalized)
 
 
@@ -665,9 +682,9 @@ def is_translation_meta_output(text):
     return not lowered or any(marker in lowered for marker in forbidden)
 
 
-def safe_translation_or_source(model_output, source):
-    """Never publish model commentary and never lose the original alert."""
-    return source.strip() if is_translation_meta_output(model_output) else model_output.strip()
+def is_valid_alert_translation(text):
+    """Only publish a non-meta English result; Ukrainian/Russian belongs in Ops, never public."""
+    return not re.search(r"[А-Яа-яІіЇїЄєҐґ]", text or "") and not is_translation_meta_output(text)
 
 
 async def translate_message(text):
@@ -679,26 +696,34 @@ async def translate_message(text):
             r = await http_client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 500, "messages": [{
+            json={"model": MODEL, "max_tokens": 200, "temperature": 0, "messages": [{
                 "role": "user", "content": build_alert_translation_prompt(text)
             }]},
             timeout=httpx.Timeout(15.0, connect=5.0)
             )
         r.raise_for_status()
         result = r.json()["content"][0]["text"].strip()
-        if is_translation_meta_output(result):
-            print(f"[TRANSLATION FALLBACK] publishing original input: {text[:120]!r}")
+        if not is_valid_alert_translation(result):
+            print(f"[TRANSLATION REJECTED] input={text[:120]!r} output={result[:120]!r}")
             try:
                 await send_to_owner(
-                    f"Ops: translation unavailable; original alert preserved.\n"
+                    f"Ops: invalid translation blocked; nothing published.\n"
                     f"Input: {text[:300]}\nModel output rejected: {result[:300]}"
                 )
             except Exception as ops_err:
                 print(f"Ops notify failed: {ops_err}")
-        return safe_translation_or_source(result, text)
+            return None
+        print(f"[TRANSLATION OK] input={text[:120]!r} output={result[:120]!r}")
+        return result
     except Exception as e:
         print(f"Translation error: {e}")
-        return text.strip()
+        try:
+            await send_to_owner(
+                f"Ops: translation request failed; nothing published.\nInput: {text[:300]}"
+            )
+        except Exception as ops_err:
+            print(f"Ops notify failed: {ops_err}")
+        return None
 
 def initialize_stats_db():
     """Create the persistent statistics and NORMAL-message store."""
