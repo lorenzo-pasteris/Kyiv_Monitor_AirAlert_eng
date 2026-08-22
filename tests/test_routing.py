@@ -368,11 +368,15 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         operational = "2 БПЛА біля Броварів, працює ППО"
         shelter_commentary = "Ще може бути залп, всі спустились на перший поверх, на вулицю не йдемо"
         kellogg_commentary = "Келлог менш ефективний ніж Петя, всю балістику пропускає"
+        engagement_commentary = "У Києві є важко поранені, віримо в медиків"
+        glossary_commentary = "Бандероль - крилата ракета"
 
         self.assertTrue(monitor.is_commentary_alert_message(commentary))
         self.assertTrue(monitor.is_commentary_alert_message(rhetorical))
         self.assertTrue(monitor.is_commentary_alert_message(shelter_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(kellogg_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(engagement_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(glossary_commentary))
         self.assertFalse(monitor.is_commentary_alert_message(operational))
 
         original_active = monitor.alert_active
@@ -462,6 +466,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("jet-powered UAV(s)", prompt)
         self.assertIn("cruise missile(s)", prompt)
         self.assertIn("cruise missile(s), never S8000", prompt)
+        self.assertIn("NEVER cruise missile(s) unless", prompt)
+        self.assertIn("no high-speed targets", prompt)
         self.assertNotIn("S8000 Banderol", prompt)
         self.assertIn("No threat from cruise missiles", prompt)
         self.assertIn("never 'minus'", prompt)

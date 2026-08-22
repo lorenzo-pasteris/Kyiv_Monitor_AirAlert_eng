@@ -219,6 +219,8 @@ COMMENTARY_PATTERNS = (
     r"\b(?:заснув|уснул|fell asleep)\b",
     r"\b(?:всі спустились|все спустились|на вулицю не йдемо|на улицу не ид[её]м)\b",
     r"\b(?:менш\s+ефектив\w*|менее\s+эффектив\w*|less\s+effective)\b.*\b(?:ніж|чем|than)\b",
+    r"\b(?:віримо в медиків|верим в медиков|we believe in the medics)\b",
+    r"^\s*бандероль\s*[-—:=]\s*крилата ракета\s*[.!]?\s*$",
 )
 
 # --- State ---
@@ -643,12 +645,20 @@ def build_alert_translation_prompt(text):
         "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
         "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
         "Mandatory alert glossary:\n"
+        "- ракета / ракети = missile(s), NEVER cruise missile(s) unless the source says крилата or Бандероль\n"
         "- крилата ракета / крилаті / крилатих = cruise missile(s), never 'winged'\n"
+        "- циркон / циркони = Zircon missile(s), never Circon or Circone\n"
         "- реактивний БпЛА / реактивні БпЛА / реактив = jet-powered UAV(s), never aircraft or reactor\n"
         "- БпЛА / шахед / мопед = UAV / Shahed drone as context permits\n"
         "- мінус = intercepted or neutralized threat, never 'minus'\n"
         "- чисто / не спостерігається = clear / no threats currently observed\n"
         "- відбій = all clear\n"
+        "- відбій по балістиці = ballistic threat all clear, not all clear on ballistic missiles\n"
+        "- локаційно втрачено = no longer tracked, never location lost\n"
+        "- зникла = no longer observed/tracked, never lost\n"
+        "- відвернула = turned away, never diverted or intercepted\n"
+        "- без швидкісних = no high-speed targets, never no jet-powered UAVs\n"
+        "- є влучання = an impact is reported; preserve singular and never add 'direct'\n"
         "- ППО працює = air defence is engaging\n"
         "- пуск / повторні пуски = launch / repeated launches\n"
         "- курсом на / в напрямку = heading toward\n"
