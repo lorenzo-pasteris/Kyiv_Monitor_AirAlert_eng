@@ -257,44 +257,6 @@ TEST_SAMPLE_MESSAGES = [
     "Ракетна небезпека: missile launch activity зафіксована з північного напрямку.",
     "Група БпЛА продовжує рух; air-defense monitoring reports drone activity near Kyiv region.",
 ]
-TEST_ALERT_REPLAY_20260822 = (
-    "Загроза балістики з Курська",
-    "Загроза балістики з Брянська",
-    "Балістика на Київ!",
-    "Сховалися!",
-    "3 ракети",
-    "4 ракети, можуть бути циркони",
-    "Дарниця, Вишневе",
-    "Є влучання",
-    "Ще ракети на Київ!",
-    "Локаційно втрачено, поки чисто",
-    "Загроза балістики з Міллерово, можуть пустити циркони по нам",
-    "Ще може бути залп, всі спустились на перший поверх, на вулицю не йдемо, там небезпечно",
-    "2-3 бандеролі у бік Києва",
-    "Бандероль - крилата ракета",
-    "Бандероль підлітає до Броварів",
-    "Попередньо влучила в Броварах",
-    "Ще 2 бандеролі на/повз Бровари!",
-    "Друга бандероль мінус",
-    "Остання відвернула, та летять на Черкащину",
-    "Поки просто чекаємо на відбої по балістиці",
-    "Є влучання в Броварах та на ДВРЗ",
-    "Відбій по балістиці",
-    "Може ранувато дали відбій, нові бандеролі з Сумщини на Чернігівщину",
-    "Бандероль зникла на Чернігівщині",
-    "У Києві є важко поранені, віримо в медиків",
-    "Бандероль на Бровари",
-    "Влучання в Броварах",
-    "Чекаємо на відбій",
-    "Все, чисто",
-    "Ще 2 балістики на Київ!",
-    "Не спостерігаються",
-    "Ще 2 балістики на Київ/Бориспіль!",
-    "Мінус",
-    "По балістиці очікуємо на відбій",
-    "Келлог менш ефективний ніж Петя, всю балістику пропускає",
-    "Наразі без швидкісних, попередньо вороже ППО, уважно до відбою",
-)
 
 
 def contains_any(text, keywords):
@@ -2076,7 +2038,7 @@ async def main():
         await send_to_alert_channel(
             "🧪 <b>Kyiv Monitor started in TEST_MODE</b>\n"
             "Exclusive source/output chat enabled. Real Telegram channels are disabled.\n"
-            "Commands: /test_start, /test_message, /test_replay_today, /test_burst N, /test_end, /test_summary"
+            "Commands: /test_start, /test_message, /test_burst N, /test_end, /test_summary"
         )
 
         @client.on(events.NewMessage(chats=int(TEST_CHAT_ID)))
@@ -2099,20 +2061,6 @@ async def main():
             if command == "/test_message":
                 async with test_command_lock:
                     await publish_test_source(client, TEST_SAMPLE_MESSAGES[0])
-                return
-
-            if command == "/test_replay_today":
-                async with test_command_lock:
-                    if not alert_active:
-                        await send_to_alert_channel("⚠️ Run /test_start before /test_replay_today.")
-                        return
-                    await send_to_alert_channel(
-                        f"🧪 Replaying {len(TEST_ALERT_REPLAY_20260822)} real @kyivnebomonitoring messages from 22 August."
-                    )
-                    for sample in TEST_ALERT_REPLAY_20260822:
-                        await publish_test_source(client, sample)
-                    await drain_alert_delivery_tasks(timeout=60.0)
-                    await send_to_alert_channel("🧪 Replay complete.")
                 return
 
             burst_match = re.fullmatch(r"/test_burst(?:\s+(\d+))?", command)
