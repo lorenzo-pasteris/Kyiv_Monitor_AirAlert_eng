@@ -688,6 +688,10 @@ def translate_known_terse_fragment(text):
         "тец 5": "CHP-5",
         "збили": "Shot down",
         "збито": "Shot down",
+        "балістика на київ": "Ballistic threat to Kyiv!",
+        "відбій по балістиці": "The ballistic threat has been lifted.",
+        "по балістиці очікуємо на відбій": "The ballistic threat is expected to be lifted shortly.",
+        "поки просто чекаємо на відбої по балістиці": "We are waiting for the ballistic threat to be lifted.",
     }.get(normalized)
 
 

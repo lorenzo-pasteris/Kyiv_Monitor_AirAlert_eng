@@ -478,6 +478,14 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.translate_known_terse_fragment("Дарниця"), "Darnytsia")
         self.assertEqual(monitor.translate_known_terse_fragment("ТЕЦ-5"), "CHP-5")
         self.assertEqual(monitor.translate_known_terse_fragment("Збили"), "Shot down")
+        self.assertEqual(
+            monitor.translate_known_terse_fragment("По балістиці очікуємо на відбій"),
+            "The ballistic threat is expected to be lifted shortly.",
+        )
+        self.assertEqual(
+            monitor.translate_known_terse_fragment("Балістика на Київ!"),
+            "Ballistic threat to Kyiv!",
+        )
         self.assertEqual(await monitor.translate_message("Збили"), "Shot down")
         prompt = monitor.build_alert_translation_prompt("Дарниця")
         self.assertIn("Never ask for more context", prompt)
