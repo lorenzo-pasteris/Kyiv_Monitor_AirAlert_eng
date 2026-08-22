@@ -217,6 +217,8 @@ COMMENTARY_PATTERNS = (
     r"\b(?:i don['’]t know|i think|in my opinion|why|what are they waiting for)\b",
     r"\b(?:повинні були|мали б|should have|can['’]t they|keeping the alert on)\b",
     r"\b(?:заснув|уснул|fell asleep)\b",
+    r"\b(?:всі спустились|все спустились|на вулицю не йдемо|на улицу не ид[её]м)\b",
+    r"\b(?:менш\s+ефектив\w*|менее\s+эффектив\w*|less\s+effective)\b.*\b(?:ніж|чем|than)\b",
 )
 
 # --- State ---
@@ -253,6 +255,44 @@ TEST_SAMPLE_MESSAGES = [
     "Ракетна небезпека: missile launch activity зафіксована з північного напрямку.",
     "Група БпЛА продовжує рух; air-defense monitoring reports drone activity near Kyiv region.",
 ]
+TEST_ALERT_REPLAY_20260822 = (
+    "Загроза балістики з Курська",
+    "Загроза балістики з Брянська",
+    "Балістика на Київ!",
+    "Сховалися!",
+    "3 ракети",
+    "4 ракети, можуть бути циркони",
+    "Дарниця, Вишневе",
+    "Є влучання",
+    "Ще ракети на Київ!",
+    "Локаційно втрачено, поки чисто",
+    "Загроза балістики з Міллерово, можуть пустити циркони по нам",
+    "Ще може бути залп, всі спустились на перший поверх, на вулицю не йдемо, там небезпечно",
+    "2-3 бандеролі у бік Києва",
+    "Бандероль - крилата ракета",
+    "Бандероль підлітає до Броварів",
+    "Попередньо влучила в Броварах",
+    "Ще 2 бандеролі на/повз Бровари!",
+    "Друга бандероль мінус",
+    "Остання відвернула, та летять на Черкащину",
+    "Поки просто чекаємо на відбої по балістиці",
+    "Є влучання в Броварах та на ДВРЗ",
+    "Відбій по балістиці",
+    "Може ранувато дали відбій, нові бандеролі з Сумщини на Чернігівщину",
+    "Бандероль зникла на Чернігівщині",
+    "У Києві є важко поранені, віримо в медиків",
+    "Бандероль на Бровари",
+    "Влучання в Броварах",
+    "Чекаємо на відбій",
+    "Все, чисто",
+    "Ще 2 балістики на Київ!",
+    "Не спостерігаються",
+    "Ще 2 балістики на Київ/Бориспіль!",
+    "Мінус",
+    "По балістиці очікуємо на відбій",
+    "Келлог менш ефективний ніж Петя, всю балістику пропускає",
+    "Наразі без швидкісних, попередньо вороже ППО, уважно до відбою",
+)
 
 
 def contains_any(text, keywords):
@@ -405,6 +445,7 @@ def clean_alert_source_text(text):
         r"(?i)^\s*(?:💙\s*)?dnipro alerts\s*•\s*(?:💛\s*)?kyiv alerts\s*$",
         r"(?i)^\s*(?:ℹ️\s*)?alerts live\s*•\s*(?:🤙\s*)?feedback\s*$",
         r"(?i)^\s*(?:👉\s*)?live\s*[:!—-]*\s*$",
+        r"(?i)^\s*(?:уся|вся|вся інформація|all information)\s+(?:інформація\s+)?(?:з|из|from)\s+київ\s*[|—:-]*\s*де\s+загроза\s*$",
         r"^\s*ㅤ\s*$",
     )
     kept_lines = []
@@ -596,8 +637,9 @@ def build_alert_translation_prompt(text):
     """Build a concise, domain-aware translation request for Ukrainian alert jargon."""
     return (
         "Translate this Ukrainian/Russian air-defence update into concise, natural English for "
-        "civilians in Kyiv. Translate the operational meaning, not word-for-word. Output ONLY the "
-        "translation; no notes, disclaimers, alternatives, labels, or quotation marks. Preserve every "
+        "civilians in Kyiv. Use only facts explicitly present in the source. Never add a weapon type, "
+        "destination, attribution, channel name, explanation, or missing context. Output ONLY English "
+        "translation; no notes, disclaimers, alternatives, labels, quotation marks, or Cyrillic. Preserve every "
         "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
         "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
         "Mandatory alert glossary:\n"
@@ -610,12 +652,11 @@ def build_alert_translation_prompt(text):
         "- ППО працює = air defence is engaging\n"
         "- пуск / повторні пуски = launch / repeated launches\n"
         "- курсом на / в напрямку = heading toward\n"
-        "- Бандероль / бандеролі / бандеролям = S8000 Banderol cruise missile(s), "
-        "never parcel, package, or UAV\n"
+        "- Бандероль / бандеролі / бандеролям = cruise missile(s), never S8000, parcel, package, or UAV\n"
         "- подарунки / посилки can be alert-channel euphemisms for incoming threats; never translate "
         "them literally as gifts or parcels. Name UAVs or missiles only when the source establishes it.\n\n"
         "Example: 'Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів' means "
-        "'No threat from S8000 Banderol cruise missiles. The alert was issued for a jet-powered UAV "
+        "'No threat from cruise missiles. The alert was issued for a jet-powered UAV "
         "heading toward Brovary.'\n\n"
         "Never ask for more context. A one-word place, target, or outcome is intentional and must be "
         "translated as a one-word fragment. Examples: 'Дарниця' = 'Darnytsia'; 'ТЕЦ-5' = "
@@ -665,9 +706,9 @@ def is_translation_meta_output(text):
     return not lowered or any(marker in lowered for marker in forbidden)
 
 
-def safe_translation_or_source(model_output, source):
-    """Never publish model commentary and never lose the original alert."""
-    return source.strip() if is_translation_meta_output(model_output) else model_output.strip()
+def is_valid_alert_translation(text):
+    """Only publish a non-meta English result; Ukrainian/Russian belongs in Ops, never public."""
+    return not re.search(r"[А-Яа-яІіЇїЄєҐґ]", text or "") and not is_translation_meta_output(text)
 
 
 async def translate_message(text):
@@ -679,26 +720,34 @@ async def translate_message(text):
             r = await http_client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 500, "messages": [{
+            json={"model": MODEL, "max_tokens": 200, "temperature": 0, "messages": [{
                 "role": "user", "content": build_alert_translation_prompt(text)
             }]},
             timeout=httpx.Timeout(15.0, connect=5.0)
             )
         r.raise_for_status()
         result = r.json()["content"][0]["text"].strip()
-        if is_translation_meta_output(result):
-            print(f"[TRANSLATION FALLBACK] publishing original input: {text[:120]!r}")
+        if not is_valid_alert_translation(result):
+            print(f"[TRANSLATION REJECTED] input={text[:120]!r} output={result[:120]!r}")
             try:
                 await send_to_owner(
-                    f"Ops: translation unavailable; original alert preserved.\n"
+                    f"Ops: invalid translation blocked; nothing published.\n"
                     f"Input: {text[:300]}\nModel output rejected: {result[:300]}"
                 )
             except Exception as ops_err:
                 print(f"Ops notify failed: {ops_err}")
-        return safe_translation_or_source(result, text)
+            return None
+        print(f"[TRANSLATION OK] input={text[:120]!r} output={result[:120]!r}")
+        return result
     except Exception as e:
         print(f"Translation error: {e}")
-        return text.strip()
+        try:
+            await send_to_owner(
+                f"Ops: translation request failed; nothing published.\nInput: {text[:300]}"
+            )
+        except Exception as ops_err:
+            print(f"Ops notify failed: {ops_err}")
+        return None
 
 def initialize_stats_db():
     """Create the persistent statistics and NORMAL-message store."""
@@ -2013,7 +2062,7 @@ async def main():
         await send_to_alert_channel(
             "🧪 <b>Kyiv Monitor started in TEST_MODE</b>\n"
             "Exclusive source/output chat enabled. Real Telegram channels are disabled.\n"
-            "Commands: /test_start, /test_message, /test_burst N, /test_end, /test_summary"
+            "Commands: /test_start, /test_message, /test_replay_today, /test_burst N, /test_end, /test_summary"
         )
 
         @client.on(events.NewMessage(chats=int(TEST_CHAT_ID)))
@@ -2036,6 +2085,20 @@ async def main():
             if command == "/test_message":
                 async with test_command_lock:
                     await publish_test_source(client, TEST_SAMPLE_MESSAGES[0])
+                return
+
+            if command == "/test_replay_today":
+                async with test_command_lock:
+                    if not alert_active:
+                        await send_to_alert_channel("⚠️ Run /test_start before /test_replay_today.")
+                        return
+                    await send_to_alert_channel(
+                        f"🧪 Replaying {len(TEST_ALERT_REPLAY_20260822)} real @kyivnebomonitoring messages from 22 August."
+                    )
+                    for sample in TEST_ALERT_REPLAY_20260822:
+                        await publish_test_source(client, sample)
+                    await drain_alert_delivery_tasks(timeout=60.0)
+                    await send_to_alert_channel("🧪 Replay complete.")
                 return
 
             burst_match = re.fullmatch(r"/test_burst(?:\s+(\d+))?", command)

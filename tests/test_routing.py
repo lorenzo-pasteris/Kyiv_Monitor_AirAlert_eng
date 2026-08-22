@@ -366,9 +366,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Минуло більше години, біля Києва чисто, то чому не можуть дати відбій?"
         )
         operational = "2 БПЛА біля Броварів, працює ППО"
+        shelter_commentary = "Ще може бути залп, всі спустились на перший поверх, на вулицю не йдемо"
+        kellogg_commentary = "Келлог менш ефективний ніж Петя, всю балістику пропускає"
 
         self.assertTrue(monitor.is_commentary_alert_message(commentary))
         self.assertTrue(monitor.is_commentary_alert_message(rhetorical))
+        self.assertTrue(monitor.is_commentary_alert_message(shelter_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(kellogg_commentary))
         self.assertFalse(monitor.is_commentary_alert_message(operational))
 
         original_active = monitor.alert_active
@@ -457,9 +461,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         prompt = monitor.build_alert_translation_prompt(source)
         self.assertIn("jet-powered UAV(s)", prompt)
         self.assertIn("cruise missile(s)", prompt)
-        self.assertIn("S8000 Banderol cruise missile(s)", prompt)
-        self.assertIn("never parcel, package, or UAV", prompt)
-        self.assertIn("No threat from S8000 Banderol cruise missiles", prompt)
+        self.assertIn("cruise missile(s), never S8000", prompt)
+        self.assertNotIn("S8000 Banderol", prompt)
+        self.assertIn("No threat from cruise missiles", prompt)
         self.assertIn("never 'minus'", prompt)
         self.assertIn("never translate them literally as gifts or parcels", prompt)
         self.assertTrue(prompt.endswith(source))
@@ -482,14 +486,16 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         for output in bad_outputs:
             self.assertTrue(monitor.is_translation_meta_output(output))
-            self.assertEqual(
-                monitor.safe_translation_or_source(output, "Важливе повідомлення"),
-                "Важливе повідомлення",
-            )
         self.assertFalse(monitor.is_translation_meta_output("2 UAVs heading toward Brovary"))
+        self.assertFalse(monitor.is_valid_alert_translation("Уся інформація з Київ Де Загроза"))
+        self.assertTrue(monitor.is_valid_alert_translation("2 missiles heading toward Brovary"))
+
+    async def test_alert_source_attribution_is_removed(self):
         self.assertEqual(
-            monitor.safe_translation_or_source("2 UAVs heading toward Brovary", "source"),
-            "2 UAVs heading toward Brovary",
+            monitor.clean_alert_source_text(
+                "2 ракети\nУся інформація з Київ Де Загроза"
+            ),
+            "2 ракети",
         )
 
     async def test_alert_feed_publishes_operational_posts_without_keyword_allowlist(self):
