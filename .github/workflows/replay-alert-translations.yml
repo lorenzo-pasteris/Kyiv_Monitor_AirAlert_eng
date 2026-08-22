@@ -9,7 +9,7 @@ permissions:
 
 env:
   RAILWAY_PROJECT_ID: 09fb396b-d91b-41b8-a70b-dd033d408e7d
-  RAILWAY_STAGING_ENVIRONMENT_ID: 1f687c32-c70a-4d83-a19a-319f197ce772
+  RAILWAY_ENVIRONMENT_ID: 661e15ae-8aad-4f10-9135-abe2adfdea92
   RAILWAY_SERVICE_ID: ed89feb6-f6a9-4cf4-8dbb-159de7439349
 
 jobs:
@@ -27,10 +27,10 @@ jobs:
       - run: python -m py_compile monitor.py replay_alert_translations.py
       - run: python -m unittest discover -s tests -v
       - run: npm install --global @railway/cli
-      - name: Replay against staging secrets and TEST destinations
+      - name: Replay with TEST routing and no deployment
         run: >-
           railway run
           --project "$RAILWAY_PROJECT_ID"
-          --environment "$RAILWAY_STAGING_ENVIRONMENT_ID"
+          --environment "$RAILWAY_ENVIRONMENT_ID"
           --service "$RAILWAY_SERVICE_ID"
-          python replay_alert_translations.py
+          env TEST_MODE=true python replay_alert_translations.py
