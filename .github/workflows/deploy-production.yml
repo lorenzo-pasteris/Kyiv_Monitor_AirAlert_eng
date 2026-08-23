@@ -36,12 +36,16 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - run: python -m pip install -r requirements.txt
+      - run: python -m pip install -r requirements-lock.txt
       - run: python -m py_compile monitor.py alert_rules.py predeploy_check.py
       - run: python -m unittest discover -s tests -v
 
       - name: Install Railway CLI
         run: npm install --global @railway/cli
+
+      - name: Pin Railway's build install command to the lock file
+        run: |
+          printf 'pip install -r requirements-lock.txt' | railway variable set RAILPACK_INSTALL_CMD --stdin --skip-deploys --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
 
       - name: Synchronize UkraineAlarm API key without redeploying
         env:

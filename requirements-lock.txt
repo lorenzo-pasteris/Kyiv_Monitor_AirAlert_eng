@@ -1,5 +1,7 @@
 # Full resolved dependency tree (direct + transitive), for reproducible installs.
-# This is what Railway actually installs from (see railway.json's build.buildCommand).
+# This is what Railway actually installs from: .github/workflows/deploy-production.yml
+# sets the RAILPACK_INSTALL_CMD service variable to `pip install -r requirements-lock.txt`
+# before each deploy, and CI (ci.yml) installs from this file too.
 # Regenerate with: pip install -r requirements.txt in a clean venv, then pip list --format=freeze > requirements-lock.txt
 # requirements.txt stays the human-curated list of direct dependencies; this file pins everything underneath it.
 anyio==4.14.2

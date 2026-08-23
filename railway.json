@@ -1,8 +1,5 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
-  "build": {
-    "buildCommand": "pip install -r requirements-lock.txt"
-  },
   "deploy": {
     "preDeployCommand": ["python predeploy_check.py"],
     "overlapSeconds": 0,
