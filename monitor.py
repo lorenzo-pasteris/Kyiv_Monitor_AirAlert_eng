@@ -332,12 +332,12 @@ def forget_failed_alert(text, source):
             recent_alert_messages.remove(item)
             break
 
-def is_night():
+def is_night() -> bool:
     h = datetime.now(TZ).hour
     return NIGHT_START <= h < NIGHT_END
 
 
-def seconds_until_next_hour():
+def seconds_until_next_hour() -> float:
     """Return the delay to the next exact Europe/Kyiv clock hour."""
     now = datetime.now(TZ)
     elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
