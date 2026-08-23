@@ -1,28 +1,55 @@
-# Kyiv Monitor Air Alert (English)
+# Kyiv Monitor — Air Alerts and News in English
 
-Kyiv Monitor is a continuously running Python worker that reads Ukrainian Telegram
-sources and publishes English-language information to two separate destinations:
+Kyiv Monitor turns fast-moving Ukrainian-language Telegram reporting into timely,
+focused English updates for people following Kyiv and Ukraine. A continuously running
+Python worker watches a curated set of sources, separates urgent air-alert information
+from general news, filters promotional and non-operational content, and publishes to
+two purpose-built Telegram destinations:
 
-- an alert-only channel for time-sensitive Kyiv air-alert updates;
-- a news group for hourly categorized summaries during normal operation.
+- **Kyiv Air Alert** — a quiet, alert-only channel that becomes active when Kyiv is
+  under an air alert and publishes concise real-time updates and the all-clear;
+- **Kyiv Hourly News 🇺🇦** — a separate news group with categorized hourly summaries
+  and a morning recap after the overnight pause.
 
-The service is informational. It must not be treated as a replacement for official
-Ukrainian civil-defence instructions or local emergency alerts.
+Public output is produced in English. The service is informational and is not a
+replacement for official Ukrainian civil-defence instructions, sirens, or local
+emergency-alert applications.
+
+## Telegram channels
+
+Each source has one defined role; trigger messages, real-time alert updates, and
+general news are never mixed blindly into the same pipeline.
+
+| Role | Telegram source | Use |
+| --- | --- | --- |
+| Kyiv local news | `@kievinfo_kyiv` | City services, infrastructure and events affecting daily life in Kyiv |
+| Ukraine news | `@shv_ukr` | Political, economic, diplomatic and national developments |
+| Military monitoring | `@AMK_Mapping` | Relevant military and strategic developments |
+| Additional news | `@insiderukr` | Additional Ukrainian current-affairs reporting for the hourly analysis |
+| Alert-state trigger | `@kyiv_airraid_alert` | Explicit Kyiv alert/all-clear state only; never used as news content |
+| Live alert feed | `@kyivnebomonitoring` | Actionable real-time updates translated and published only while ALERT is active |
+
+The output destinations are configured through `TARGET_CHAT_ID` for **Kyiv Air Alert**
+and `SUMMARY_CHAT_ID` for **Kyiv Hourly News 🇺🇦**. Their Telegram IDs and private
+operational chats are kept in the deployment environment, never in the repository.
 
 ## Operating modes
 
 ### NORMAL
 
-Messages from `@kievinfo_kyiv`, `@shv_ukr`, `@AMK_Mapping`, and `@insiderukr` are persisted in
-SQLite and summarized hourly. Between 01:00 and 07:00 Europe/Kyiv, hourly publishing
-is paused and the accumulated material is used for the morning recap.
+Messages from the four NORMAL sources are persisted in SQLite and evaluated across
+the Kyiv City, Ukrainian National Developments, Military Developments and Air Defence
+Monitoring categories. Selected updates are summarized hourly. Between 01:00 and
+07:00 Europe/Kyiv, hourly publishing is paused and the accumulated material is used
+for the morning recap.
 
 ### ALERT
 
 The explicit Kyiv state from `@kyiv_airraid_alert` controls the mode. While active,
-actionable new messages and edits from `@kyivnebomonitoring` enter the low-latency translation
-pipeline. Alert transitions are serialized, public delivery must be confirmed before
-the state is committed, and stale translations are discarded after the alert ends.
+actionable new messages and edits from `@kyivnebomonitoring` enter the low-latency
+translation pipeline. NORMAL summaries are suspended, alert transitions are
+serialized, public delivery must be confirmed before the state is committed, and
+stale translations are discarded after the alert ends.
 
 ### TEST
 
@@ -35,13 +62,17 @@ production authorization key. Interactive test commands require a separate
 ## Architecture
 
 ```text
-Telegram sources ── Telethon ── SQLite queue ── Anthropic ── Telegram Bot API
-                              │
-@kyiv_airraid_alert ── pure classifier ── serialized alert state
+NORMAL sources ── Telethon ── SQLite queue ── Anthropic ── Kyiv Hourly News
+                                   │
+@kyiv_airraid_alert ── state ──────┤
+                                   │
+@kyivnebomonitoring ── filter ── translation ── Kyiv Air Alert
 ```
 
 - `monitor.py`: orchestration, pipelines and integrations.
 - `alert_rules.py`: pure trigger classification with no network or global state.
+- `text_processing.py`: deterministic cleaning, filtering and translation helpers.
+- `state_store.py`: SQLite persistence, cursors, delivery claims and session locking.
 - `tests/`: routing, persistence, restart and transition regression tests.
 - `docs/`: detailed architecture, operations and historical test log.
 
