@@ -1378,7 +1378,10 @@ async def main():
     session_lock = None
     if not TEST_MODE or TEST_TELEGRAM_SESSION:
         if not TEST_MODE:
-            session_lock = state_store.acquire_telethon_session_lock()
+            # Keep a reference for the life of this coroutine: the returned handle
+            # holds the flock, and if nothing referenced it, it could be garbage
+            # collected (closing the file and releasing the lock) before shutdown.
+            session_lock = state_store.acquire_telethon_session_lock()  # noqa: F841
             if TELETHON_HANDOFF_DELAY:
                 print(
                     f"[TELETHON HANDOFF] waiting {TELETHON_HANDOFF_DELAY:g}s "
