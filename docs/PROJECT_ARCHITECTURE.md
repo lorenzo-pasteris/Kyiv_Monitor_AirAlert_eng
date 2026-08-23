@@ -24,7 +24,10 @@ Il servizio è eseguito come worker Python su Railway e il codice è conservato 
 - **Anthropic API**: traduzione e produzione dei riepiloghi.
 - **GitHub**: versionamento e origine dei deployment Railway.
 
-Railway usa esclusivamente Watch Paths positivi per i file eseguibili: `/monitor.py` e `/requirements.txt` (eventuali duplicati sono innocui). I commit che modificano soltanto `docs/` devono risultare `Skipped` e non devono riavviare il worker. Non usare negazioni Gitignore in questa configurazione.
+Il workflow GitHub `Deploy production safely` viene eseguito per ogni push su `main` e
+distribuisce esplicitamente il repository con `railway up`; quindi anche un commit di
+sola documentazione può riavviare il worker. Le eventuali Watch Paths configurate nel
+servizio Railway non sostituiscono i filtri del workflow GitHub.
 
 ## Canali e destinazioni
 
@@ -35,8 +38,11 @@ Le sorgenti di contenuto sono:
 - `@kievinfo_kyiv`: informazioni concrete sulla vita e sulle infrastrutture di Kyiv.
 - `@shv_ukr`: sviluppi politici, economici, diplomatici e nazionali ucraini.
 - `@AMK_Mapping`: sviluppi militari rilevanti per la guerra in Ucraina.
+- `@insiderukr`: ulteriore copertura dell'attualità ucraina per l'analisi oraria.
 
-La sola sorgente degli aggiornamenti real-time durante ALERT è `@kyiv_alerts`, verificata come canale broadcast dedicato a Kyiv e accessibile dalla sessione Railway. `@Nashee_PPO` e `@nebo_raketa` non vengono registrati dal worker.
+La sola sorgente degli aggiornamenti real-time durante ALERT è
+`@kyivnebomonitoring`. Il trigger di stato resta separato in
+`@kyiv_airraid_alert` e non viene trattato come contenuto.
 
 `@monitorwarr` è stato rimosso completamente e non deve essere registrato o letto.
 
@@ -57,7 +63,9 @@ Lo stato di allerta proviene esclusivamente dal canale Telegram `@kyiv_airraid_a
 - Un messaggio esplicito di allarme per Kyiv attiva immediatamente ALERT.
 - Un messaggio esplicito di cessato allarme per Kyiv riporta il sistema in NORMAL.
 - Messaggi ambigui o non riferiti a Kyiv non modificano lo stato conosciuto.
-- UkraineAlarm API è stata rimossa dal codice e dalla configurazione perché restituiva `401 Unauthorized`.
+- UkraineAlarm può essere interrogata in modalità shadow quando
+  `UKRAINE_ALARM_API_KEY` è configurata. Le osservazioni vengono inviate a Ops e non
+  controllano mai lo stato pubblico, che resta determinato da `@kyiv_airraid_alert`.
 
 All'avvio il worker legge gli ultimi messaggi di `@kyiv_airraid_alert` per ricostruire lo stato senza dover aspettare il prossimo evento.
 
@@ -75,7 +83,7 @@ Il messaggio di cessato allarme resta nel canale di allerta perché descrive un 
 
 In modalità NORMAL:
 
-- i messaggi delle tre sorgenti vengono acquisiti sia dal listener live sia dalla cronologia Telegram e salvati nella coda SQLite persistente;
+- i messaggi delle quattro sorgenti vengono acquisiti sia dal listener live sia dalla cronologia Telegram e salvati nella coda SQLite;
 - un cursore separato per fonte permette di recuperare gli eventi live mancati senza duplicare quelli già acquisiti;
 - ogni ora viene generato un riepilogo in inglese e inviato esclusivamente a `SUMMARY_CHAT_ID`;
 - il canale configurato tramite `TARGET_CHAT_ID` resta silenzioso in NORMAL;
@@ -93,8 +101,8 @@ Quando lo stato effettivo diventa ALERT:
 - i record NORMAL ancora pendenti vengono marcati `discarded` e, al cessato allarme, i cursori vengono avanzati agli ultimi messaggi disponibili per non importare nel gruppo materiale prodotto durante ALERT;
 - i riepiloghi verso `SUMMARY_CHAT_ID` vengono sospesi;
 - nel canale `TARGET_CHAT_ID` viene pubblicato un unico messaggio di inizio allerta;
-- vengono ignorati i contenuti di `@kievinfo_kyiv` e `@AMK_Mapping`;
-- vengono elaborati esclusivamente i nuovi messaggi reali di `@kyiv_alerts`;
+- vengono ignorati i contenuti delle quattro sorgenti NORMAL;
+- vengono elaborati esclusivamente i nuovi messaggi reali di `@kyivnebomonitoring`;
 - per tre minuti i testi identici o fortemente simili vengono soppressi, mentre un aggiornamento con quantità, località o direzione diverse passa;
 - ciascun messaggio viene tradotto in inglese e pubblicato nel canale dopo pochi secondi;
 - richieste di donazioni, numeri di carte, ringraziamenti, auguri, pubblicità e contenuti non operativi vengono filtrati prima della traduzione, anche quando citano un attacco passato.
@@ -107,7 +115,8 @@ Il test usa un unico gruppo Telegram privato configurato tramite `TEST_CHAT_ID`.
 
 Quando `TEST_MODE=true`:
 
-- viene usato esclusivamente `TEST_CHAT_ID` come sorgente e destinazione;
+- `TEST_CHAT_ID` è l'unica sorgente e destinazione per alert e riepiloghi; le
+  anomalie operative possono ancora essere inviate a `OPS_CHAT_ID`;
 - nessun handler viene registrato sui canali Telegram reali;
 - non viene letta l'API UkraineAlarm;
 - non viene inviato nulla né al canale di produzione né al gruppo NORMAL;
@@ -121,7 +130,7 @@ Comandi disponibili:
 - `/test_end`: termina direttamente l'allerta di test.
 - `/test_summary`: forza un riepilogo quando il test è in NORMAL.
 
-I messaggi simulati sono identificati da `[TEST_SOURCE:kyiv_alerts]`. Il marcatore e le etichette interne come `[burst 6/20]` vengono rimossi prima della traduzione. I messaggi prodotti dal bot sono esclusi esplicitamente dalla rielaborazione tramite sender ID e message ID.
+I messaggi simulati sono identificati da `[TEST_SOURCE:kyivnebomonitoring]`. Il marcatore e le etichette interne come `[burst 6/20]` vengono rimossi prima della traduzione. I messaggi prodotti dal bot sono esclusi esplicitamente dalla rielaborazione tramite sender ID e message ID.
 
 Quando `TEST_MODE=false`, i comandi e gli handler di simulazione sono disabilitati e vengono usate esclusivamente le sorgenti reali.
 
@@ -129,15 +138,13 @@ Il registro storico e il protocollo obbligatorio delle verifiche si trovano in `
 
 ## Variabili d'ambiente
 
-Le credenziali non devono essere inserite nel repository. Railway deve contenere almeno:
+Le credenziali non devono essere inserite nel repository. In produzione sono
+obbligatorie:
 
 ```text
-TEST_MODE
-TEST_CHAT_ID
 TARGET_CHAT_ID
 SUMMARY_CHAT_ID
 SUMMARY_CHAT_LINK
-OPS_CHAT_ID
 OWNER_CHAT_ID
 TELEGRAM_API_ID
 TELEGRAM_API_HASH
@@ -146,7 +153,15 @@ BOT_TOKEN
 ANTHROPIC_API_KEY
 ```
 
+`TEST_MODE`, `TEST_CHAT_ID`, `TEST_TELEGRAM_SESSION`, `OPS_CHAT_ID`,
+`ADMIN_USER_IDS` e `UKRAINE_ALARM_API_KEY` sono opzionali e dipendono dall'ambiente
+o dalla funzione desiderata.
+
 `TARGET_CHAT_ID`, `SUMMARY_CHAT_ID` e `SUMMARY_CHAT_LINK` sono obbligatori in produzione; i due ID devono essere differenti e `SUMMARY_CHAT_LINK` deve puntare al gruppo, mai al canale `@kyivairalert`. `OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. Il canale e il gruppo pubblico non ricevono messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
+
+`ADMIN_USER_IDS` è facoltativa: se manca, `OWNER_CHAT_ID` è l'unico utente
+autorizzato agli override. `UKRAINE_ALARM_API_KEY` è facoltativa e abilita soltanto
+l'osservazione shadow dell'API ufficiale.
 
 Il filtro commenti rileva opinioni, domande retoriche e supposizioni nel feed di allerta prima della traduzione. Questi messaggi non vengono pubblicati nel canale di allerta e sono inoltrati integralmente a `OPS_CHAT_ID` con etichetta `COMMENTO`. Se l'invio a OPS fallisce, il messaggio non viene marcato come completato e può essere ritentato.
 
@@ -156,13 +171,16 @@ Il filtro commenti rileva opinioni, domande retoriche e supposizioni nel feed di
 - Rispetto automatico di `retry_after` in caso di flood control.
 - Una sola connessione HTTP condivisa.
 - Serializzazione degli invii per evitare raffiche incontrollate.
-- Deduplicazione temporale e testuale degli output di `@kyiv_alerts`, con conservazione degli aggiornamenti che aggiungono fatti nuovi.
+- Deduplicazione temporale e testuale degli output di `@kyivnebomonitoring`, con conservazione degli aggiornamenti che aggiungono fatti nuovi.
 - Deduplicazione dei messaggi simulati e protezione contro i loop del bot.
 
 ## Limiti noti
 
-- UkraineAlarm è stato rimosso: il trigger è esclusivamente `@kyiv_airraid_alert`.
-- La persistenza NORMAL dipende dal volume Railway montato su `/data`; senza tale volume il worker usa il buffer in memoria come fallback e torna vulnerabile ai riavvii.
+- UkraineAlarm è soltanto un osservatore shadow opzionale: il trigger pubblico è
+  esclusivamente `@kyiv_airraid_alert`.
+- SQLite e il lock Telethon usano per impostazione predefinita `/data`; senza un
+  volume Railway montato su quel percorso, i dati non sopravvivono alla sostituzione
+  del container.
 - Lo stato ricostruito dal canale Telegram dipende dall'ultimo messaggio esplicito riconoscibile relativo a Kyiv.
 - Il sistema è un'integrazione informativa e non sostituisce i sistemi ufficiali di protezione civile.
 
@@ -170,7 +188,7 @@ Il filtro commenti rileva opinioni, domande retoriche e supposizioni nel feed di
 
 1. Verificare che Railway mostri un solo deployment attivo.
 2. Verificare che il log indichi `TEST_MODE` o produzione in modo coerente.
-3. In produzione, controllare che le sorgenti dei riepiloghi siano `kievinfo_kyiv`, `shv_ukr` e `AMK_Mapping`, e che l'unico feed ALERT sia `kyiv_alerts`.
+3. In produzione, controllare che le sorgenti dei riepiloghi siano `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping` e `insiderukr`, e che l'unico feed ALERT sia `kyivnebomonitoring`.
 4. Controllare che `@kyiv_airraid_alert` sia registrato come trigger e non come contenuto.
 5. Verificare che il messaggio tecnico di avvio arrivi soltanto a Ops.
 6. Verificare che le allerte vadano a `TARGET_CHAT_ID` e i riepiloghi a `SUMMARY_CHAT_ID`.
@@ -178,11 +196,12 @@ Il filtro commenti rileva opinioni, domande retoriche e supposizioni nel feed di
 
 ## Aggiornamento operativo: riepiloghi e sorgenti
 
-Il ciclo NORMAL usa tre sorgenti di contenuto:
+Il ciclo NORMAL usa quattro sorgenti di contenuto:
 
 - `@kievinfo_kyiv` per disservizi e infrastrutture di Kyiv;
 - `@shv_ukr` per sviluppi politici, economici, diplomatici e nazionali ucraini;
 - `@AMK_Mapping` per analisi militare della guerra Russia-Ucraina.
+- `@insiderukr` per ulteriore copertura dell'attualità ucraina.
 
 Il fuso orario operativo è `Europe/Kyiv`: gli output mostrano automaticamente `EEST` in estate e `EET` in inverno. La pausa notturna 01:00–07:00 segue lo stesso fuso.
 
@@ -198,7 +217,7 @@ I log registrano buffer, tentativi AI, uso del fallback, risultato per sorgente 
 
 Le sorgenti indicano esclusivamente la provenienza dei messaggi. Non esiste più una categoria
 assegnata rigidamente a ciascun canale: a ogni ciclo NORMAL, ciascun messaggio acquisito da
-`@kievinfo_kyiv`, `@shv_ukr` e `@AMK_Mapping` viene valutato contro tutte
+`@kievinfo_kyiv`, `@shv_ukr`, `@AMK_Mapping` e `@insiderukr` viene valutato contro tutte
 le categorie:
 
 - `kyiv_city`: disservizi, infrastrutture e conseguenze concrete sulla vita di Kyiv;
@@ -220,7 +239,8 @@ Ogni riepilogo scrive nei log Railway:
 Le stesse statistiche vengono archiviate in SQLite nella posizione indicata da
 `CATEGORY_STATS_DB_PATH`, valore predefinito
 `/data/kyiv_monitor_category_stats.sqlite3`. Per conservarle attraverso restart e deployment,
-Railway deve montare un volume persistente su `/data`. Le tabelle statistiche sono
+Railway deve montare un volume persistente su `/data`; la configurazione del percorso
+non crea da sola un volume. Le tabelle statistiche sono
 `hourly_category_stats` e `hourly_classifications`; la coda affidabile usa
 `normal_messages` e i checkpoint per fonte usano `source_cursors`.
 

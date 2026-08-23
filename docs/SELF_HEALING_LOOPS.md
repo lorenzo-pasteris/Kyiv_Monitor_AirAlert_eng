@@ -60,7 +60,8 @@ Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e ge
 - Un messaggio esplicito di cessato allarme per Kyiv attiva NORMAL.
 - Messaggi ambigui non modificano lo stato conosciuto.
 - Se il canale non è leggibile, viene inviato un avviso critico e viene conservato l'ultimo stato.
-- UkraineAlarm API non fa più parte dell'architettura.
+- UkraineAlarm può operare soltanto come osservatore shadow opzionale: segnala a Ops
+  errori o divergenze, ma non può cambiare lo stato pubblico.
 
 Questo loop deve essere deterministico e non affidato a un modello linguistico.
 
@@ -94,7 +95,7 @@ Verificare:
 - tempo tra messaggio sorgente e output;
 - presenza di etichette interne come `[TEST_SOURCE:...]` o `[burst N/M]`;
 - richieste di donazioni, numeri di carte, ringraziamenti o auguri pubblicati per errore;
-- duplicati di `@kyiv_alerts` e loop generati dal bot.
+- duplicati di `@kyivnebomonitoring` e loop generati dal bot.
 
 Soglie suggerite:
 
@@ -126,7 +127,12 @@ Controllare che:
 - le anomalie operative vengano inviate a `OPS_CHAT_ID`, con fallback a `OWNER_CHAT_ID`, mentre i dettagli ordinari restano nei log Railway.
 - ogni avvio o riavvio tecnico del worker venga notificato a `OPS_CHAT_ID`; il messaggio di cessato allarme e ritorno a NORMAL resti nel canale di allerta.
 
-Implementato: la coda NORMAL usa SQLite sul volume Railway `/data`, con inserimenti idempotenti, cursori Telegram per fonte, recupero dalla cronologia, stato `pending`/`processed`/`discarded` e retention di sette giorni. Il buffer in memoria resta soltanto come fallback quando SQLite non è disponibile.
+Implementato: la coda NORMAL usa SQLite nel percorso configurato da
+`CATEGORY_STATS_DB_PATH` (predefinito `/data/kyiv_monitor_category_stats.sqlite3`),
+con inserimenti idempotenti, cursori Telegram per fonte, recupero dalla cronologia,
+stato `pending`/`processed`/`discarded` e retention di sette giorni. La persistenza tra
+container richiede un volume Railway montato su `/data`; il buffer in memoria resta
+il fallback quando SQLite non è disponibile.
 
 ## Loop 6 — Diagnosi tramite agente AI
 
@@ -165,7 +171,8 @@ Test minimi:
 - risposte Anthropic valide, duplicate, con testo aggiuntivo, troncate e non JSON;
 - Structured Outputs, retry differenziati per errore, backoff/`Retry-After` e fallback di soli estratti originali;
 - watchdog a 62/65/67/70 minuti e conservazione del buffer su errore di invio;
-- isolamento totale di `TEST_MODE`;
+- isolamento degli output alert/summary e delle sorgenti reali in `TEST_MODE`, con
+  notifiche operative ancora consentite verso `OPS_CHAT_ID`;
 - routing separato di allerte, riepiloghi e notifiche Ops;
 - assenza di riepiloghi nel canale `TARGET_CHAT_ID`;
 - testo minimale di inizio allerta e cessato allarme con link al gruppo;
@@ -173,7 +180,7 @@ Test minimi:
 - deduplicazione degli output;
 - filtro di donazioni, dettagli di pagamento, ringraziamenti e auguri anche quando il testo contiene parole di sicurezza;
 - deduplicazione entro tre minuti senza eliminare aggiornamenti con località, quantità o direzioni nuove;
-- registrazione di `@kyiv_alerts` come unico feed ALERT e assenza completa di `@nebo_raketa` e `@Nashee_PPO`;
+- registrazione di `@kyivnebomonitoring` come unico feed ALERT;
 - sintassi Python e avvio del worker.
 
 Il deploy deve essere bloccato se fallisce un test relativo a trigger, isolamento del test o destinazione Telegram.
@@ -196,8 +203,10 @@ Non eseguire test con messaggi o allerte reali.
 Livelli suggeriti:
 
 - **INFO**: singolo errore recuperato automaticamente.
-- **WARNING**: una sorgente trigger indisponibile, ma l'altra funziona.
-- **CRITICAL**: entrambe le sorgenti trigger indisponibili, impossibilità di inviare output o restart loop.
+- **WARNING**: il trigger Telegram è temporaneamente illeggibile oppure l'osservatore
+  shadow UkraineAlarm diverge dallo stato Telegram.
+- **CRITICAL**: il trigger Telegram resta indisponibile, è impossibile inviare output
+  oppure il worker entra in un restart loop.
 
 I WARNING possono essere inviati al proprietario in privato. I CRITICAL devono usare almeno due canali indipendenti, per esempio Telegram privato ed email/Sentry.
 
@@ -224,9 +233,9 @@ Richiedere approvazione umana per modifiche che riguardano:
 
 ## Ordine di implementazione consigliato
 
-1. Test unitari della logica dei due trigger.
+1. Test unitari del trigger Telegram e dell'osservatore shadow UkraineAlarm.
 2. Heartbeat e monitor esterno.
-3. Avvisi per perdita di una o entrambe le sorgenti.
+3. Avvisi per perdita del trigger e divergenze dell'osservatore shadow.
 4. Persistenza dello stato e dei buffer.
 5. Pipeline staging → test → produzione.
 6. Agente AI che apre pull request.

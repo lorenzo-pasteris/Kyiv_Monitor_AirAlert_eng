@@ -53,8 +53,9 @@ stale translations are discarded after the alert ends.
 
 ### TEST
 
-`TEST_MODE=true` disables real-source handlers and confines output to `TEST_CHAT_ID`.
-By default it does not open `TELEGRAM_SESSION`, preventing staging from invalidating the
+`TEST_MODE=true` disables real-source handlers and confines alert and summary output
+to `TEST_CHAT_ID`; operational failures may still be reported to `OPS_CHAT_ID`. By
+default it does not open `TELEGRAM_SESSION`, preventing staging from invalidating the
 production authorization key. Interactive test commands require a separate
 `TEST_TELEGRAM_SESSION`; never reuse the production session. Available commands are
 `/test_start`, `/test_message`, `/test_burst N`, `/test_end`, and `/test_summary`.
@@ -90,7 +91,8 @@ Required in production:
 - `ANTHROPIC_API_KEY`, `BOT_TOKEN`;
 - `TARGET_CHAT_ID`, `SUMMARY_CHAT_ID`, `SUMMARY_CHAT_LINK`;
 - `OWNER_CHAT_ID`; optionally a distinct `OPS_CHAT_ID`;
-- `ADMIN_USER_IDS`, a comma-separated allowlist for manual overrides.
+- optionally `ADMIN_USER_IDS`, a comma-separated allowlist for manual overrides. If
+  omitted, only `OWNER_CHAT_ID` is authorized.
 
 `TARGET_CHAT_ID` and `SUMMARY_CHAT_ID` must be different. `SUMMARY_CHAT_LINK` must
 point to the news group, not the alert channel.
@@ -101,7 +103,7 @@ The tests stub external services and do not send Telegram or Anthropic requests.
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 -m py_compile monitor.py alert_rules.py predeploy_check.py
+python3 -m py_compile monitor.py alert_rules.py state_store.py text_processing.py predeploy_check.py
 python3 -m unittest discover -s tests -v
 ```
 
@@ -119,14 +121,18 @@ pushes to `main`. Configure GitHub branch protection so `main` requires the `tes
 check and at least one review. Railway should deploy production only from protected
 `main`; use a separate Railway service/environment with `TEST_MODE=true` for staging.
 
-`railway.json` runs `predeploy_check.py` before promotion. It rejects missing or
-malformed production configuration—including an invalid Telethon StringSession—without
-printing secret values, so a bad configuration cannot replace a running deployment.
-Failed workers are limited to three restart attempts instead of looping indefinitely.
+`railway.json` runs `predeploy_check.py` before the new worker starts. It rejects
+missing or malformed production configuration—including an invalid Telethon
+StringSession—without printing secret values. The deployment workflow currently stops
+the active worker before invoking `railway up`, so a failed pre-deploy check requires
+manual recovery or rollback; it does not guarantee uninterrupted service. Failed
+workers are limited to three restart attempts instead of looping indefinitely.
 
-Production acquires an exclusive lock on the persistent `/data` volume before opening
-Telethon. A replacement container waits for the previous worker to exit, preventing
-rolling deploys from invalidating `TELEGRAM_SESSION` through simultaneous connections.
+SQLite and the Telethon lock default to paths under `/data`. They survive deployments
+only when Railway has a persistent volume mounted there; without one, they are local
+to the container. Independently, the deployment workflow stops the active worker and
+waits 15 seconds before starting its replacement, preventing simultaneous use of
+`TELEGRAM_SESSION` during the normal deployment path.
 
 Do not test manual alert commands in the production channel. Verify the candidate
 commit in staging, merge only after green checks, and retain the preceding Railway
@@ -134,9 +140,10 @@ deployment for rollback.
 
 ## Manual overrides
 
-Only Telegram user IDs listed in `ADMIN_USER_IDS` may execute `/alert` or `/normal`.
-Rejected attempts are logged and reported to Ops. The canonical automatic state
-continues to come from `@kyiv_airraid_alert`.
+Only Telegram user IDs listed in `ADMIN_USER_IDS` may execute `/alert` or `/normal`;
+when the variable is omitted, the allowlist contains only `OWNER_CHAT_ID`. Rejected
+attempts are logged and reported to Ops. The canonical automatic state continues to
+come from `@kyiv_airraid_alert`.
 
 ## Further documentation
 
