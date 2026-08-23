@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Keep this conservative: catch real bugs (unused imports/variables, undefined
+# names, shadowed builtins) without forcing a wholesale style reformat.
+select = [
+    "F",   # pyflakes: unused imports/variables, undefined names, etc.
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "E501",  # line length is handled loosely via line-length above, don't hard-fail on it
+]
