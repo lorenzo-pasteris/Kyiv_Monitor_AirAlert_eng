@@ -74,7 +74,7 @@ python3 -m py_compile monitor.py alert_rules.py predeploy_check.py
 python3 -m unittest discover -s tests -v
 ```
 
-Lint locally with [ruff](https://docs.astral.sh/ruff/) (`pip install ruff`, config in
+Lint locally with [ruff](https://docs.astral.sh/ruff/) (`pip install ruff==0.16.4`, config in
 `pyproject.toml`):
 
 ```bash
