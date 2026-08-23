@@ -26,12 +26,6 @@ import state_store
 from alert_rules import classify_telegram_alert
 from predeploy_check import validate_environment
 from text_processing import (
-    AD_INDICATORS,
-    ALERT_TACTICAL_KEYWORDS,
-    ALERT_TERSE_FOLLOWUP_KEYWORDS,
-    COMMENTARY_PATTERNS,
-    DONATION_INDICATORS,
-    ENGAGEMENT_INDICATORS,
     SECURITY_KEYWORDS,
     build_alert_translation_prompt,
     clean_alert_source_text,
@@ -41,7 +35,7 @@ from text_processing import (
     is_commentary_alert_message,
     is_non_operational_alert_message,
     is_pure_ad,
-    is_translation_meta_output,
+    is_translation_meta_output,  # noqa: F401 -- re-exported for tests/test_routing.py
     is_valid_alert_translation,
     normalize_alert_for_dedup,
     parse_first_json_object,
