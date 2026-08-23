@@ -7,7 +7,9 @@ wiring in monitor.py.
 """
 import json
 import re
+from collections.abc import Iterable
 from datetime import datetime, timezone
+from typing import Any
 
 # --- Pre-filters ---
 AD_INDICATORS = ["#реклама","реклама","знижк","розпродаж","промокод","купуй","придбай","акція","магазин","замовляй","доставка"]
@@ -46,18 +48,18 @@ COMMENTARY_PATTERNS = (
 )
 
 
-def contains_any(text, keywords):
+def contains_any(text: str, keywords: Iterable[str]) -> bool:
     return any(k.lower() in text.lower() for k in keywords)
 
 
-def clean_text(text):
+def clean_text(text: str) -> str:
     text = re.sub(r'^\s*#\w+\s*', '', text)
     text = re.sub(r'\s*#\w+\s*', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
-def clean_alert_source_text(text):
+def clean_alert_source_text(text: str) -> str:
     """Remove promotional lines from alert-source text before filtering and translation."""
     clean = clean_text(text)
     promo_line_patterns = (
@@ -86,7 +88,7 @@ def clean_alert_source_text(text):
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
 
 
-def is_non_operational_alert_message(text):
+def is_non_operational_alert_message(text: str) -> bool:
     """Reject fundraising, payment details, thanks and greeting posts even if they mention attacks."""
     compact_digits = re.sub(r"[\s-]", "", text)
     has_payment_number = bool(re.search(r"(?<!\d)\d{13,19}(?!\d)", compact_digits))
@@ -97,7 +99,7 @@ def is_non_operational_alert_message(text):
     )
 
 
-def is_actionable_alert_message(text):
+def is_actionable_alert_message(text: str) -> bool:
     """Allow explicit threats plus the terse location/direction follow-ups used by the alert feed."""
     if contains_any(text, ALERT_TACTICAL_KEYWORDS):
         return True
@@ -111,18 +113,18 @@ def is_actionable_alert_message(text):
     return bool(re.match(r"^(?:ще\s+)?на\s+.{2,80}\s+(?:від|з|із|зі)\s+.{2,80}[.!]?\s*$", clean, re.I))
 
 
-def is_commentary_alert_message(text):
+def is_commentary_alert_message(text: str) -> bool:
     """Identify opinions, rhetorical complaints and speculation in an alert feed."""
     return any(re.search(pattern, text, re.I) for pattern in COMMENTARY_PATTERNS)
 
 
-def is_pure_ad(text):
+def is_pure_ad(text: str) -> bool:
     if contains_any(text, SECURITY_KEYWORDS):
         return False
     return contains_any(text, AD_INDICATORS)
 
 
-def normalize_alert_for_dedup(text):
+def normalize_alert_for_dedup(text: str) -> str:
     """Normalize formatting noise while retaining locations, targets and quantities."""
     normalized = clean_text(text).lower()
     normalized = re.sub(r"https?://\S+|t\.me/\S+|@\w+", " ", normalized)
@@ -130,7 +132,7 @@ def normalize_alert_for_dedup(text):
     return re.sub(r"\s+", " ", normalized).strip()
 
 
-def parse_ukraine_alarm_kyiv_state(regions):
+def parse_ukraine_alarm_kyiv_state(regions: Any) -> bool:
     """Return Kyiv City's AIR state; never confuse it with Kyiv Oblast."""
     kyiv_names = {"київ", "м. київ", "kyiv", "kyiv city"}
     for region in regions if isinstance(regions, list) else ():
@@ -150,7 +152,7 @@ def parse_ukraine_alarm_kyiv_state(regions):
     raise ValueError("Kyiv City is missing from UkraineAlarm response")
 
 
-def utc_iso(value=None):
+def utc_iso(value: datetime | None = None) -> str:
     """Return a stable UTC timestamp for Telegram messages and database state."""
     value = value or datetime.now(timezone.utc)
     if value.tzinfo is None:
@@ -158,11 +160,11 @@ def utc_iso(value=None):
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
-def alert_feed_cursor_key(channel):
+def alert_feed_cursor_key(channel: str) -> str:
     return f"alert_feed_cursor:{channel}"
 
 
-def build_alert_translation_prompt(text):
+def build_alert_translation_prompt(text: str) -> str:
     """Build a concise, domain-aware translation request for Ukrainian alert jargon."""
     return (
         "Translate this Ukrainian/Russian air-defence update into concise, natural English for "
@@ -206,7 +208,7 @@ def build_alert_translation_prompt(text):
     )
 
 
-def translate_known_terse_fragment(text):
+def translate_known_terse_fragment(text: str) -> str | None:
     """Translate common one-line tactical fragments without model interpretation."""
     normalized = re.sub(r"[.!…\s]+$", "", text.strip()).casefold()
     return {
@@ -222,7 +224,7 @@ def translate_known_terse_fragment(text):
     }.get(normalized)
 
 
-def is_translation_meta_output(text):
+def is_translation_meta_output(text: str) -> bool:
     """Reject model commentary, refusals, and requests for more source context."""
     lowered = text.strip().casefold()
     forbidden = (
@@ -247,12 +249,12 @@ def is_translation_meta_output(text):
     return not lowered or any(marker in lowered for marker in forbidden)
 
 
-def is_valid_alert_translation(text):
+def is_valid_alert_translation(text: str) -> bool:
     """Only publish a non-meta English result; Ukrainian/Russian belongs in Ops, never public."""
     return not re.search(r"[А-Яа-яІіЇїЄєҐґ]", text or "") and not is_translation_meta_output(text)
 
 
-def parse_first_json_object(raw):
+def parse_first_json_object(raw: str) -> dict[str, Any]:
     """Legacy fallback: decode the first JSON object and report trailing anomalies."""
     cleaned = raw.strip()
     cleaned = re.sub(r"^\x60\x60\x60(?:json)?\\s*", "", cleaned, flags=re.IGNORECASE)
