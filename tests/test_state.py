@@ -8,7 +8,7 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.original_send_alert = monitor.send_to_alert_channel
         self.original_send_owner = monitor.send_to_owner
-        self.original_stats_ready = monitor.stats_db_ready
+        self.original_stats_ready = monitor.state_store.stats_db_ready
         self.original_client = monitor.production_client
         self.original_entities = monitor.content_source_entities
         monitor.alert_transition_lock = asyncio.Lock()
@@ -16,7 +16,7 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         monitor.alert_started_at = None
         monitor.alert_generation = 0
         monitor.telegram_alert_state = None
-        monitor.stats_db_ready = False
+        monitor.state_store.stats_db_ready = False
         monitor.production_client = None
         monitor.content_source_entities = {}
         monitor.alert_delivery_tasks.clear()
@@ -31,7 +31,7 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         monitor.send_to_alert_channel = self.original_send_alert
         monitor.send_to_owner = self.original_send_owner
-        monitor.stats_db_ready = self.original_stats_ready
+        monitor.state_store.stats_db_ready = self.original_stats_ready
         monitor.production_client = self.original_client
         monitor.content_source_entities = self.original_entities
 
