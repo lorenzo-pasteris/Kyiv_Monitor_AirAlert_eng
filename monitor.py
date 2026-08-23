@@ -8,13 +8,10 @@
 """
 import asyncio
 import base64
-import fcntl
-import hashlib
 import html
 import json
 import os
 import re
-import sqlite3
 import time
 import httpx
 from collections import deque
@@ -25,8 +22,33 @@ from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.errors import AuthKeyDuplicatedError
+import state_store
 from alert_rules import classify_telegram_alert
 from predeploy_check import validate_environment
+from text_processing import (
+    AD_INDICATORS,
+    ALERT_TACTICAL_KEYWORDS,
+    ALERT_TERSE_FOLLOWUP_KEYWORDS,
+    COMMENTARY_PATTERNS,
+    DONATION_INDICATORS,
+    ENGAGEMENT_INDICATORS,
+    SECURITY_KEYWORDS,
+    build_alert_translation_prompt,
+    clean_alert_source_text,
+    clean_text,
+    contains_any,
+    is_actionable_alert_message,
+    is_commentary_alert_message,
+    is_non_operational_alert_message,
+    is_pure_ad,
+    is_translation_meta_output,
+    is_valid_alert_translation,
+    normalize_alert_for_dedup,
+    parse_first_json_object,
+    parse_ukraine_alarm_kyiv_state,
+    translate_known_terse_fragment,
+    utc_iso,
+)
 
 # --- Credentials ---
 TELEGRAM_API_ID = int(os.environ["TELEGRAM_API_ID"])
@@ -180,48 +202,10 @@ CATEGORY_RESULT_SCHEMA = {
 }
 
 
-CATEGORY_STATS_DB_PATH = os.environ.get(
-    "CATEGORY_STATS_DB_PATH", "/data/kyiv_monitor_category_stats.sqlite3"
-)
-TELETHON_SESSION_LOCK_PATH = f"{CATEGORY_STATS_DB_PATH}.telethon.lock"
 NORMAL_HISTORY_BOOTSTRAP_HOURS = 1
-NORMAL_MESSAGE_RETENTION_DAYS = 7
 
 # --- Pre-filters ---
-AD_INDICATORS = ["#реклама","реклама","знижк","розпродаж","промокод","купуй","придбай","акція","магазин","замовляй","доставка"]
-DONATION_INDICATORS = [
-    "донат", "донатів", "підтримати", "підтримайте", "підтримку", "підтримкою",
-    "кавою", "на каву", "mono", "моно", "monobank", "приват", "privat",
-    "банка", "банку", "збір", "збору", "картка", "карта", "реквізит",
-]
-ENGAGEMENT_INDICATORS = [
-    "щиро вдяч", "дуже вдяч", "вдячн", "дяку", "подяку", "спасиб",
-    "thank you", "thanks", "ви найкращі", "найкращі підписники",
-    "всіх бачу", "best subscribers", "i can see everyone", "тримаємось",
-    "з днем", "вітаємо", "вітаю", "найкращі були та будете",
-]
-SECURITY_KEYWORDS = ["тривога","відбій","балістика","ракета","шахед","шахеди","бпла","вибух","вибухи","ппо","повітряна ціль","укриття","загроза","обстріл","приліт","дрон","дрони","mig","міг","siren","raid","missile","drone","explosion","alert","attack","ballistic","shahed","interception","strike"]
-ALERT_TACTICAL_KEYWORDS = SECURITY_KEYWORDS + [
-    "ціль", "цілі", "рух", "рухається", "рухаються", "курс", "напрям", "летить",
-    "летять", "чисто", "знищено", "знищена", "знищений", "збито", "увага",
-    "target", "heading", "moving", "destroyed", "shot down", "area clear",
-]
-ALERT_TERSE_FOLLOWUP_KEYWORDS = [
-    "підліта", "в бік", "у бік", "на бориспіль", "на бровари", "від броварів",
-    "через водосховище", "уважно", "гучно", "димер", "згурів", "троєщин",
-    "рембаз", "осещин", "тец-6", "березан", "українк",
-]
-COMMENTARY_PATTERNS = (
-    r"\b(?:не знаю|я думаю|мені здається|не розумію|чому|навіщо)\b",
-    r"\b(?:не знаю|я думаю|мне кажется|не понимаю|почему|зачем)\b",
-    r"\b(?:i don['’]t know|i think|in my opinion|why|what are they waiting for)\b",
-    r"\b(?:повинні були|мали б|should have|can['’]t they|keeping the alert on)\b",
-    r"\b(?:заснув|уснул|fell asleep)\b",
-    r"\b(?:всі спустились|все спустились|на вулицю не йдемо|на улицу не ид[её]м)\b",
-    r"\b(?:менш\s+ефектив\w*|менее\s+эффектив\w*|less\s+effective)\b.*\b(?:ніж|чем|than)\b",
-    r"\b(?:віримо в медиків|верим в медиков|we believe in the medics)\b",
-    r"^\s*бандероль\s*[-—:=]\s*крилата ракета\s*[.!]?\s*$",
-)
+# (keyword/pattern constants live in text_processing.py, imported above)
 
 # --- State ---
 buffers = {ch: [] for ch in ALL_CONTENT_CHANNELS}
@@ -232,7 +216,6 @@ last_send_time = 0
 last_message_time = time.time()
 last_summary_success_time = time.monotonic()
 summary_watchdog_attempts = set()
-stats_db_ready = False
 production_client = None
 content_source_entities = {}
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
@@ -259,45 +242,8 @@ TEST_SAMPLE_MESSAGES = [
 ]
 
 
-def contains_any(text, keywords):
-    return any(k.lower() in text.lower() for k in keywords)
-
-
 def is_authorized_admin(sender_id):
     return sender_id in ADMIN_USER_IDS
-
-def is_non_operational_alert_message(text):
-    """Reject fundraising, payment details, thanks and greeting posts even if they mention attacks."""
-    compact_digits = re.sub(r"[\s-]", "", text)
-    has_payment_number = bool(re.search(r"(?<!\d)\d{13,19}(?!\d)", compact_digits))
-    return (
-        has_payment_number
-        or contains_any(text, DONATION_INDICATORS)
-        or contains_any(text, ENGAGEMENT_INDICATORS)
-    )
-
-def is_actionable_alert_message(text):
-    """Allow explicit threats plus the terse location/direction follow-ups used by the alert feed."""
-    if contains_any(text, ALERT_TACTICAL_KEYWORDS):
-        return True
-    clean = clean_text(text)
-    if len(clean) > 500:
-        return False
-    if contains_any(clean, ALERT_TERSE_FOLLOWUP_KEYWORDS):
-        return True
-    # The alert feed frequently posts terse course updates such as
-    # "На Тарасівку від Боярки" without repeating "БпЛА".
-    return bool(re.match(r"^(?:ще\s+)?на\s+.{2,80}\s+(?:від|з|із|зі)\s+.{2,80}[.!]?\s*$", clean, re.I))
-
-
-def is_commentary_alert_message(text):
-    """Identify opinions, rhetorical complaints and speculation in an alert feed."""
-    return any(re.search(pattern, text, re.I) for pattern in COMMENTARY_PATTERNS)
-
-def is_pure_ad(text):
-    if contains_any(text, SECURITY_KEYWORDS):
-        return False
-    return contains_any(text, AD_INDICATORS)
 
 
 async def is_blocked_alert_image(message):
@@ -348,13 +294,6 @@ async def is_blocked_alert_image(message):
         print(f"[ALERT IMAGE CHECK ERROR] {type(exc).__name__}: {exc}")
         return False
 
-def normalize_alert_for_dedup(text):
-    """Normalize formatting noise while retaining locations, targets and quantities."""
-    normalized = clean_text(text).lower()
-    normalized = re.sub(r"https?://\S+|t\.me/\S+|@\w+", " ", normalized)
-    normalized = re.sub(r"[^\w\s]", " ", normalized, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", normalized).strip()
-
 def should_publish_alert(text, source, now=None):
     """First arrival wins; suppress only near-identical reports seen in the last three minutes."""
     timestamp = time.monotonic() if now is None else now
@@ -393,41 +332,6 @@ def forget_failed_alert(text, source):
             recent_alert_messages.remove(item)
             break
 
-def clean_text(text):
-    text = re.sub(r'^\s*#\w+\s*', '', text)
-    text = re.sub(r'\s*#\w+\s*', ' ', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
-
-
-def clean_alert_source_text(text):
-    """Remove promotional lines from alert-source text before filtering and translation."""
-    clean = clean_text(text)
-    promo_line_patterns = (
-        r"(?i)\b(?:надіслати новину|написати нам|підписатися|підпишись|підписуйся)\b",
-        r"(?i)\b(?:send news|report news|subscribe|watch live|live stream|join us)\b",
-        r"(?i)^\s*(?:💙\s*)?dnipro alerts\s*•\s*(?:💛\s*)?kyiv alerts\s*$",
-        r"(?i)^\s*(?:ℹ️\s*)?alerts live\s*•\s*(?:🤙\s*)?feedback\s*$",
-        r"(?i)^\s*(?:👉\s*)?live\s*[:!—-]*\s*$",
-        r"(?i)^\s*(?:уся|вся|вся інформація|all information)\s+(?:інформація\s+)?(?:з|из|from)\s+київ\s*[|—:-]*\s*де\s+загроза\s*$",
-        r"^\s*ㅤ\s*$",
-    )
-    kept_lines = []
-    for line in clean.splitlines():
-        line = re.sub(
-            r"(?i)\[([^\]]+)\]\((?:https?://|www\.|(?:t|telegram)\.me/)\S+\)",
-            r"\1",
-            line,
-        )
-        line = re.sub(
-            r"(?i)(?:https?://|www\.|(?:t|telegram)\.me/)\S+",
-            "",
-            line,
-        ).strip()
-        if line and not any(re.search(pattern, line) for pattern in promo_line_patterns):
-            kept_lines.append(line)
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
-
 def is_night():
     h = datetime.now(TZ).hour
     return NIGHT_START <= h < NIGHT_END
@@ -442,26 +346,6 @@ def seconds_until_next_hour():
 async def reconcile_alert_state(source):
     """Apply the explicit trigger state and retry when public delivery fails."""
     return await apply_alert_state(telegram_alert_state, source)
-
-
-def parse_ukraine_alarm_kyiv_state(regions):
-    """Return Kyiv City's AIR state; never confuse it with Kyiv Oblast."""
-    kyiv_names = {"київ", "м. київ", "kyiv", "kyiv city"}
-    for region in regions if isinstance(regions, list) else ():
-        if not isinstance(region, dict):
-            continue
-        names = {
-            str(region.get("regionName", "")).strip().casefold(),
-            str(region.get("regionEngName", "")).strip().casefold(),
-        }
-        if names.isdisjoint(kyiv_names):
-            continue
-        alerts = region.get("activeAlerts") or []
-        return any(
-            isinstance(alert, dict) and str(alert.get("type", "")).upper() == "AIR"
-            for alert in alerts
-        )
-    raise ValueError("Kyiv City is missing from UkraineAlarm response")
 
 
 async def ukraine_alarm_shadow_loop():
@@ -525,7 +409,7 @@ def set_alert_state(new_state, reason):
     alert_active = new_state
     alert_started_at = time.monotonic() if new_state else None
     alert_generation += 1
-    persist_operational_state("alert_active", "1" if new_state else "0")
+    state_store.persist_operational_state("alert_active", "1" if new_state else "0")
     print(
         f"[ALERT STATE] {previous} -> {new_state} reason={reason} "
         f"generation={alert_generation}"
@@ -564,7 +448,7 @@ async def apply_alert_state(desired, source, *, startup=False, public_message=No
                 recent_alert_messages.clear()
                 for channel_name in ALL_CONTENT_CHANNELS:
                     buffers[channel_name].clear()
-                discard_pending_normal_messages(f"startup_alert:{source}")
+                state_store.discard_pending_normal_messages(f"startup_alert:{source}")
                 await send_to_owner(
                     "⚠️ <b>ALERT state restored after restart</b>\n"
                     "The worker entered ALERT without duplicating the public start message."
@@ -588,103 +472,13 @@ async def apply_alert_state(desired, source, *, startup=False, public_message=No
             recent_alert_messages.clear()
             for channel_name in ALL_CONTENT_CHANNELS:
                 buffers[channel_name].clear()
-            discard_pending_normal_messages(f"alert_started:{source}")
+            state_store.discard_pending_normal_messages(f"alert_started:{source}")
         elif production_client and content_source_entities:
             await advance_normal_cursors_to_latest(
                 production_client, content_source_entities, f"alert_ended:{source}"
             )
         print(f"[ALERT TRANSITION] committed={'ALERT' if desired else 'NORMAL'} source={source}")
         return True
-
-
-def build_alert_translation_prompt(text):
-    """Build a concise, domain-aware translation request for Ukrainian alert jargon."""
-    return (
-        "Translate this Ukrainian/Russian air-defence update into concise, natural English for "
-        "civilians in Kyiv. Use only facts explicitly present in the source. Never add a weapon type, "
-        "destination, attribution, channel name, explanation, or missing context. Output ONLY English "
-        "translation; no notes, disclaimers, alternatives, labels, quotation marks, or Cyrillic. Preserve every "
-        "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
-        "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
-        "Mandatory alert glossary:\n"
-        "- ракета / ракети = missile(s), NEVER cruise missile(s) unless the source says крилата or Бандероль\n"
-        "- крилата ракета / крилаті / крилатих = cruise missile(s), never 'winged'\n"
-        "- циркон / циркони = Zircon missile(s), never Circon or Circone\n"
-        "- реактивний БпЛА / реактивні БпЛА / реактив = jet-powered UAV(s), never aircraft or reactor\n"
-        "- БпЛА / шахед / мопед = UAV / Shahed drone as context permits\n"
-        "- мінус = intercepted or neutralized threat, never 'minus'\n"
-        "- чисто / не спостерігається = clear / no threats currently observed\n"
-        "- відбій = all clear\n"
-        "- відбій по балістиці = ballistic threat all clear, not all clear on ballistic missiles\n"
-        "- локаційно втрачено = no longer tracked, never location lost\n"
-        "- зникла = no longer observed/tracked, never lost\n"
-        "- відвернула = turned away, never diverted or intercepted\n"
-        "- без швидкісних = no high-speed targets, never no jet-powered UAVs\n"
-        "- є влучання = an impact is reported; preserve singular and never add 'direct'\n"
-        "- ППО працює = air defence is engaging\n"
-        "- пуск / повторні пуски = launch / repeated launches\n"
-        "- курсом на / в напрямку = heading toward\n"
-        "- Бандероль / бандеролі / бандеролям = cruise missile(s), never S8000, parcel, package, or UAV\n"
-        "- подарунки / посилки can be alert-channel euphemisms for incoming threats; never translate "
-        "them literally as gifts or parcels. Name UAVs or missiles only when the source establishes it.\n\n"
-        "Example: 'Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів' means "
-        "'No threat from cruise missiles. The alert was issued for a jet-powered UAV "
-        "heading toward Brovary.'\n\n"
-        "Never ask for more context. A one-word place, target, or outcome is intentional and must be "
-        "translated as a one-word fragment. Examples: 'Дарниця' = 'Darnytsia'; 'ТЕЦ-5' = "
-        "'CHP-5'; 'Збили' = 'Shot down'. Keep terse fragments terse. Retain Ukrainian place "
-        "names using standard transliteration. Remove "
-        "promo, subscribe, and LIVE tags. Known spellings include Kyiv, Brovary, Boryspil, Obukhiv, "
-        "Vyshhorod, Bucha, Irpin, Fastiv, Bila Tserkva, Berezniaky, Osokorky, Pozniaky, Troieshchyna, "
-        "Vyshneve, Dymer, Boyarka, Yahotyn, Hostomel, Rembaza, and Koncha-Zaspa.\n\n"
-        "Source message:\n" + text
-    )
-
-
-def translate_known_terse_fragment(text):
-    """Translate common one-line tactical fragments without model interpretation."""
-    normalized = re.sub(r"[.!…\s]+$", "", text.strip()).casefold()
-    return {
-        "дарниця": "Darnytsia",
-        "тец-5": "CHP-5",
-        "тец 5": "CHP-5",
-        "збили": "Shot down",
-        "збито": "Shot down",
-        "балістика на київ": "Ballistic threat to Kyiv!",
-        "відбій по балістиці": "The ballistic threat has been lifted.",
-        "по балістиці очікуємо на відбій": "The ballistic threat is expected to be lifted shortly.",
-        "поки просто чекаємо на відбої по балістиці": "We are waiting for the ballistic threat to be lifted.",
-    }.get(normalized)
-
-
-def is_translation_meta_output(text):
-    """Reject model commentary, refusals, and requests for more source context."""
-    lowered = text.strip().casefold()
-    forbidden = (
-        "translation",
-        "translate",
-        "source message",
-        "source text",
-        "please provide",
-        "need the full",
-        "need more context",
-        "no operational",
-        "cannot provide",
-        "unable to provide",
-        "appears to be incomplete",
-        "appears to be a partial",
-        "appears to be a fragment",
-        "i can only see",
-        "i need the",
-        "i'm ready",
-        "you've provided",
-    )
-    return not lowered or any(marker in lowered for marker in forbidden)
-
-
-def is_valid_alert_translation(text):
-    """Only publish a non-meta English result; Ukrainian/Russian belongs in Ops, never public."""
-    return not re.search(r"[А-Яа-яІіЇїЄєҐґ]", text or "") and not is_translation_meta_output(text)
 
 
 async def translate_message(text):
@@ -725,225 +519,6 @@ async def translate_message(text):
             print(f"Ops notify failed: {ops_err}")
         return None
 
-def initialize_stats_db():
-    """Create the persistent statistics and NORMAL-message store."""
-    try:
-        db_dir = os.path.dirname(CATEGORY_STATS_DB_PATH)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA busy_timeout=5000")
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS hourly_category_stats (
-                    run_at TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    channel TEXT NOT NULL,
-                    received INTEGER NOT NULL,
-                    valid INTEGER NOT NULL,
-                    PRIMARY KEY (run_at, category, channel)
-                )"""
-            )
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS hourly_classifications (
-                    run_at TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    channel TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    preview TEXT NOT NULL,
-                    PRIMARY KEY (run_at, message_id, category)
-                )"""
-            )
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS normal_messages (
-                    channel TEXT NOT NULL,
-                    message_id INTEGER NOT NULL,
-                    message_at TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    processed_at TEXT,
-                    PRIMARY KEY (channel, message_id)
-                )"""
-            )
-            connection.execute(
-                """CREATE INDEX IF NOT EXISTS normal_messages_status_time
-                   ON normal_messages (status, message_at)"""
-            )
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS source_cursors (
-                    channel TEXT PRIMARY KEY,
-                    last_message_id INTEGER NOT NULL,
-                    updated_at TEXT NOT NULL
-                )"""
-            )
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS operational_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )"""
-            )
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS alert_feed_deliveries (
-                    channel TEXT NOT NULL,
-                    message_id INTEGER NOT NULL,
-                    fingerprint TEXT NOT NULL,
-                    claimed_at TEXT NOT NULL,
-                    PRIMARY KEY (channel, message_id, fingerprint)
-                )"""
-            )
-        print(f"[STATS DB] ready path={CATEGORY_STATS_DB_PATH}")
-        return True
-    except Exception as exc:
-        print(f"[STATS DB ERROR] persistence unavailable: {type(exc).__name__}: {exc}")
-        return False
-
-
-def acquire_telethon_session_lock(path=TELETHON_SESSION_LOCK_PATH, *, blocking=True):
-    """Prevent two production containers from opening the same Telegram session."""
-    lock_dir = os.path.dirname(path)
-    if lock_dir:
-        os.makedirs(lock_dir, exist_ok=True)
-    handle = open(path, "a+", encoding="utf-8")
-    operation = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-    try:
-        print(f"[TELETHON SESSION LOCK] waiting path={path}")
-        fcntl.flock(handle, operation)
-    except Exception:
-        handle.close()
-        raise
-    print(f"[TELETHON SESSION LOCK] acquired path={path}")
-    return handle
-
-
-def utc_iso(value=None):
-    """Return a stable UTC timestamp for Telegram messages and database state."""
-    value = value or datetime.now(timezone.utc)
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
-
-
-def persist_operational_state(key, value):
-    """Persist small restart-sensitive state without storing credentials."""
-    if not stats_db_ready:
-        return False
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
-            connection.execute(
-                """INSERT INTO operational_state (key, value, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(key) DO UPDATE SET
-                       value = excluded.value, updated_at = excluded.updated_at""",
-                (key, str(value), utc_iso()),
-            )
-        return True
-    except Exception as exc:
-        print(f"[STATE DB ERROR] key={key}: {type(exc).__name__}: {exc}")
-        return False
-
-
-def load_operational_state(key):
-    if not stats_db_ready:
-        return None
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
-            row = connection.execute(
-                "SELECT value FROM operational_state WHERE key = ?", (key,)
-            ).fetchone()
-        return row[0] if row else None
-    except Exception as exc:
-        print(f"[STATE DB ERROR] read key={key}: {type(exc).__name__}: {exc}")
-        return None
-
-
-def persist_trigger_observation(state, message_id, message_at):
-    """Record the canonical trigger event used to reconstruct the effective mode."""
-    if not stats_db_ready:
-        return False
-    updated_at = utc_iso()
-    values = (
-        ("telegram_alert_state", "1" if state else "0", updated_at),
-        ("telegram_alert_message_id", str(message_id), updated_at),
-        ("telegram_alert_message_at", utc_iso(message_at), updated_at),
-    )
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
-            connection.executemany(
-                """INSERT INTO operational_state (key, value, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(key) DO UPDATE SET
-                       value = excluded.value, updated_at = excluded.updated_at""",
-                values,
-            )
-        return True
-    except Exception as exc:
-        print(f"[STATE DB ERROR] trigger observation: {type(exc).__name__}: {exc}")
-        return False
-
-
-def alert_feed_cursor_key(channel):
-    return f"alert_feed_cursor:{channel}"
-
-
-def get_alert_feed_cursor(channel):
-    value = load_operational_state(alert_feed_cursor_key(channel))
-    try:
-        return int(value) if value is not None else 0
-    except (TypeError, ValueError):
-        return 0
-
-
-def set_alert_feed_cursor(channel, message_id):
-    return persist_operational_state(alert_feed_cursor_key(channel), int(message_id))
-
-
-def claim_alert_feed_delivery(channel, message_id, text):
-    """Atomically reserve one source-message version across worker restarts."""
-    if not stats_db_ready:
-        return True
-    fingerprint = hashlib.sha256(normalize_alert_for_dedup(text).encode()).hexdigest()
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
-            cursor = connection.execute(
-                """INSERT OR IGNORE INTO alert_feed_deliveries
-                   (channel, message_id, fingerprint, claimed_at)
-                   VALUES (?, ?, ?, ?)""",
-                (channel, int(message_id), fingerprint, utc_iso()),
-            )
-        return cursor.rowcount == 1
-    except Exception as exc:
-        print(f"[ALERT CLAIM DB ERROR] @{channel} id={message_id}: {type(exc).__name__}: {exc}")
-        return True
-
-
-def release_alert_feed_delivery(channel, message_id, text):
-    """Release a failed reservation so the same message version can retry."""
-    if not stats_db_ready:
-        return
-    fingerprint = hashlib.sha256(normalize_alert_for_dedup(text).encode()).hexdigest()
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
-            connection.execute(
-                """DELETE FROM alert_feed_deliveries
-                   WHERE channel = ? AND message_id = ? AND fingerprint = ?""",
-                (channel, int(message_id), fingerprint),
-            )
-    except Exception as exc:
-        print(f"[ALERT CLAIM DB ERROR] release @{channel} id={message_id}: {type(exc).__name__}: {exc}")
-
-
-def is_stale_alert_feed_message(channel, message_id):
-    """True when the cursor-based pipeline has already covered this Telegram message id.
-
-    The live Telethon listener and the 5-second poller ingest the same feed. The
-    180-second in-memory dedup cannot catch a live event replayed minutes later
-    (typical after a reconnection), so the durable cursor is the authoritative
-    guard. A missing cursor (0) keeps the previous behaviour: nothing is stale.
-    """
-    return int(message_id) <= get_alert_feed_cursor(channel)
-
-
 async def ensure_alert_feed_membership(client, source_entities):
     """Join every ALERT feed; resolving a public channel alone does not deliver live updates."""
     for channel in ALERT_FEED_CHANNELS:
@@ -961,7 +536,7 @@ async def backfill_alert_feed(client, source_entities):
     """Recover tactical posts emitted after the trigger but before listener readiness."""
     if not alert_active:
         return 0
-    trigger_at_raw = load_operational_state("telegram_alert_message_at")
+    trigger_at_raw = state_store.load_operational_state("telegram_alert_message_at")
     trigger_at = None
     if trigger_at_raw:
         try:
@@ -971,12 +546,12 @@ async def backfill_alert_feed(client, source_entities):
 
     delivered = 0
     for channel in ALERT_FEED_CHANNELS:
-        cursor = get_alert_feed_cursor(channel)
+        cursor = state_store.get_alert_feed_cursor(channel)
         messages = await client.get_messages(source_entities[channel], limit=50)
         pending = [message for message in reversed(messages) if message.id > cursor]
         if len(pending) > ALERT_RECOVERY_MAX_MESSAGES:
             skipped = pending[:-ALERT_RECOVERY_MAX_MESSAGES]
-            set_alert_feed_cursor(channel, skipped[-1].id)
+            state_store.set_alert_feed_cursor(channel, skipped[-1].id)
             print(
                 f"[ALERT BACKFILL COLLAPSED] @{channel} skipped={len(skipped)} "
                 f"through_id={skipped[-1].id}"
@@ -1006,7 +581,7 @@ async def alert_feed_poll_loop(client, source_entities):
                 observed = classify_telegram_alert(trigger.text or "")
                 if observed is not None and observed != telegram_alert_state:
                     telegram_alert_state = observed
-                    persist_trigger_observation(observed, trigger.id, trigger.date)
+                    state_store.persist_trigger_observation(observed, trigger.id, trigger.date)
                     print(f"[TRIGGER POLL] {'ACTIVE' if observed else 'CLEAR'} id={trigger.id}")
                     await reconcile_alert_state(f"poll:@{BACKUP_TRIGGER_CHANNEL}")
             if alert_active:
@@ -1020,149 +595,15 @@ async def alert_feed_poll_loop(client, source_entities):
         await asyncio.sleep(ALERT_FEED_POLL_INTERVAL)
 
 
-def persist_normal_message(channel, message_id, message_at, text):
-    """Persist one live NORMAL message idempotently; return False only on storage failure."""
-    if not stats_db_ready:
-        return False
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
-            connection.execute(
-                """INSERT OR IGNORE INTO normal_messages
-                   (channel, message_id, message_at, text, status)
-                   VALUES (?, ?, ?, ?, 'pending')""",
-                (channel, int(message_id), utc_iso(message_at), text[:800]),
-            )
-        return True
-    except Exception as exc:
-        print(f"[NORMAL DB ERROR] live insert failed @{channel}: {type(exc).__name__}: {exc}")
-        return False
-
-
-def get_source_cursor(channel):
-    if not stats_db_ready:
-        return None
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
-            row = connection.execute(
-                "SELECT last_message_id FROM source_cursors WHERE channel = ?",
-                (channel,),
-            ).fetchone()
-        return int(row[0]) if row else None
-    except Exception as exc:
-        print(f"[NORMAL DB ERROR] cursor read failed @{channel}: {type(exc).__name__}: {exc}")
-        return None
-
-
-def persist_history_batch(channel, messages, last_message_id):
-    """Atomically persist a history batch and its source cursor."""
-    if not stats_db_ready:
-        return False
-    try:
-        now = utc_iso()
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
-            for message in messages:
-                connection.execute(
-                    """INSERT OR IGNORE INTO normal_messages
-                       (channel, message_id, message_at, text, status)
-                       VALUES (?, ?, ?, ?, 'pending')""",
-                    (
-                        channel,
-                        int(message["message_id"]),
-                        message["message_at"],
-                        message["text"][:800],
-                    ),
-                )
-            if last_message_id is not None:
-                connection.execute(
-                    """INSERT INTO source_cursors (channel, last_message_id, updated_at)
-                       VALUES (?, ?, ?)
-                       ON CONFLICT(channel) DO UPDATE SET
-                           last_message_id = excluded.last_message_id,
-                           updated_at = excluded.updated_at""",
-                    (channel, int(last_message_id), now),
-                )
-        return True
-    except Exception as exc:
-        print(f"[NORMAL DB ERROR] history batch failed @{channel}: {type(exc).__name__}: {exc}")
-        return False
-
-
-def load_pending_normal_messages():
-    """Load the durable NORMAL queue in chronological order."""
-    if not stats_db_ready:
-        return []
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
-            rows = connection.execute(
-                """SELECT channel, message_id, message_at, text
-                   FROM normal_messages
-                   WHERE status = 'pending'
-                   ORDER BY message_at, channel, message_id"""
-            ).fetchall()
-        return [
-            {
-                "channel": channel,
-                "message_id": int(message_id),
-                "message_at": message_at,
-                "text": text,
-            }
-            for channel, message_id, message_at, text in rows
-        ]
-    except Exception as exc:
-        print(f"[NORMAL DB ERROR] pending read failed: {type(exc).__name__}: {exc}")
-        return []
-
-
-def mark_normal_messages_processed(message_keys):
-    """Mark exactly the delivered snapshot as processed, leaving later arrivals pending."""
-    if not stats_db_ready or not message_keys:
-        return
-    try:
-        processed_at = utc_iso()
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
-            connection.executemany(
-                """UPDATE normal_messages
-                   SET status = 'processed', processed_at = ?
-                   WHERE channel = ? AND message_id = ? AND status = 'pending'""",
-                [(processed_at, channel, int(message_id)) for channel, message_id in message_keys],
-            )
-            cutoff = utc_iso(datetime.now(timezone.utc) - timedelta(days=NORMAL_MESSAGE_RETENTION_DAYS))
-            connection.execute(
-                """DELETE FROM normal_messages
-                   WHERE status != 'pending' AND processed_at < ?""",
-                (cutoff,),
-            )
-    except Exception as exc:
-        print(f"[NORMAL DB ERROR] completion write failed: {type(exc).__name__}: {exc}")
-
-
-def discard_pending_normal_messages(reason):
-    """Preserve the original rule that an alert discards accumulated NORMAL material."""
-    if not stats_db_ready:
-        return
-    try:
-        processed_at = utc_iso()
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
-            changed = connection.execute(
-                """UPDATE normal_messages
-                   SET status = 'discarded', processed_at = ?
-                   WHERE status = 'pending'""",
-                (processed_at,),
-            ).rowcount
-        print(f"[NORMAL DB] discarded={changed} reason={reason}")
-    except Exception as exc:
-        print(f"[NORMAL DB ERROR] discard failed: {type(exc).__name__}: {exc}")
-
-
 async def sync_normal_history(client, source_entities):
     """Backfill messages missed by live events and advance each cursor atomically."""
     global last_message_time
-    if TEST_MODE or not stats_db_ready:
+    if TEST_MODE or not state_store.stats_db_ready:
         return True
     all_ok = True
     bootstrap_cutoff = datetime.now(timezone.utc) - timedelta(hours=NORMAL_HISTORY_BOOTSTRAP_HOURS)
     for channel in ALL_CONTENT_CHANNELS:
-        cursor = get_source_cursor(channel)
+        cursor = state_store.get_source_cursor(channel)
         try:
             if cursor is None:
                 bootstrap_messages = list(
@@ -1199,7 +640,7 @@ async def sync_normal_history(client, source_entities):
                     "text": clean[:800],
                 })
 
-            if not persist_history_batch(channel, rows, latest_id):
+            if not state_store.persist_history_batch(channel, rows, latest_id):
                 all_ok = False
                 continue
             if fetched:
@@ -1216,72 +657,17 @@ async def sync_normal_history(client, source_entities):
 
 async def advance_normal_cursors_to_latest(client, source_entities, reason):
     """Skip material produced while NORMAL mode is intentionally paused."""
-    if TEST_MODE or not stats_db_ready:
+    if TEST_MODE or not state_store.stats_db_ready:
         return
     for channel in ALL_CONTENT_CHANNELS:
         try:
             latest = await client.get_messages(source_entities[channel], limit=1)
-            latest_id = int(latest[0].id) if latest else get_source_cursor(channel)
+            latest_id = int(latest[0].id) if latest else state_store.get_source_cursor(channel)
             if latest_id is not None:
-                persist_history_batch(channel, [], latest_id)
+                state_store.persist_history_batch(channel, [], latest_id)
                 print(f"[HISTORY CURSOR] @{channel}: cursor={latest_id} reason={reason}")
         except Exception as exc:
             print(f"[HISTORY CURSOR ERROR] @{channel}: {type(exc).__name__}: {exc}")
-
-
-def persist_category_stats(run_at, snapshots, category_results):
-    if not stats_db_ready:
-        return
-    by_id = {item["id"]: item for item in snapshots}
-    received_by_channel = {
-        channel: sum(1 for item in snapshots if item["channel"] == channel)
-        for channel in ALL_CONTENT_CHANNELS
-    }
-    try:
-        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
-            for category_key, category_data in category_results.items():
-                selected_ids = set(category_data.get("selected_ids", []))
-                for channel in ALL_CONTENT_CHANNELS:
-                    valid = sum(
-                        1 for message_id in selected_ids
-                        if message_id in by_id and by_id[message_id]["channel"] == channel
-                    )
-                    connection.execute(
-                        """INSERT OR REPLACE INTO hourly_category_stats
-                           (run_at, category, channel, received, valid)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (run_at, category_key, channel, received_by_channel[channel], valid),
-                    )
-                for message_id in selected_ids:
-                    item = by_id.get(message_id)
-                    if item:
-                        connection.execute(
-                            """INSERT OR REPLACE INTO hourly_classifications
-                               (run_at, message_id, channel, category, preview)
-                               VALUES (?, ?, ?, ?, ?)""",
-                            (run_at, message_id, item["channel"], category_key, item["text"][:300]),
-                        )
-    except Exception as exc:
-        print(f"[STATS DB ERROR] write failed: {type(exc).__name__}: {exc}")
-
-
-def parse_first_json_object(raw):
-    """Legacy fallback: decode the first JSON object and report trailing anomalies."""
-    cleaned = raw.strip()
-    cleaned = re.sub(r"^\x60\x60\x60(?:json)?\\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\\s*\x60\x60\x60$", "", cleaned)
-    object_start = cleaned.find("{")
-    if object_start < 0:
-        raise json.JSONDecodeError("No JSON object found", cleaned, 0)
-    parsed, end_index = json.JSONDecoder().raw_decode(cleaned[object_start:])
-    trailing = cleaned[object_start + end_index:].strip()
-    print(
-        "[STRUCTURED OUTPUT LEGACY PARSER] primary json.loads failed; "
-        f"first object extracted trailing_data={bool(trailing)}"
-    )
-    if not isinstance(parsed, dict):
-        raise ValueError("AI response root must be a JSON object")
-    return parsed
 
 
 def normalize_category_result(parsed, messages):
@@ -1561,13 +947,13 @@ async def send_to_owner(text):
 async def startup_self_check():
     """Validate persistent storage and Bot API destinations before going operational."""
     failures = []
-    if not stats_db_ready:
+    if not state_store.stats_db_ready:
         failures.append("persistent SQLite database is unavailable")
     else:
         marker = f"startup-{time.time_ns()}"
-        if not persist_operational_state("startup_self_check", marker):
+        if not state_store.persist_operational_state("startup_self_check", marker):
             failures.append("persistent SQLite database is not writable")
-        elif load_operational_state("startup_self_check") != marker:
+        elif state_store.load_operational_state("startup_self_check") != marker:
             failures.append("persistent SQLite database read-after-write failed")
 
     destinations = {
@@ -1606,7 +992,7 @@ async def build_summary(night_recap=False, trigger="scheduled"):
     """Build and publish one summary; retain durable input until delivery is confirmed."""
     global last_summary_success_time, summary_watchdog_attempts
     async with summary_lock:
-        if not TEST_MODE and stats_db_ready and production_client and content_source_entities:
+        if not TEST_MODE and state_store.stats_db_ready and production_client and content_source_entities:
             await sync_normal_history(production_client, content_source_entities)
 
         snapshots = []
@@ -1614,8 +1000,8 @@ async def build_summary(night_recap=False, trigger="scheduled"):
         snapshot_message_keys = []
         received_by_channel = {}
 
-        if not TEST_MODE and stats_db_ready:
-            pending_rows = load_pending_normal_messages()
+        if not TEST_MODE and state_store.stats_db_ready:
+            pending_rows = state_store.load_pending_normal_messages()
             for channel in ALL_CONTENT_CHANNELS:
                 channel_rows = [row for row in pending_rows if row["channel"] == channel]
                 received_by_channel[channel] = len(channel_rows)
@@ -1727,9 +1113,9 @@ async def build_summary(night_recap=False, trigger="scheduled"):
             )
             return False
 
-        persist_category_stats(run_at, snapshots, category_results)
-        if not TEST_MODE and stats_db_ready:
-            mark_normal_messages_processed(snapshot_message_keys)
+        state_store.persist_category_stats(run_at, snapshots, category_results, ALL_CONTENT_CHANNELS)
+        if not TEST_MODE and state_store.stats_db_ready:
+            state_store.mark_normal_messages_processed(snapshot_message_keys)
         else:
             for channel, length in snapshot_lengths.items():
                 del buffers[channel][:length]
@@ -1839,19 +1225,23 @@ def schedule_alert_image_processing(message, channel, clean, edited):
 async def process_alert_image_message(message, channel, clean, edited):
     try:
         if await is_blocked_alert_image(message):
-            set_alert_feed_cursor(channel, max(get_alert_feed_cursor(channel), message.id))
+            state_store.set_alert_feed_cursor(
+                channel, max(state_store.get_alert_feed_cursor(channel), message.id)
+            )
             print(f"[ALERT FILTERED IMAGE] @{channel} id={message.id}")
             return False
         delivered = bool(await schedule_alert_delivery(clean, source=channel))
         if delivered:
-            set_alert_feed_cursor(channel, max(get_alert_feed_cursor(channel), message.id))
+            state_store.set_alert_feed_cursor(
+                channel, max(state_store.get_alert_feed_cursor(channel), message.id)
+            )
             print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
         else:
-            release_alert_feed_delivery(channel, message.id, clean)
+            state_store.release_alert_feed_delivery(channel, message.id, clean)
             forget_failed_alert(clean, channel)
         return delivered
     except asyncio.CancelledError:
-        release_alert_feed_delivery(channel, message.id, clean)
+        state_store.release_alert_feed_delivery(channel, message.id, clean)
         raise
 
 
@@ -1898,25 +1288,25 @@ async def process_alert_feed_message(message, channel, *, edited=False):
     """Filter, deliver and checkpoint one ALERT-feed message."""
     if not alert_active:
         return False
-    if not edited and is_stale_alert_feed_message(channel, message.id):
+    if not edited and state_store.is_stale_alert_feed_message(channel, message.id):
         print(f"[ALERT SKIPPED STALE] @{channel} id={message.id}")
         return False
 
     clean = clean_alert_source_text(message.text or "")
-    cursor = get_alert_feed_cursor(channel)
+    cursor = state_store.get_alert_feed_cursor(channel)
     if (
         len(clean) < 5
         or is_non_operational_alert_message(clean)
         or is_pure_ad(clean)
     ):
-        set_alert_feed_cursor(channel, max(cursor, message.id))
+        state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT FILTERED] @{channel} id={message.id}")
         return False
-    if not claim_alert_feed_delivery(channel, message.id, clean):
+    if not state_store.claim_alert_feed_delivery(channel, message.id, clean):
         print(f"[ALERT SKIPPED DELIVERED] @{channel} id={message.id} edited={edited}")
         return False
     if not should_publish_alert(clean, channel):
-        set_alert_feed_cursor(channel, max(cursor, message.id))
+        state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
         return False
 
     if getattr(message, "photo", None):
@@ -1926,10 +1316,10 @@ async def process_alert_feed_message(message, channel, *, edited=False):
 
     delivered = bool(await schedule_alert_delivery(clean, source=channel))
     if delivered:
-        set_alert_feed_cursor(channel, max(cursor, message.id))
+        state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
     else:
-        release_alert_feed_delivery(channel, message.id, clean)
+        state_store.release_alert_feed_delivery(channel, message.id, clean)
         forget_failed_alert(clean, channel)
     return delivered
 
@@ -1972,7 +1362,7 @@ async def publish_test_source(client, text):
 async def main():
     global http_client, send_lock, test_command_lock, translation_slots, summary_lock
     global alert_transition_lock
-    global telegram_alert_state, stats_db_ready, production_client, content_source_entities
+    global telegram_alert_state, production_client, content_source_entities
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
         http2=False,
@@ -1982,13 +1372,13 @@ async def main():
     translation_slots = asyncio.Semaphore(8)
     summary_lock = asyncio.Lock()
     alert_transition_lock = asyncio.Lock()
-    stats_db_ready = initialize_stats_db()
+    state_store.stats_db_ready = state_store.initialize_stats_db()
 
     client = None
     session_lock = None
     if not TEST_MODE or TEST_TELEGRAM_SESSION:
         if not TEST_MODE:
-            session_lock = acquire_telethon_session_lock()
+            session_lock = state_store.acquire_telethon_session_lock()
             if TELETHON_HANDOFF_DELAY:
                 print(
                     f"[TELETHON HANDOFF] waiting {TELETHON_HANDOFF_DELAY:g}s "
@@ -2126,7 +1516,7 @@ async def main():
             state = classify_telegram_alert(recent.text or "")
             if state is not None:
                 telegram_alert_state = state
-                persist_trigger_observation(state, recent.id, recent.date)
+                state_store.persist_trigger_observation(state, recent.id, recent.date)
                 print(f"✅ Telegram alert state loaded: {'ACTIVE' if state else 'CLEAR'}")
                 break
 
@@ -2195,7 +1585,7 @@ async def main():
                 state = classify_telegram_alert(clean)
                 if state is not None:
                     telegram_alert_state = state
-                    persist_trigger_observation(state, event.message.id, event.message.date)
+                    state_store.persist_trigger_observation(state, event.message.id, event.message.date)
                     print(f"Telegram trigger update: {'ACTIVE' if state else 'CLEAR'}")
                     await reconcile_alert_state(f"@{BACKUP_TRIGGER_CHANNEL}")
                 return
@@ -2221,7 +1611,7 @@ async def main():
             if channel_buffer is None:
                 print(f"[IGNORED NON-CONTENT CHAT] channel={channel} chat_id={event.chat_id}")
                 return
-            if stats_db_ready and persist_normal_message(
+            if state_store.stats_db_ready and state_store.persist_normal_message(
                 channel, event.message.id, event.message.date, clean
             ):
                 print(f"[PERSISTED LIVE] @{channel}: id={event.message.id} text={clean[:80]}")

@@ -95,23 +95,23 @@ class FakeHistoryClient:
 class PersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.original_db_path = monitor.CATEGORY_STATS_DB_PATH
-        self.original_stats_ready = monitor.stats_db_ready
+        self.original_db_path = monitor.state_store.CATEGORY_STATS_DB_PATH
+        self.original_stats_ready = monitor.state_store.stats_db_ready
         self.original_client = monitor.production_client
         self.original_entities = monitor.content_source_entities
         self.original_analyzer = monitor.analyze_hourly_matrix
         self.original_summary_sender = monitor.send_to_summary_group
         self.original_owner_sender = monitor.send_to_owner
-        monitor.CATEGORY_STATS_DB_PATH = str(Path(self.temp_dir.name) / "monitor.sqlite3")
-        monitor.stats_db_ready = monitor.initialize_stats_db()
+        monitor.state_store.CATEGORY_STATS_DB_PATH = str(Path(self.temp_dir.name) / "monitor.sqlite3")
+        monitor.state_store.stats_db_ready = monitor.state_store.initialize_stats_db()
         monitor.production_client = None
         monitor.content_source_entities = {}
         monitor.summary_lock = asyncio.Lock()
         monitor.summary_watchdog_attempts.clear()
 
     async def asyncTearDown(self):
-        monitor.CATEGORY_STATS_DB_PATH = self.original_db_path
-        monitor.stats_db_ready = self.original_stats_ready
+        monitor.state_store.CATEGORY_STATS_DB_PATH = self.original_db_path
+        monitor.state_store.stats_db_ready = self.original_stats_ready
         monitor.production_client = self.original_client
         monitor.content_source_entities = self.original_entities
         monitor.analyze_hourly_matrix = self.original_analyzer
@@ -129,24 +129,24 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         client = FakeHistoryClient({channel: [] for channel in monitor.ALL_CONTENT_CHANNELS})
         client.messages_by_channel[monitor.KYIV_INFO_CHANNEL] = messages
 
-        self.assertTrue(monitor.persist_normal_message(
+        self.assertTrue(monitor.state_store.persist_normal_message(
             monitor.KYIV_INFO_CHANNEL, 102, messages[1].date, messages[1].text
         ))
         self.assertTrue(await monitor.sync_normal_history(client, entities))
 
-        pending = monitor.load_pending_normal_messages()
+        pending = monitor.state_store.load_pending_normal_messages()
         self.assertEqual([row["message_id"] for row in pending], [101, 102])
-        self.assertEqual(monitor.get_source_cursor(monitor.KYIV_INFO_CHANNEL), 102)
+        self.assertEqual(monitor.state_store.get_source_cursor(monitor.KYIV_INFO_CHANNEL), 102)
 
         messages.append(FakeTelegramMessage(
             103, "A new road closure was announced in Kyiv.", now
         ))
         self.assertTrue(await monitor.sync_normal_history(client, entities))
         self.assertEqual(
-            [row["message_id"] for row in monitor.load_pending_normal_messages()],
+            [row["message_id"] for row in monitor.state_store.load_pending_normal_messages()],
             [101, 102, 103],
         )
-        self.assertEqual(monitor.get_source_cursor(monitor.KYIV_INFO_CHANNEL), 103)
+        self.assertEqual(monitor.state_store.get_source_cursor(monitor.KYIV_INFO_CHANNEL), 103)
 
     async def test_bootstrap_advances_cursor_when_all_messages_are_old(self):
         old = datetime.now(timezone.utc) - timedelta(hours=3)
@@ -158,13 +158,13 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         self.assertTrue(await monitor.sync_normal_history(client, entities))
-        self.assertEqual(monitor.load_pending_normal_messages(), [])
-        self.assertEqual(monitor.get_source_cursor(channel), 901)
+        self.assertEqual(monitor.state_store.load_pending_normal_messages(), [])
+        self.assertEqual(monitor.state_store.get_source_cursor(channel), 901)
 
     async def test_failed_delivery_retains_pending_and_success_marks_processed(self):
         channel = monitor.KYIV_INFO_CHANNEL
         message_id = 501
-        monitor.persist_normal_message(
+        monitor.state_store.persist_normal_message(
             channel,
             message_id,
             datetime.now(timezone.utc),
@@ -196,11 +196,11 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         monitor.send_to_owner = fake_owner_sender
 
         self.assertFalse(await monitor.build_summary(trigger="failure-test"))
-        self.assertEqual(len(monitor.load_pending_normal_messages()), 1)
+        self.assertEqual(len(monitor.state_store.load_pending_normal_messages()), 1)
 
         self.assertTrue(await monitor.build_summary(trigger="success-test"))
-        self.assertEqual(monitor.load_pending_normal_messages(), [])
-        with sqlite3.connect(monitor.CATEGORY_STATS_DB_PATH) as connection:
+        self.assertEqual(monitor.state_store.load_pending_normal_messages(), [])
+        with sqlite3.connect(monitor.state_store.CATEGORY_STATS_DB_PATH) as connection:
             status = connection.execute(
                 "SELECT status FROM normal_messages WHERE channel = ? AND message_id = ?",
                 (channel, message_id),
@@ -209,14 +209,14 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_alert_discards_pending_and_clear_advances_all_cursors(self):
         now = datetime.now(timezone.utc)
-        monitor.persist_normal_message(
+        monitor.state_store.persist_normal_message(
             monitor.KYIV_INFO_CHANNEL,
             700,
             now,
             "A pending NORMAL message that must not cross into ALERT.",
         )
-        monitor.discard_pending_normal_messages("unit-test-alert")
-        self.assertEqual(monitor.load_pending_normal_messages(), [])
+        monitor.state_store.discard_pending_normal_messages("unit-test-alert")
+        self.assertEqual(monitor.state_store.load_pending_normal_messages(), [])
 
         entities = {channel: channel for channel in monitor.ALL_CONTENT_CHANNELS}
         messages_by_channel = {
@@ -227,37 +227,37 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         await monitor.advance_normal_cursors_to_latest(client, entities, "unit-test-clear")
 
         self.assertEqual(
-            [monitor.get_source_cursor(channel) for channel in monitor.ALL_CONTENT_CHANNELS],
+            [monitor.state_store.get_source_cursor(channel) for channel in monitor.ALL_CONTENT_CHANNELS],
             [800 + index for index, _ in enumerate(monitor.ALL_CONTENT_CHANNELS)],
         )
 
     async def test_trigger_observation_is_persisted_as_one_state_snapshot(self):
         observed_at = datetime.now(timezone.utc)
-        self.assertTrue(monitor.persist_trigger_observation(True, 991, observed_at))
-        self.assertEqual(monitor.load_operational_state("telegram_alert_state"), "1")
-        self.assertEqual(monitor.load_operational_state("telegram_alert_message_id"), "991")
+        self.assertTrue(monitor.state_store.persist_trigger_observation(True, 991, observed_at))
+        self.assertEqual(monitor.state_store.load_operational_state("telegram_alert_state"), "1")
+        self.assertEqual(monitor.state_store.load_operational_state("telegram_alert_message_id"), "991")
         self.assertEqual(
-            monitor.load_operational_state("telegram_alert_message_at"),
+            monitor.state_store.load_operational_state("telegram_alert_message_at"),
             monitor.utc_iso(observed_at),
         )
 
     async def test_alert_delivery_claim_survives_restart_and_releases_on_failure(self):
         text = "Балістична загроза зі сходу"
-        self.assertTrue(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text))
-        self.assertFalse(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text))
-        monitor.release_alert_feed_delivery("kyiv_alerts", 123, text)
-        self.assertTrue(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text))
-        self.assertTrue(monitor.claim_alert_feed_delivery("kyiv_alerts", 123, text + "! Нова інформація"))
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery("kyiv_alerts", 123, text))
+        self.assertFalse(monitor.state_store.claim_alert_feed_delivery("kyiv_alerts", 123, text))
+        monitor.state_store.release_alert_feed_delivery("kyiv_alerts", 123, text)
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery("kyiv_alerts", 123, text))
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery("kyiv_alerts", 123, text + "! Нова інформація"))
 
     async def test_telethon_session_lock_allows_only_one_worker(self):
         path = str(Path(self.temp_dir.name) / "telethon.lock")
-        first = monitor.acquire_telethon_session_lock(path)
+        first = monitor.state_store.acquire_telethon_session_lock(path)
         try:
             with self.assertRaises(BlockingIOError):
-                monitor.acquire_telethon_session_lock(path, blocking=False)
+                monitor.state_store.acquire_telethon_session_lock(path, blocking=False)
         finally:
             first.close()
-        replacement = monitor.acquire_telethon_session_lock(path, blocking=False)
+        replacement = monitor.state_store.acquire_telethon_session_lock(path, blocking=False)
         replacement.close()
 
 
@@ -516,9 +516,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         channel = monitor.ALERT_FEED_CHANNEL
         now = datetime.now(timezone.utc)
         original_active = monitor.alert_active
-        original_get_cursor = monitor.get_alert_feed_cursor
-        original_set_cursor = monitor.set_alert_feed_cursor
-        original_claim = monitor.claim_alert_feed_delivery
+        original_get_cursor = monitor.state_store.get_alert_feed_cursor
+        original_set_cursor = monitor.state_store.set_alert_feed_cursor
+        original_claim = monitor.state_store.claim_alert_feed_delivery
         original_schedule = monitor.schedule_alert_delivery
         delivered = []
 
@@ -528,9 +528,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             monitor.alert_active = True
-            monitor.get_alert_feed_cursor = lambda name: 0
-            monitor.set_alert_feed_cursor = lambda name, value: True
-            monitor.claim_alert_feed_delivery = lambda name, message_id, text: True
+            monitor.state_store.get_alert_feed_cursor = lambda name: 0
+            monitor.state_store.set_alert_feed_cursor = lambda name, value: True
+            monitor.state_store.claim_alert_feed_delivery = lambda name, message_id, text: True
             monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
                 fake_delivery(text, source)
             )
@@ -547,9 +547,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await monitor.process_alert_feed_message(missile_estimate, channel))
         finally:
             monitor.alert_active = original_active
-            monitor.get_alert_feed_cursor = original_get_cursor
-            monitor.set_alert_feed_cursor = original_set_cursor
-            monitor.claim_alert_feed_delivery = original_claim
+            monitor.state_store.get_alert_feed_cursor = original_get_cursor
+            monitor.state_store.set_alert_feed_cursor = original_set_cursor
+            monitor.state_store.claim_alert_feed_delivery = original_claim
             monitor.schedule_alert_delivery = original_schedule
             monitor.recent_alert_messages.clear()
 
@@ -566,8 +566,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         gate = asyncio.Event()
         cursors = {channel: 30000}
         original_image_check = monitor.is_blocked_alert_image
-        original_get_cursor = monitor.get_alert_feed_cursor
-        original_set_cursor = monitor.set_alert_feed_cursor
+        original_get_cursor = monitor.state_store.get_alert_feed_cursor
+        original_set_cursor = monitor.state_store.set_alert_feed_cursor
 
         async def blocked_after_delay(message):
             await gate.wait()
@@ -575,8 +575,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             monitor.is_blocked_alert_image = blocked_after_delay
-            monitor.get_alert_feed_cursor = lambda name: cursors[name]
-            monitor.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
+            monitor.state_store.get_alert_feed_cursor = lambda name: cursors[name]
+            monitor.state_store.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
             message = FakeTelegramMessage(
                 30001, "Оперативне оновлення", datetime.now(timezone.utc), photo=object()
             )
@@ -591,8 +591,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cursors[channel], 30002)
         finally:
             monitor.is_blocked_alert_image = original_image_check
-            monitor.get_alert_feed_cursor = original_get_cursor
-            monitor.set_alert_feed_cursor = original_set_cursor
+            monitor.state_store.get_alert_feed_cursor = original_get_cursor
+            monitor.state_store.set_alert_feed_cursor = original_set_cursor
 
     async def test_alert_poller_recovers_messages_after_cursor(self):
         now = datetime.now(timezone.utc)
@@ -606,8 +606,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         original_active = monitor.alert_active
         original_generation = monitor.alert_generation
         original_handler = monitor.handle_alert_message
-        original_get_cursor = monitor.get_alert_feed_cursor
-        original_set_cursor = monitor.set_alert_feed_cursor
+        original_get_cursor = monitor.state_store.get_alert_feed_cursor
+        original_set_cursor = monitor.state_store.set_alert_feed_cursor
         delivered = []
         cursors = {channel: 125071}
 
@@ -619,15 +619,15 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.alert_active = True
             monitor.alert_generation = 7
             monitor.handle_alert_message = fake_handler
-            monitor.get_alert_feed_cursor = lambda name: cursors.get(name, 0)
-            monitor.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
+            monitor.state_store.get_alert_feed_cursor = lambda name: cursors.get(name, 0)
+            monitor.state_store.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
             count = await monitor.backfill_alert_feed(client, entities)
         finally:
             monitor.alert_active = original_active
             monitor.alert_generation = original_generation
             monitor.handle_alert_message = original_handler
-            monitor.get_alert_feed_cursor = original_get_cursor
-            monitor.set_alert_feed_cursor = original_set_cursor
+            monitor.state_store.get_alert_feed_cursor = original_get_cursor
+            monitor.state_store.set_alert_feed_cursor = original_set_cursor
 
         self.assertEqual(count, 2)
         self.assertEqual([item[0] for item in delivered], [
@@ -641,10 +641,10 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         channel = monitor.ALERT_FEED_CHANNEL
         original_active = monitor.alert_active
         original_generation = monitor.alert_generation
-        original_get_cursor = monitor.get_alert_feed_cursor
-        original_set_cursor = monitor.set_alert_feed_cursor
-        original_claim = monitor.claim_alert_feed_delivery
-        original_release = monitor.release_alert_feed_delivery
+        original_get_cursor = monitor.state_store.get_alert_feed_cursor
+        original_set_cursor = monitor.state_store.set_alert_feed_cursor
+        original_claim = monitor.state_store.claim_alert_feed_delivery
+        original_release = monitor.state_store.release_alert_feed_delivery
         original_schedule = monitor.schedule_alert_delivery
         cursors = {channel: 18368}
         claims = set()
@@ -658,13 +658,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         try:
             monitor.alert_active = True
             monitor.alert_generation = 3
-            monitor.get_alert_feed_cursor = lambda name: cursors.get(name, 0)
-            monitor.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
-            monitor.claim_alert_feed_delivery = lambda name, message_id, text: (
+            monitor.state_store.get_alert_feed_cursor = lambda name: cursors.get(name, 0)
+            monitor.state_store.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
+            monitor.state_store.claim_alert_feed_delivery = lambda name, message_id, text: (
                 False if (name, message_id, monitor.normalize_alert_for_dedup(text)) in claims
                 else not claims.add((name, message_id, monitor.normalize_alert_for_dedup(text)))
             )
-            monitor.release_alert_feed_delivery = lambda name, message_id, text: claims.discard(
+            monitor.state_store.release_alert_feed_delivery = lambda name, message_id, text: claims.discard(
                 (name, message_id, monitor.normalize_alert_for_dedup(text))
             )
             monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
@@ -696,10 +696,10 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         finally:
             monitor.alert_active = original_active
             monitor.alert_generation = original_generation
-            monitor.get_alert_feed_cursor = original_get_cursor
-            monitor.set_alert_feed_cursor = original_set_cursor
-            monitor.claim_alert_feed_delivery = original_claim
-            monitor.release_alert_feed_delivery = original_release
+            monitor.state_store.get_alert_feed_cursor = original_get_cursor
+            monitor.state_store.set_alert_feed_cursor = original_set_cursor
+            monitor.state_store.claim_alert_feed_delivery = original_claim
+            monitor.state_store.release_alert_feed_delivery = original_release
             monitor.schedule_alert_delivery = original_schedule
 
         self.assertEqual(cursors[channel], 18370)
@@ -724,23 +724,23 @@ class AlertLiveCursorGuardTests(unittest.TestCase):
     """Late Telethon replays must not republish what the poller already covered."""
 
     def setUp(self):
-        self.original_get_cursor = monitor.get_alert_feed_cursor
+        self.original_get_cursor = monitor.state_store.get_alert_feed_cursor
         self.cursors = {monitor.ALERT_FEED_CHANNEL: 125073}
-        monitor.get_alert_feed_cursor = lambda name: self.cursors.get(name, 0)
+        monitor.state_store.get_alert_feed_cursor = lambda name: self.cursors.get(name, 0)
 
     def tearDown(self):
-        monitor.get_alert_feed_cursor = self.original_get_cursor
+        monitor.state_store.get_alert_feed_cursor = self.original_get_cursor
 
     def test_message_at_or_before_cursor_is_stale(self):
-        self.assertTrue(monitor.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125073))
-        self.assertTrue(monitor.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125000))
+        self.assertTrue(monitor.state_store.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125073))
+        self.assertTrue(monitor.state_store.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125000))
 
     def test_message_after_cursor_is_fresh(self):
-        self.assertFalse(monitor.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125074))
+        self.assertFalse(monitor.state_store.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 125074))
 
     def test_without_cursor_nothing_is_stale(self):
         self.cursors.clear()
-        self.assertFalse(monitor.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 5))
+        self.assertFalse(monitor.state_store.is_stale_alert_feed_message(monitor.ALERT_FEED_CHANNEL, 5))
 
 
 if __name__ == "__main__":
