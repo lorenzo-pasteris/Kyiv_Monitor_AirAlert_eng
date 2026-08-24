@@ -174,7 +174,7 @@ def build_alert_translation_prompt(text: str) -> str:
         "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
         "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
         "Mandatory alert glossary:\n"
-        "- ракета / ракети = missile(s), NEVER cruise missile(s) unless the source says крилата or Бандероль\n"
+        "- ракета / ракети = missile(s), NEVER cruise missile(s) unless the source says крилата\n"
         "- крилата ракета / крилаті / крилатих = cruise missile(s), never 'winged'\n"
         "- циркон / циркони = Zircon missile(s), never Circon or Circone\n"
         "- реактивний БпЛА / реактивні БпЛА / реактив = jet-powered UAV(s), never aircraft or reactor\n"
@@ -191,11 +191,12 @@ def build_alert_translation_prompt(text: str) -> str:
         "- ППО працює = air defence is engaging\n"
         "- пуск / повторні пуски = launch / repeated launches\n"
         "- курсом на / в напрямку = heading toward\n"
-        "- Бандероль / бандеролі / бандеролям = cruise missile(s), never S8000, parcel, package, or UAV\n"
+        "- Бандероль = Banderol; бандеролі = Banderols; бандеролям = Banderols. "
+        "Preserve this codeword and NEVER infer a weapon type from it\n"
         "- подарунки / посилки can be alert-channel euphemisms for incoming threats; never translate "
         "them literally as gifts or parcels. Name UAVs or missiles only when the source establishes it.\n\n"
         "Example: 'Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів' means "
-        "'No threat from cruise missiles. The alert was issued for a jet-powered UAV "
+        "'No threat from Banderols. The alert was issued for a jet-powered UAV "
         "heading toward Brovary.'\n\n"
         "Never ask for more context. A one-word place, target, or outcome is intentional and must be "
         "translated as a one-word fragment. Examples: 'Дарниця' = 'Darnytsia'; 'ТЕЦ-5' = "
@@ -219,7 +220,7 @@ def translate_known_terse_fragment(text: str) -> str | None:
         "збито": "Shot down",
         "балістика на київ": "Ballistic threat to Kyiv!",
         "відбій по балістиці": "The ballistic threat has been lifted.",
-        "по балістиці очікуємо на відбій": "The ballistic threat is expected to be lifted shortly.",
+        "по балістиці очікуємо на відбій": "Awaiting the all-clear for the ballistic threat.",
         "поки просто чекаємо на відбої по балістиці": "We are waiting for the ballistic threat to be lifted.",
     }.get(normalized)
 
