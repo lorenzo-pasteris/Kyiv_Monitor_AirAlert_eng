@@ -464,12 +464,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         source = "Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів"
         prompt = monitor.build_alert_translation_prompt(source)
         self.assertIn("jet-powered UAV(s)", prompt)
-        self.assertIn("cruise missile(s)", prompt)
-        self.assertIn("cruise missile(s), never S8000", prompt)
         self.assertIn("NEVER cruise missile(s) unless", prompt)
         self.assertIn("no high-speed targets", prompt)
-        self.assertNotIn("S8000 Banderol", prompt)
-        self.assertIn("No threat from cruise missiles", prompt)
+        self.assertIn("Бандероль = Banderol", prompt)
+        self.assertIn("бандеролі = Banderols", prompt)
+        self.assertIn("NEVER infer a weapon type", prompt)
+        self.assertIn("No threat from Banderols", prompt)
+        self.assertNotIn("Бандероль / бандеролі / бандеролям = cruise missile(s)", prompt)
         self.assertIn("never 'minus'", prompt)
         self.assertIn("never translate them literally as gifts or parcels", prompt)
         self.assertTrue(prompt.endswith(source))
@@ -480,7 +481,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.translate_known_terse_fragment("Збили"), "Shot down")
         self.assertEqual(
             monitor.translate_known_terse_fragment("По балістиці очікуємо на відбій"),
-            "The ballistic threat is expected to be lifted shortly.",
+            "Awaiting the all-clear for the ballistic threat.",
         )
         self.assertEqual(
             monitor.translate_known_terse_fragment("Балістика на Київ!"),
