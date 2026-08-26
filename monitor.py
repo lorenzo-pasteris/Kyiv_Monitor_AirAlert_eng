@@ -699,7 +699,7 @@ def normalize_category_result(parsed, messages):
         normalized[category_key] = {
             "selected_ids": list(dict.fromkeys(selected_ids)),
             "bullets": [
-                bullet.strip().lstrip("•- ").strip()[:180]
+                bullet.strip().lstrip("•- ").strip()
                 for bullet in bullets
                 if bullet.strip()
             ][:5],
@@ -739,6 +739,7 @@ async def analyze_hourly_matrix(messages):
         f"Categories:\n{category_text}\n\n"
         "Use the required structured output schema. selected_ids must contain exact message IDs that qualify. "
         "bullets must contain at most five concise English summary strings per category. Within each category, "
+        "Write complete bullets; never truncate a sentence or word. "
         "order bullets chronologically from the earliest event/message time to the latest. Preserve stated "
         "locations, uncertainty, times and quantities.\n\nMessages:\n" + message_text
     )

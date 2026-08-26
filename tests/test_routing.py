@@ -473,6 +473,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Бандероль / бандеролі / бандеролям = cruise missile(s)", prompt)
         self.assertIn("never 'minus'", prompt)
         self.assertIn("never translate them literally as gifts or parcels", prompt)
+        self.assertIn("never good or friendly drones", prompt)
+        self.assertIn("air defence may become active", prompt)
         self.assertTrue(prompt.endswith(source))
 
     async def test_known_terse_alert_fragments_never_need_model_context(self):

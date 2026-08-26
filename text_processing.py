@@ -189,6 +189,8 @@ def build_alert_translation_prompt(text: str) -> str:
         "- без швидкісних = no high-speed targets, never no jet-powered UAVs\n"
         "- є влучання = an impact is reported; preserve singular and never add 'direct'\n"
         "- ППО працює = air defence is engaging\n"
+        "- добрі дрони is ironic alert-channel slang: translate as drones, never good or friendly drones\n"
+        "- місто/область може підключитися means its air defence may become active, never that the place itself may join in\n"
         "- пуск / повторні пуски = launch / repeated launches\n"
         "- курсом на / в напрямку = heading toward\n"
         "- Бандероль = Banderol; бандеролі = Banderols; бандеролям = Banderols. "

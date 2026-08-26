@@ -47,19 +47,27 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("maxItems", schema_text)
         self.assertNotIn("maxLength", schema_text)
 
-    def test_normalizer_caps_bullets_without_schema_limits(self):
+    def test_normalizer_caps_bullet_count_without_truncating_text(self):
         parsed = {
             "categories": {
                 key: {"selected_ids": [], "bullets": []}
                 for key in monitor.CATEGORIES
             }
         }
-        parsed["categories"]["kyiv_city"]["bullets"] = ["x" * 250] * 7
+        bullets = [
+            "Ratcliffe warned Putin of planned US-Ukraine operations to block southern ports "
+            "and proposed a Donbas compromise; Putin threatened threefold stronger strikes "
+            "and demanded that Ukraine cease its attacks.",
+            "Belarus is constructing a new military training ground near the Ukrainian border "
+            "at Yakimivka station, with a railway branch for rapid unloading of heavy wheeled "
+            "and tracked military vehicles.",
+        ]
+        parsed["categories"]["kyiv_city"]["bullets"] = bullets * 4
 
         normalized = monitor.normalize_category_result(parsed, [])
 
         self.assertEqual(len(normalized["kyiv_city"]["bullets"]), 5)
-        self.assertTrue(all(len(item) == 180 for item in normalized["kyiv_city"]["bullets"]))
+        self.assertEqual(normalized["kyiv_city"]["bullets"][:2], bullets)
 
     async def test_failed_public_start_does_not_commit_state_and_can_retry(self):
         results = [None, {"message_id": 42}]
