@@ -38,6 +38,7 @@ from text_processing import (
     is_translation_meta_output,  # noqa: F401 -- re-exported for tests/test_routing.py
     is_valid_alert_translation,
     normalize_alert_for_dedup,
+    parse_alert_gate_output,
     parse_first_json_object,
     parse_ukraine_alarm_kyiv_state,
     strip_mixed_alert_commentary,
@@ -492,18 +493,12 @@ async def translate_message(text):
             )
         r.raise_for_status()
         result = r.json()["content"][0]["text"].strip()
-        if not is_valid_alert_translation(result):
-            print(f"[TRANSLATION REJECTED] input={text[:120]!r} output={result[:120]!r}")
-            try:
-                await send_to_owner(
-                    f"Ops: invalid translation blocked; nothing published.\n"
-                    f"Input: {text[:300]}\nModel output rejected: {result[:300]}"
-                )
-            except Exception as ops_err:
-                print(f"Ops notify failed: {ops_err}")
-            return None
-        print(f"[TRANSLATION OK] input={text[:120]!r} output={result[:120]!r}")
-        return result
+        decision, translation, reason = parse_alert_gate_output(result)
+        if decision == "DROP":
+            print(f"[ALERT SEMANTIC DROP] reason={reason!r} input={text[:120]!r}")
+            return False
+        print(f"[TRANSLATION OK] input={text[:120]!r} output={translation[:120]!r}")
+        return translation
     except Exception as e:
         print(f"Translation error: {e}")
         try:
@@ -1275,6 +1270,8 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
 
     if generation != alert_generation or not alert_active:
         print(f"[ALERT STALE] translation discarded source=@{source} generation={generation}")
+        return False
+    if translation is False:
         return False
     if not translation:
         print(f"[ALERT NOT PUBLISHED] translation unavailable source=@{source}")

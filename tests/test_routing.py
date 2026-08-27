@@ -495,9 +495,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.translate_known_terse_fragment("Дарниця"), "Darnytsia")
         self.assertEqual(monitor.translate_known_terse_fragment("ТЕЦ-5"), "CHP-5")
         self.assertEqual(monitor.translate_known_terse_fragment("Збили"), "Shot down")
-        self.assertEqual(
-            monitor.translate_known_terse_fragment("По балістиці очікуємо на відбій"),
-            "Awaiting the all-clear for the ballistic threat.",
+        self.assertIsNone(
+            monitor.translate_known_terse_fragment("По балістиці очікуємо на відбій")
         )
         self.assertEqual(
             monitor.translate_known_terse_fragment("Балістика на Київ!"),
@@ -507,6 +506,27 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         prompt = monitor.build_alert_translation_prompt("Дарниця")
         self.assertIn("Never ask for more context", prompt)
         self.assertIn("'Дарниця' = 'Darnytsia'", prompt)
+
+    async def test_semantic_alert_gate_is_general_and_fails_closed(self):
+        prompt = monitor.build_alert_translation_prompt("Відбій по столиці планується?")
+        self.assertIn("NEW, CONCRETE, CURRENT operational", prompt)
+        self.assertIn("rhetorical questions", prompt)
+        self.assertIn("When uncertain, DROP", prompt)
+
+        self.assertEqual(
+            monitor.parse_alert_gate_output(
+                '{"decision":"DROP","translation":"ignored","reason":"commentary"}'
+            ),
+            ("DROP", "", "commentary"),
+        )
+        self.assertEqual(
+            monitor.parse_alert_gate_output(
+                '{"decision":"PUBLISH","translation":"UAV heading toward Kyiv.","reason":"current_threat"}'
+            ),
+            ("PUBLISH", "UAV heading toward Kyiv.", "current_threat"),
+        )
+        with self.assertRaises(ValueError):
+            monitor.parse_alert_gate_output('{"translation":"Maybe publish this"}')
 
     async def test_model_meta_commentary_can_never_be_published_as_translation(self):
         bad_outputs = (

@@ -179,12 +179,23 @@ def alert_feed_cursor_key(channel: str) -> str:
 
 
 def build_alert_translation_prompt(text: str) -> str:
-    """Build a concise, domain-aware translation request for Ukrainian alert jargon."""
+    """Build one strict relevance-gate and translation request."""
     return (
-        "Translate this Ukrainian/Russian air-defence update into concise, natural English for "
-        "civilians in Kyiv. Use only facts explicitly present in the source. Never add a weapon type, "
+        "You are the strict publication gate for a real-time Kyiv air-alert channel. "
+        "PUBLISH only when this message itself communicates a NEW, CONCRETE, CURRENT operational "
+        "fact relevant to Kyiv city or its immediate approaches: an identified threat; its current "
+        "position, direction or destination; a location currently at risk; air-defence activity or "
+        "interception; confirmed removal of a threat; or an official alert/all-clear transition. "
+        "DROP commentary, opinions, sarcasm, rhetorical questions, complaints, discussion of why or "
+        "when an alert/all-clear was or was not issued, elapsed-time observations, predictions, "
+        "speculation, vague references whose threat or Kyiv relevance depends on missing context, "
+        "distant-region information without an explicit current trajectory toward Kyiv, repetition "
+        "without a new operational fact, and mixed messages whose operational fragment is incidental "
+        "to commentary. Do not infer missing context. When uncertain, DROP.\n\n"
+        "For PUBLISH, translate the operational update into concise, natural English for civilians "
+        "in Kyiv. Use only facts explicitly present in the source. Never add a weapon type, "
         "destination, attribution, channel name, explanation, or missing context. Output ONLY English "
-        "translation; no notes, disclaimers, alternatives, labels, quotation marks, or Cyrillic. Preserve every "
+        "inside the translation field. Preserve every "
         "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
         "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
         "Mandatory alert glossary:\n"
@@ -221,6 +232,9 @@ def build_alert_translation_prompt(text: str) -> str:
         "promo, subscribe, and LIVE tags. Known spellings include Kyiv, Brovary, Boryspil, Obukhiv, "
         "Vyshhorod, Bucha, Irpin, Fastiv, Bila Tserkva, Berezniaky, Osokorky, Pozniaky, Troieshchyna, "
         "Vyshneve, Dymer, Boyarka, Yahotyn, Hostomel, Rembaza, and Koncha-Zaspa.\n\n"
+        "Return exactly one JSON object and nothing else:\n"
+        '{"decision":"PUBLISH|DROP","translation":"","reason":"short_machine_reason"}\n'
+        "For DROP, translation must be empty.\n\n"
         "Source message:\n" + text
     )
 
@@ -236,8 +250,6 @@ def translate_known_terse_fragment(text: str) -> str | None:
         "збито": "Shot down",
         "балістика на київ": "Ballistic threat to Kyiv!",
         "відбій по балістиці": "The ballistic threat has been lifted.",
-        "по балістиці очікуємо на відбій": "Awaiting the all-clear for the ballistic threat.",
-        "поки просто чекаємо на відбої по балістиці": "We are waiting for the ballistic threat to be lifted.",
     }.get(normalized)
 
 
@@ -288,3 +300,21 @@ def parse_first_json_object(raw: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("AI response root must be a JSON object")
     return parsed
+
+
+def parse_alert_gate_output(raw: str) -> tuple[str, str, str]:
+    """Validate the model's publication decision; malformed output fails closed."""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = parse_first_json_object(raw)
+    decision = str(parsed.get("decision", "")).strip().upper()
+    translation = str(parsed.get("translation", "")).strip()
+    reason = str(parsed.get("reason", "")).strip()
+    if decision not in {"PUBLISH", "DROP"}:
+        raise ValueError("AI decision must be PUBLISH or DROP")
+    if decision == "DROP":
+        return decision, "", reason
+    if not is_valid_alert_translation(translation):
+        raise ValueError("PUBLISH requires a valid English translation")
+    return decision, translation, reason
