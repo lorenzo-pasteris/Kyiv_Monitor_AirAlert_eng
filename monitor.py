@@ -40,6 +40,7 @@ from text_processing import (
     normalize_alert_for_dedup,
     parse_first_json_object,
     parse_ukraine_alarm_kyiv_state,
+    strip_mixed_alert_commentary,
     translate_known_terse_fragment,
     utc_iso,
 )
@@ -1246,6 +1247,16 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
     if generation != alert_generation or not alert_active:
         print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
         return False
+
+    original = clean
+    clean = strip_mixed_alert_commentary(clean)
+    if clean != original:
+        await send_to_owner(
+            "💬 <b>COMMENTO PARZIALE</b> — rimosso prima della pubblicazione\n"
+            f"Source: @{html.escape(source)}\n"
+            f"Original: {html.escape(original[:1000])}\n"
+            f"Pubblicato: {html.escape(clean[:1000])}"
+        )
 
     if is_commentary_alert_message(clean):
         print(f"[ALERT COMMENTARY] hidden from public source=@{source}: {clean[:100]}")

@@ -370,6 +370,10 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         kellogg_commentary = "Келлог менш ефективний ніж Петя, всю балістику пропускає"
         engagement_commentary = "У Києві є важко поранені, віримо в медиків"
         glossary_commentary = "Бандероль - крилата ракета"
+        hope_commentary = "Сподіваємось більше нічого не прилетить і буде відбій"
+        camera_speculation = "Ці просто кружляють над Києвом. Не здивуюсь, якщо на них камери"
+        petya_commentary = "Нарешті у Києві вперше за 2 місяці Петя відпрацював на повну"
+        debris_warning = "ППО працює добре, але уламки ніхто не скасовував, тому на вулицю не виходимо"
 
         self.assertTrue(monitor.is_commentary_alert_message(commentary))
         self.assertTrue(monitor.is_commentary_alert_message(rhetorical))
@@ -377,7 +381,17 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.is_commentary_alert_message(kellogg_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(engagement_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(glossary_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(hope_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(camera_speculation))
+        self.assertTrue(monitor.is_commentary_alert_message(petya_commentary))
+        self.assertFalse(monitor.is_commentary_alert_message(debris_warning))
         self.assertFalse(monitor.is_commentary_alert_message(operational))
+        self.assertEqual(
+            monitor.strip_mixed_alert_commentary(
+                "Літають як у себе вдома. Русанівка, Троєщина, Дарниця"
+            ),
+            "Русанівка, Троєщина, Дарниця",
+        )
 
         original_active = monitor.alert_active
         try:

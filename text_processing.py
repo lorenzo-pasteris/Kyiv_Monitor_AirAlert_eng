@@ -44,7 +44,14 @@ COMMENTARY_PATTERNS = (
     r"\b(?:всі спустились|все спустились|на вулицю не йдемо|на улицу не ид[её]м)\b",
     r"\b(?:менш\s+ефектив\w*|менее\s+эффектив\w*|less\s+effective)\b.*\b(?:ніж|чем|than)\b",
     r"\b(?:віримо в медиків|верим в медиков|we believe in the medics)\b",
+    r"\b(?:сподіва\w*|наде\w*|hoping|hopefully)\b.*\b(?:відбій|all clear)\b",
+    r"\b(?:не здивую\w*|не удивлю\w*|wouldn['’]t be surprised)\b",
+    r"\b(?:нарешті|наконец|finally)\b.*\b(?:петя|petya)\b.*\b(?:на повну|на полную|full capacity)\b",
     r"^\s*бандероль\s*[-—:=]\s*крилата ракета\s*[.!]?\s*$",
+)
+
+MIXED_COMMENTARY_PREFIXES = (
+    r"^\s*(?:літа\w*|лета\w*|flying around)\s+(?:як у себе вдома|как у себя дома|like they own the place)[.!…]*\s*",
 )
 
 
@@ -116,6 +123,13 @@ def is_actionable_alert_message(text: str) -> bool:
 def is_commentary_alert_message(text: str) -> bool:
     """Identify opinions, rhetorical complaints and speculation in an alert feed."""
     return any(re.search(pattern, text, re.I) for pattern in COMMENTARY_PATTERNS)
+
+
+def strip_mixed_alert_commentary(text: str) -> str:
+    """Remove a known editorial prefix while preserving the tactical remainder."""
+    for pattern in MIXED_COMMENTARY_PREFIXES:
+        text = re.sub(pattern, "", text, flags=re.I)
+    return text.strip()
 
 
 def is_pure_ad(text: str) -> bool:
