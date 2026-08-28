@@ -114,6 +114,21 @@ Lint locally with [ruff](https://docs.astral.sh/ruff/) (`pip install ruff==0.16.
 ruff check .
 ```
 
+`requirements.txt` lists only the direct dependencies (`telethon`, `httpx`) and stays
+the file to edit when adding or upgrading a dependency. `requirements-lock.txt` pins
+the full resolved tree, including transitive packages like `pyaes`, `rsa` and
+`httpcore`. `.github/workflows/deploy-production.yml` sets it as Railway's build
+install command (`RAILPACK_INSTALL_CMD`) before each deploy, and CI installs from it
+too, so every environment runs the exact versions that were tested. Regenerate it
+after changing `requirements.txt`:
+
+```bash
+python3 -m venv /tmp/lockenv && source /tmp/lockenv/bin/activate
+pip install -r requirements.txt
+pip list --format=freeze > requirements-lock.txt
+deactivate
+```
+
 ## Deployment safety
 
 GitHub Actions runs syntax checks and the complete test suite for pull requests and
