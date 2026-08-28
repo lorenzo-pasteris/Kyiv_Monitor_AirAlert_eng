@@ -37,7 +37,7 @@ from text_processing import (
     is_non_operational_alert_message,
     is_pure_ad,
     is_translation_meta_output,  # noqa: F401 -- re-exported for tests/test_routing.py
-    is_valid_alert_translation,
+    is_valid_alert_translation,  # noqa: F401 -- re-exported for tests/test_routing.py
     normalize_alert_for_dedup,
     parse_alert_gate_output,
     parse_first_json_object,
