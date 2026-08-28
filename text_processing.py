@@ -178,11 +178,12 @@ def alert_feed_cursor_key(channel: str) -> str:
     return f"alert_feed_cursor:{channel}"
 
 
-def build_alert_translation_prompt(text: str) -> str:
+def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> str:
     """Build one strict relevance-gate and translation request."""
     return (
         "You are the strict publication gate for a real-time Kyiv air-alert channel. "
-        "PUBLISH only when this message itself communicates a NEW, CONCRETE, CURRENT operational "
+        "PUBLISH only when the current message, interpreted with the supplied recent context, "
+        "communicates a NEW, CONCRETE, CURRENT operational "
         "fact relevant to Kyiv city or its immediate approaches: an identified threat; its current "
         "position, direction or destination; a location currently at risk; air-defence activity or "
         "interception; confirmed removal of a threat; or an official alert/all-clear transition. "
@@ -191,9 +192,18 @@ def build_alert_translation_prompt(text: str) -> str:
         "speculation, vague references whose threat or Kyiv relevance depends on missing context, "
         "distant-region information without an explicit current trajectory toward Kyiv, repetition "
         "without a new operational fact, and mixed messages whose operational fragment is incidental "
-        "to commentary. Do not infer missing context. When uncertain, DROP.\n\n"
+        "to commentary.\n\n"
+        "The current message may be a terse continuation of the recent source context below. During "
+        "an active alert, a new place, direction, quantity, interception, impact, disappearance, or "
+        "status is a publishable operational fact when that context establishes the threat. Resolve "
+        "pronouns and omitted subjects from the supplied context, but never publish the context itself. "
+        "A bare Kyiv district or immediate-approach place is intentionally tactical, not vague. "
+        "Immediate approaches include locations around Kyiv such as Brovary, Boryspil, Vyshhorod, "
+        "Boyarka, Vyshneve and Hlevakha. Information confined to a distant region still requires an "
+        "explicit trajectory toward Kyiv or its immediate approaches.\n\n"
         "For PUBLISH, translate the operational update into concise, natural English for civilians "
-        "in Kyiv. Use only facts explicitly present in the source. Never add a weapon type, "
+        "in Kyiv. Use context only to resolve an omitted subject or referent in the current message. "
+        "Never add a weapon type, "
         "destination, attribution, channel name, explanation, or missing context. Output ONLY English "
         "inside the translation field. Preserve every "
         "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
@@ -235,7 +245,9 @@ def build_alert_translation_prompt(text: str) -> str:
         "Return exactly one JSON object and nothing else:\n"
         '{"decision":"PUBLISH|DROP","translation":"","reason":"short_machine_reason"}\n'
         "For DROP, translation must be empty.\n\n"
-        "Source message:\n" + text
+        "Recent source context (oldest first; context only):\n"
+        + ("\n".join(f"- {item}" for item in context) or "(none)")
+        + "\n\nCurrent source message to classify and translate:\n" + text
     )
 
 

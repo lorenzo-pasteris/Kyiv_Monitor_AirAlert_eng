@@ -508,10 +508,16 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("'Дарниця' = 'Darnytsia'", prompt)
 
     async def test_semantic_alert_gate_is_general_and_fails_closed(self):
-        prompt = monitor.build_alert_translation_prompt("Відбій по столиці планується?")
+        prompt = monitor.build_alert_translation_prompt(
+            "Боярка, Вишневе",
+            ["2 реактивних БпЛА наближаються до Київщини"],
+        )
         self.assertIn("NEW, CONCRETE, CURRENT operational", prompt)
         self.assertIn("rhetorical questions", prompt)
-        self.assertIn("When uncertain, DROP", prompt)
+        self.assertIn("terse continuation", prompt)
+        self.assertIn("A bare Kyiv district or immediate-approach place", prompt)
+        self.assertIn("2 реактивних БпЛА наближаються до Київщини", prompt)
+        self.assertTrue(prompt.endswith("Боярка, Вишневе"))
 
         self.assertEqual(
             monitor.parse_alert_gate_output(
@@ -527,6 +533,55 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             monitor.parse_alert_gate_output('{"translation":"Maybe publish this"}')
+
+    async def test_semantic_drop_is_checkpointed_instead_of_retried(self):
+        original_active = monitor.alert_active
+        original_translate = monitor.translate_message
+
+        async def semantic_drop(text, context=()):
+            return False
+
+        try:
+            monitor.alert_active = True
+            monitor.translate_message = semantic_drop
+            self.assertTrue(
+                await monitor.handle_alert_message(
+                    "2 нових на Чернігівщині",
+                    generation=monitor.alert_generation,
+                )
+            )
+        finally:
+            monitor.alert_active = original_active
+            monitor.translate_message = original_translate
+
+    async def test_alert_source_context_resolves_terse_followups_and_expires(self):
+        monitor.recent_alert_source_context.clear()
+        start = datetime(2026, 8, 28, 2, 20, tzinfo=timezone.utc)
+        self.assertEqual(
+            monitor.remember_alert_source_message(
+                "kyivnebomonitoring", 1, "2 реактивних на Київщині", start
+            ),
+            [],
+        )
+        self.assertEqual(
+            monitor.remember_alert_source_message(
+                "kyivnebomonitoring", 2, "Боярка, Вишневе", start + timedelta(minutes=1)
+            ),
+            ["2 реактивних на Київщині"],
+        )
+        self.assertEqual(
+            monitor.remember_alert_source_message(
+                "kyivnebomonitoring", 3, "Новий епізод", start + timedelta(minutes=11)
+            ),
+            ["Боярка, Вишневе"],
+        )
+        self.assertEqual(
+            monitor.remember_alert_source_message(
+                "kyivnebomonitoring", 3, "Новий епізод виправлено", start + timedelta(minutes=11)
+            ),
+            ["Боярка, Вишневе"],
+        )
+        monitor.recent_alert_source_context.clear()
 
     async def test_model_meta_commentary_can_never_be_published_as_translation(self):
         bad_outputs = (
@@ -568,7 +623,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.state_store.get_alert_feed_cursor = lambda name: 0
             monitor.state_store.set_alert_feed_cursor = lambda name, value: True
             monitor.state_store.claim_alert_feed_delivery = lambda name, message_id, text: True
-            monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
+            monitor.schedule_alert_delivery = lambda text, source, context=(): asyncio.create_task(
                 fake_delivery(text, source)
             )
             monitor.recent_alert_messages.clear()
@@ -648,7 +703,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         delivered = []
         cursors = {channel: 125071}
 
-        async def fake_handler(text, source, generation):
+        async def fake_handler(text, source, generation, context=()):
             delivered.append((text, source, generation))
             return True
 
@@ -704,7 +759,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.state_store.release_alert_feed_delivery = lambda name, message_id, text: claims.discard(
                 (name, message_id, monitor.normalize_alert_for_dedup(text))
             )
-            monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
+            monitor.schedule_alert_delivery = lambda text, source, context=(): asyncio.create_task(
                 fake_delivery(text, source)
             )
 

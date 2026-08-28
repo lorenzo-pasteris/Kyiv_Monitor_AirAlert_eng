@@ -226,6 +226,7 @@ alert_transition_lock = None
 bot_output_message_ids = set()
 simulator_processed_message_ids = set()
 recent_alert_messages = deque()
+recent_alert_source_context = deque(maxlen=12)
 alert_delivery_tasks = set()
 alert_generation = 0
 ALERT_DEDUP_WINDOW = 180
@@ -328,6 +329,21 @@ def forget_failed_alert(text, source):
             recent_alert_messages.remove(item)
             break
 
+
+def remember_alert_source_message(source, message_id, text, message_at=None):
+    """Return recent same-source context, then remember this tactical source message."""
+    timestamp = message_at.timestamp() if message_at else time.time()
+    cutoff = timestamp - 10 * 60
+    retained = [
+        item for item in recent_alert_source_context
+        if item[0] >= cutoff and not (item[1] == source and item[2] == message_id)
+    ]
+    recent_alert_source_context.clear()
+    recent_alert_source_context.extend(retained)
+    context = [item[3] for item in retained if item[1] == source][-3:]
+    recent_alert_source_context.append((timestamp, source, message_id, text[:1000]))
+    return context
+
 def is_night() -> bool:
     h = datetime.now(TZ).hour
     return NIGHT_START <= h < NIGHT_END
@@ -405,6 +421,7 @@ def set_alert_state(new_state, reason):
     alert_active = new_state
     alert_started_at = time.monotonic() if new_state else None
     alert_generation += 1
+    recent_alert_source_context.clear()
     state_store.persist_operational_state("alert_active", "1" if new_state else "0")
     print(
         f"[ALERT STATE] {previous} -> {new_state} reason={reason} "
@@ -477,7 +494,7 @@ async def apply_alert_state(desired, source, *, startup=False, public_message=No
         return True
 
 
-async def translate_message(text):
+async def translate_message(text, context=()):
     known_fragment = translate_known_terse_fragment(text)
     if known_fragment:
         return known_fragment
@@ -487,7 +504,7 @@ async def translate_message(text):
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={"model": MODEL, "max_tokens": 200, "temperature": 0, "messages": [{
-                "role": "user", "content": build_alert_translation_prompt(text)
+                "role": "user", "content": build_alert_translation_prompt(text, context)
             }]},
             timeout=httpx.Timeout(15.0, connect=5.0)
             )
@@ -1194,26 +1211,28 @@ async def health_loop():
 
 
 
-def schedule_alert_delivery(clean, source):
+def schedule_alert_delivery(clean, source, context=()):
     """Track background delivery so transitions and shutdown can drain it safely."""
     generation = alert_generation
-    task = asyncio.create_task(handle_alert_message(clean, source=source, generation=generation))
-    alert_delivery_tasks.add(task)
-    task.add_done_callback(alert_delivery_tasks.discard)
-    return task
-
-
-def schedule_alert_image_processing(message, channel, clean, edited):
-    """Analyze an image without holding up later alert-feed messages."""
     task = asyncio.create_task(
-        process_alert_image_message(message, channel, clean, edited)
+        handle_alert_message(clean, source=source, generation=generation, context=context)
     )
     alert_delivery_tasks.add(task)
     task.add_done_callback(alert_delivery_tasks.discard)
     return task
 
 
-async def process_alert_image_message(message, channel, clean, edited):
+def schedule_alert_image_processing(message, channel, clean, edited, context=()):
+    """Analyze an image without holding up later alert-feed messages."""
+    task = asyncio.create_task(
+        process_alert_image_message(message, channel, clean, edited, context)
+    )
+    alert_delivery_tasks.add(task)
+    task.add_done_callback(alert_delivery_tasks.discard)
+    return task
+
+
+async def process_alert_image_message(message, channel, clean, edited, context=()):
     try:
         if await is_blocked_alert_image(message):
             state_store.set_alert_feed_cursor(
@@ -1221,7 +1240,7 @@ async def process_alert_image_message(message, channel, clean, edited):
             )
             print(f"[ALERT FILTERED IMAGE] @{channel} id={message.id}")
             return False
-        delivered = bool(await schedule_alert_delivery(clean, source=channel))
+        delivered = bool(await schedule_alert_delivery(clean, source=channel, context=context))
         if delivered:
             state_store.set_alert_feed_cursor(
                 channel, max(state_store.get_alert_feed_cursor(channel), message.id)
@@ -1236,7 +1255,7 @@ async def process_alert_image_message(message, channel, clean, edited):
         raise
 
 
-async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None):
+async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None, context=()):
     """Translate first, then publish one final English alert if it is still current."""
     generation = alert_generation if generation is None else generation
     if generation != alert_generation or not alert_active:
@@ -1263,7 +1282,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
 
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     try:
-        translation = await translate_message(clean[:1500])
+        translation = await translate_message(clean[:1500], context=context)
     except asyncio.CancelledError:
         print(f"[ALERT CANCELLED] translation interrupted source=@{source} generation={generation}")
         raise
@@ -1272,7 +1291,9 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         print(f"[ALERT STALE] translation discarded source=@{source} generation={generation}")
         return False
     if translation is False:
-        return False
+        # A semantic DROP is successfully handled. Returning True checkpoints the
+        # source cursor so the poller cannot bill the same classification forever.
+        return True
     if not translation:
         print(f"[ALERT NOT PUBLISHED] translation unavailable source=@{source}")
         try:
@@ -1312,12 +1333,19 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
         return False
 
+    context = remember_alert_source_message(
+        channel,
+        message.id,
+        strip_mixed_alert_commentary(clean),
+        getattr(message, "date", None),
+    )
+
     if getattr(message, "photo", None):
-        schedule_alert_image_processing(message, channel, clean, edited)
+        schedule_alert_image_processing(message, channel, clean, edited, context)
         print(f"[ALERT IMAGE QUEUED] @{channel} id={message.id}")
         return True
 
-    delivered = bool(await schedule_alert_delivery(clean, source=channel))
+    delivered = bool(await schedule_alert_delivery(clean, source=channel, context=context))
     if delivered:
         state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
