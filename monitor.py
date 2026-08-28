@@ -30,6 +30,7 @@ from text_processing import (
     build_alert_translation_prompt,
     clean_alert_source_text,
     clean_text,
+    contains_operational_location,  # noqa: F401 -- re-exported for routing regressions
     contains_any,
     is_actionable_alert_message,
     is_commentary_alert_message,
@@ -510,10 +511,12 @@ async def translate_message(text, context=()):
             )
         r.raise_for_status()
         result = r.json()["content"][0]["text"].strip()
-        decision, translation, reason = parse_alert_gate_output(result)
+        decision, translation, reason = parse_alert_gate_output(result, text)
         if decision == "DROP":
             print(f"[ALERT SEMANTIC DROP] reason={reason!r} input={text[:120]!r}")
             return False
+        if reason.startswith("override_unapproved_drop:"):
+            print(f"[ALERT DROP OVERRIDDEN] reason={reason!r} input={text[:120]!r}")
         print(f"[TRANSLATION OK] input={text[:120]!r} output={translation[:120]!r}")
         return translation
     except Exception as e:

@@ -25,6 +25,37 @@ ENGAGEMENT_INDICATORS = [
     "з днем", "вітаємо", "вітаю", "найкращі були та будете",
 ]
 SECURITY_KEYWORDS = ["тривога","відбій","балістика","ракета","шахед","шахеди","бпла","вибух","вибухи","ппо","повітряна ціль","укриття","загроза","обстріл","приліт","дрон","дрони","mig","міг","siren","raid","missile","drone","explosion","alert","attack","ballistic","shahed","interception","strike"]
+ALERT_BLOCK_CATEGORIES = {
+    "ADVERTISEMENT",
+    "FUNDRAISING",
+    "ENGAGEMENT",
+    "EDITORIAL_COMMENTARY",
+    "RHETORICAL_QUESTION",
+    "DISTANT_WITHOUT_KYIV_TRAJECTORY",
+}
+# Ukrainian stems intentionally cover inflected forms used in terse updates.
+OPERATIONAL_LOCATION_STEMS = {
+    "нивк": "Nyvky",
+    "шуляв": "Shuliavka",
+    "жулян": "Zhuliany",
+    "солом": "Solomianskyi district",
+    "оболон": "Obolon",
+    "поділ": "Podil",
+    "троєщин": "Troieshchyna",
+    "теремк": "Teremky",
+    "дарниц": "Darnytsia",
+    "ірпін": "Irpin",
+    "буч": "Bucha",
+    "бровар": "Brovary",
+    "вишгород": "Vyshhorod",
+    "вишнев": "Vyshneve",
+    "боярк": "Boyarka",
+    "чабан": "Chabany",
+    "васильк": "Vasylkiv",
+    "гатн": "Hatne",
+    "глевах": "Hlevakha",
+    "гостомел": "Hostomel",
+}
 ALERT_TACTICAL_KEYWORDS = SECURITY_KEYWORDS + [
     "ціль", "цілі", "рух", "рухається", "рухаються", "курс", "напрям", "летить",
     "летять", "чисто", "знищено", "знищена", "знищений", "збито", "увага",
@@ -178,26 +209,27 @@ def alert_feed_cursor_key(channel: str) -> str:
     return f"alert_feed_cursor:{channel}"
 
 
+def contains_operational_location(text: str) -> bool:
+    """Recognize Kyiv districts and immediate approaches across Ukrainian inflections."""
+    lowered = text.casefold()
+    return any(stem in lowered for stem in OPERATIONAL_LOCATION_STEMS)
+
+
 def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> str:
-    """Build one strict relevance-gate and translation request."""
+    """Build an asymmetric gate: only a closed set of exclusions may block publication."""
     return (
-        "You are the strict publication gate for a real-time Kyiv air-alert channel. "
-        "PUBLISH only when the current message, interpreted with the supplied recent context, "
-        "communicates a NEW, CONCRETE, CURRENT operational "
-        "fact relevant to Kyiv city or its immediate approaches: an identified threat; its current "
-        "position, direction or destination; a location currently at risk; air-defence activity or "
-        "interception; confirmed removal of a threat; or an official alert/all-clear transition. "
-        "DROP commentary, opinions, sarcasm, rhetorical questions, complaints, discussion of why or "
-        "when an alert/all-clear was or was not issued, elapsed-time observations, predictions, "
-        "speculation, vague references whose threat or Kyiv relevance depends on missing context, "
-        "distant-region information without an explicit current trajectory toward Kyiv, repetition "
-        "without a new operational fact, and mixed messages whose operational fragment is incidental "
-        "to commentary.\n\n"
+        "You translate a trusted operational feed for a real-time Kyiv air-alert channel. "
+        "The default decision is PUBLISH. DROP is permitted only for exactly one of these closed "
+        "categories: ADVERTISEMENT, FUNDRAISING, ENGAGEMENT, EDITORIAL_COMMENTARY, "
+        "RHETORICAL_QUESTION, DISTANT_WITHOUT_KYIV_TRAJECTORY. Never DROP because a message is "
+        "brief, vague, repetitive, lacks a named threat, uses a pronoun, gives only a quantity, or "
+        "contains only one or more place names. Those are normal tactical updates during an active "
+        "alert. When uncertain, PUBLISH.\n\n"
         "The current message may be a terse continuation of the recent source context below. During "
-        "an active alert, a new place, direction, quantity, interception, impact, disappearance, or "
-        "status is a publishable operational fact when that context establishes the threat. Resolve "
+        "this active alert, a place, direction, quantity, interception, impact, disappearance, threat "
+        "characteristic, reconnaissance activity, or status is publishable. Resolve "
         "pronouns and omitted subjects from the supplied context, but never publish the context itself. "
-        "A bare Kyiv district or immediate-approach place is intentionally tactical, not vague. "
+        "A bare Kyiv district or immediate-approach place is always tactical, never vague. "
         "Immediate approaches include locations around Kyiv such as Brovary, Boryspil, Vyshhorod, "
         "Boyarka, Vyshneve and Hlevakha. Information confined to a distant region still requires an "
         "explicit trajectory toward Kyiv or its immediate approaches.\n\n"
@@ -242,9 +274,15 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> st
         "promo, subscribe, and LIVE tags. Known spellings include Kyiv, Brovary, Boryspil, Obukhiv, "
         "Vyshhorod, Bucha, Irpin, Fastiv, Bila Tserkva, Berezniaky, Osokorky, Pozniaky, Troieshchyna, "
         "Vyshneve, Dymer, Boyarka, Yahotyn, Hostomel, Rembaza, and Koncha-Zaspa.\n\n"
-        "Return exactly one JSON object and nothing else:\n"
-        '{"decision":"PUBLISH|DROP","translation":"","reason":"short_machine_reason"}\n'
-        "For DROP, translation must be empty.\n\n"
+        "Return exactly one JSON object and nothing else. Always provide a valid English translation, "
+        "including when proposing DROP. For DROP, evidence must be an exact non-empty excerpt from the "
+        "current source message that proves the selected closed category. Use null block_category and "
+        "empty evidence for PUBLISH; use one closed category and the exact excerpt for DROP:\n"
+        '{"decision":"PUBLISH","block_category":null,"translation":"English translation",'
+        '"evidence":"","reason":"operational"}\n'
+        '{"decision":"DROP","block_category":"EDITORIAL_COMMENTARY",'
+        '"translation":"English translation","evidence":"exact source excerpt",'
+        '"reason":"commentary"}\n\n'
         "Recent source context (oldest first; context only):\n"
         + ("\n".join(f"- {item}" for item in context) or "(none)")
         + "\n\nCurrent source message to classify and translate:\n" + text
@@ -314,19 +352,28 @@ def parse_first_json_object(raw: str) -> dict[str, Any]:
     return parsed
 
 
-def parse_alert_gate_output(raw: str) -> tuple[str, str, str]:
-    """Validate the model's publication decision; malformed output fails closed."""
+def parse_alert_gate_output(raw: str, source_text: str = "") -> tuple[str, str, str]:
+    """Accept only evidenced closed-category drops; every other valid result publishes."""
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         parsed = parse_first_json_object(raw)
     decision = str(parsed.get("decision", "")).strip().upper()
+    block_category = str(parsed.get("block_category") or "").strip().upper()
     translation = str(parsed.get("translation", "")).strip()
+    evidence = str(parsed.get("evidence") or "").strip()
     reason = str(parsed.get("reason", "")).strip()
     if decision not in {"PUBLISH", "DROP"}:
         raise ValueError("AI decision must be PUBLISH or DROP")
-    if decision == "DROP":
-        return decision, "", reason
     if not is_valid_alert_translation(translation):
-        raise ValueError("PUBLISH requires a valid English translation")
+        raise ValueError("Every decision requires a valid English translation")
+    if decision == "DROP":
+        evidenced = bool(evidence) and evidence.casefold() in source_text.casefold()
+        if (
+            block_category not in ALERT_BLOCK_CATEGORIES
+            or not evidenced
+            or contains_operational_location(source_text)
+        ):
+            return "PUBLISH", translation, f"override_unapproved_drop:{block_category or 'NONE'}"
+        return decision, "", block_category
     return decision, translation, reason

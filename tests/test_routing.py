@@ -507,32 +507,87 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Never ask for more context", prompt)
         self.assertIn("'Дарниця' = 'Darnytsia'", prompt)
 
-    async def test_semantic_alert_gate_is_general_and_fails_closed(self):
+    async def test_semantic_alert_gate_allows_only_evidenced_closed_category_drops(self):
         prompt = monitor.build_alert_translation_prompt(
             "Боярка, Вишневе",
             ["2 реактивних БпЛА наближаються до Київщини"],
         )
-        self.assertIn("NEW, CONCRETE, CURRENT operational", prompt)
-        self.assertIn("rhetorical questions", prompt)
-        self.assertIn("terse continuation", prompt)
-        self.assertIn("A bare Kyiv district or immediate-approach place", prompt)
+        self.assertIn("default decision is PUBLISH", prompt)
+        self.assertIn("closed categories", prompt)
+        self.assertIn("When uncertain, PUBLISH", prompt)
+        self.assertIn("A bare Kyiv district or immediate-approach place is always tactical", prompt)
+        self.assertIn("Always provide a valid English translation", prompt)
         self.assertIn("2 реактивних БпЛА наближаються до Київщини", prompt)
         self.assertTrue(prompt.endswith("Боярка, Вишневе"))
 
         self.assertEqual(
             monitor.parse_alert_gate_output(
-                '{"decision":"DROP","translation":"ignored","reason":"commentary"}'
+                '{"decision":"DROP","block_category":"EDITORIAL_COMMENTARY",'
+                '"translation":"Editorial complaint.","evidence":"чому","reason":"commentary"}',
+                "чому досі тривога",
             ),
-            ("DROP", "", "commentary"),
+            ("DROP", "", "EDITORIAL_COMMENTARY"),
         )
         self.assertEqual(
             monitor.parse_alert_gate_output(
-                '{"decision":"PUBLISH","translation":"UAV heading toward Kyiv.","reason":"current_threat"}'
+                '{"decision":"PUBLISH","block_category":null,'
+                '"translation":"UAV heading toward Kyiv.","evidence":"","reason":"current_threat"}',
+                "БпЛА на Київ",
             ),
             ("PUBLISH", "UAV heading toward Kyiv.", "current_threat"),
         )
         with self.assertRaises(ValueError):
             monitor.parse_alert_gate_output('{"translation":"Maybe publish this"}')
+
+    async def test_operational_locations_and_unapproved_drops_publish(self):
+        real_tactical_updates = (
+            "Нивки",
+            "Шулявка",
+            "Жуляни",
+            "Підлітають до Броварів",
+            "Новий на Вишгород",
+            "Далі Чабани",
+            "Вилітає в район Василькова",
+            "Жуляни, Вишневе",
+            "Другий Нивки, Солома",
+        )
+        for text in real_tactical_updates:
+            self.assertTrue(monitor.contains_operational_location(text), text)
+            self.assertEqual(
+                monitor.parse_alert_gate_output(
+                    '{"decision":"DROP","block_category":"EDITORIAL_COMMENTARY",'
+                    '"translation":"Operational location update.",'
+                    '"evidence":"' + text + '","reason":"vague"}',
+                    text,
+                ),
+                (
+                    "PUBLISH",
+                    "Operational location update.",
+                    "override_unapproved_drop:EDITORIAL_COMMENTARY",
+                ),
+            )
+
+        self.assertEqual(
+            monitor.parse_alert_gate_output(
+                '{"decision":"DROP","block_category":"VAGUE",'
+                '"translation":"Four of them there.","evidence":"Їх там 4шт","reason":"ambiguous"}',
+                "Їх там 4шт",
+            ),
+            ("PUBLISH", "Four of them there.", "override_unapproved_drop:VAGUE"),
+        )
+
+    async def test_distant_update_without_kyiv_trajectory_can_be_dropped(self):
+        text = "Нові залітають на Чернігівщину"
+        self.assertFalse(monitor.contains_operational_location(text))
+        self.assertEqual(
+            monitor.parse_alert_gate_output(
+                '{"decision":"DROP","block_category":"DISTANT_WITHOUT_KYIV_TRAJECTORY",'
+                '"translation":"New threats entering Chernihiv region.",'
+                '"evidence":"Чернігівщину","reason":"distant"}',
+                text,
+            ),
+            ("DROP", "", "DISTANT_WITHOUT_KYIV_TRAJECTORY"),
+        )
 
     async def test_semantic_drop_is_checkpointed_instead_of_retried(self):
         original_active = monitor.alert_active
