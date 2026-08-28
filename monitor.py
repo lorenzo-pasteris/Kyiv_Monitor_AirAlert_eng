@@ -741,7 +741,7 @@ async def analyze_hourly_matrix(messages):
         f"- {key}: {meta['criteria']}" for key, meta in CATEGORIES.items()
     )
     message_text = "\n\n".join(
-        f"ID={item['id']} SOURCE=@{item['channel']} TIME={item['time']}\n{item['text']}"
+        f"ID={item['id']} SOURCE=@{item['channel']} TIME={item['time']}\n{item['text'][:500]}"
         for item in messages
     )
     prompt = (
@@ -757,7 +757,7 @@ async def analyze_hourly_matrix(messages):
         "locations, uncertainty, times and quantities.\n\nMessages:\n" + message_text
     )
 
-    token_budgets = (4000, 6000, 8000)
+    token_budgets = (2000,)
     for token_attempt, max_tokens in enumerate(token_budgets, start=1):
         reached_token_limit = False
         for transient_attempt in range(1, 4):
