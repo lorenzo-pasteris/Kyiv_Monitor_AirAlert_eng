@@ -447,6 +447,21 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("war_monitor", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("war_monitor", monitor.ALERT_FEED_CHANNELS)
 
+    async def test_war_monitor_is_joined_as_a_required_live_source(self):
+        joined = []
+
+        class FakeClient:
+            async def __call__(self, request):
+                joined.append(request)
+
+        entities = {
+            monitor.ALERT_FEED_CHANNEL: "alert-entity",
+            monitor.WAR_MONITOR_CHANNEL: "war-monitor-entity",
+        }
+        await monitor.ensure_live_source_membership(FakeClient(), entities)
+
+        self.assertEqual(joined, ["alert-entity", "war-monitor-entity"])
+
     async def test_war_monitor_accepts_only_todays_tagged_daily_report(self):
         today = datetime(2026, 8, 31).date()
         valid = (
