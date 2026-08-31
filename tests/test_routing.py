@@ -474,6 +474,18 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("📡 Обстановка", "Оновлення"), today))
         self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("#обстановка@war_monitor", ""), today))
 
+    async def test_war_monitor_polls_only_during_the_night_window(self):
+        self.assertFalse(monitor.is_war_monitor_poll_window(datetime(2026, 9, 1, 23, 29, tzinfo=monitor.TZ)))
+        self.assertTrue(monitor.is_war_monitor_poll_window(datetime(2026, 9, 1, 23, 30, tzinfo=monitor.TZ)))
+        self.assertTrue(monitor.is_war_monitor_poll_window(datetime(2026, 9, 2, 0, 59, tzinfo=monitor.TZ)))
+        self.assertFalse(monitor.is_war_monitor_poll_window(datetime(2026, 9, 2, 1, 0, tzinfo=monitor.TZ)))
+        self.assertEqual(
+            monitor.seconds_until_war_monitor_poll_start(
+                datetime(2026, 9, 2, 1, 0, tzinfo=monitor.TZ)
+            ),
+            22.5 * 3600,
+        )
+
     async def test_summary_schedule_uses_requested_kyiv_hours(self):
         self.assertEqual(monitor.SUMMARY_HOURS, (1, 7, 9, 11, 13, 15, 17, 19, 21, 23))
         now = datetime(2026, 8, 31, 10, 30, tzinfo=monitor.TZ)
