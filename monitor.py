@@ -1,9 +1,9 @@
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: @kyiv_airraid_alert
-- Normal mode: hourly analysis of 4 channels published in the news group
+- Normal mode: scheduled analysis of news channels published in the news group
 - Alert mode (24/7): only @kyivnebomonitoring in the alert-only channel
-- Night pause: no hourly summaries 01:00-07:00 Europe/Kyiv, one big recap at 07:00
+- Daily situation report: only the strict #обстановка post from @war_monitor
 - Health check every 12h: private warning to owner if channels go silent
 """
 import asyncio
@@ -86,6 +86,11 @@ ADMIN_USER_IDS = {
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
 AMK_CHANNEL = "AMK_Mapping"
 INSIDER_UA_CHANNEL = "insiderukr"
+KYIV_CITY_OFFICIAL_CHANNEL = "KyivCityOfficial"
+SUSPILNE_KYIV_CHANNEL = "suspilne_kyiv"
+UKRENERGO_CHANNEL = "ukrenergo"
+UKRZALINFO_CHANNEL = "UkrzalInfo"
+WAR_MONITOR_CHANNEL = "war_monitor"
 ALERT_FEED_CHANNEL = "kyivnebomonitoring"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
@@ -94,10 +99,15 @@ ALL_CONTENT_CHANNELS = [
     UKRAINE_NEWS_CHANNEL,
     AMK_CHANNEL,
     INSIDER_UA_CHANNEL,
+    KYIV_CITY_OFFICIAL_CHANNEL,
+    SUSPILNE_KYIV_CHANNEL,
+    UKRENERGO_CHANNEL,
+    UKRZALINFO_CHANNEL,
 ]
 ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL]
 
-SUMMARY_INTERVAL = 180 if TEST_MODE else 3600  # 3 minutes in test, 1 hour in production
+SUMMARY_HOURS = (1, 7, 10, 13, 16, 19, 22)
+SUMMARY_INTERVAL = 180 if TEST_MODE else 3 * 3600
 HEALTH_CHECK_INTERVAL = 43200  # 12 hours
 SILENCE_THRESHOLD = 4 * 3600  # 4 hours of total silence = warning
 ALERT_FEED_POLL_INTERVAL = float(os.environ.get("ALERT_FEED_POLL_INTERVAL", "5"))
@@ -109,10 +119,8 @@ UKRAINE_ALARM_URL = (
     f"https://api.ukrainealarm.com/api/v3/alerts/{UKRAINE_ALARM_REGION_ID}"
 )
 
-# --- Timezone / night pause ---
+# --- Timezone ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
-NIGHT_START = 1   # 01:00 EET/EEST
-NIGHT_END = 7     # 07:00 EET/EEST
 
 MODEL = "claude-haiku-4-5"
 
@@ -130,39 +138,42 @@ def build_all_clear_message():
 # --- Cross-source categories (normal mode) ---
 # A source is only provenance. Every buffered message is evaluated against every category.
 CATEGORIES = {
-    "kyiv_city": {
-        "name": "Kyiv City",
-        "icon": "🏙️",
-        "criteria": (
-            "Concrete disruptions or consequences affecting life in Kyiv city: roads, bridges, traffic, "
-            "metro/public transport, power, water, heating, fires, accidents, police operations, curfews, "
-            "shelters, evacuations, damage, casualties, or direct consequences of attacks on Kyiv."
-        ),
-    },
-    "ukraine_national": {
-        "name": "Ukrainian National Developments",
+    "ukraine_key_developments": {
+        "name": "Ukraine — Key Developments",
         "icon": "🇺🇦",
         "criteria": (
-            "Consequential Ukrainian political, governmental, parliamentary, legislative, economic, energy, "
-            "diplomatic, sanctions, international-support, corruption, legal, or civil-society developments."
+            "Major Ukrainian developments that materially affect the population: government and parliamentary "
+            "decisions, laws, mobilization, economy, health, diplomacy, international support, sanctions, "
+            "corruption, major frontline changes, and strategically important war developments."
         ),
     },
-    "military": {
-        "name": "Military Developments",
-        "icon": "🗺️",
+    "kyiv_region": {
+        "name": "Kyiv & Region",
+        "icon": "🏙️",
         "criteria": (
-            "Russia-Ukraine war developments: frontline changes, troop movements, offensives, operations, "
-            "equipment or notable losses, fortifications, preparations, and strategic analysis. Exclude "
-            "Middle East events unless they directly and materially concern the war in Ukraine."
+            "Concrete developments affecting Kyiv city or Kyiv Oblast: local decisions, roads, closures, "
+            "schools, evacuations, public safety, accidents, fires, police operations, and other changes that "
+            "matter to residents. Put transport and utility disruptions in transport_essential_services."
         ),
     },
-    "air_defence": {
-        "name": "Air Defence Monitoring",
-        "icon": "⚔️",
+    "security_consequences": {
+        "name": "Security & Attack Consequences",
+        "icon": "🛡️",
         "criteria": (
-            "Missile, Shahed or other UAV launches and movements, aviation activity, air-defence actions, "
-            "interceptions, impacts, affected areas, and numerical attack recaps. Preserve all stated counts "
-            "and never invent or combine incompatible quantities."
+            "Concrete outcomes of attacks: confirmed impacts, damage, fires, casualties, service disruption, "
+            "or substantial quantified attack and interception recaps. Exclude routine alert/all-clear notices, "
+            "shelter instructions, live trajectories or locations, isolated launches, and bare interception "
+            "claims without a concrete result. Preserve all stated counts and never invent or combine "
+            "incompatible quantities."
+        ),
+    },
+    "transport_essential_services": {
+        "name": "Transport & Essential Services",
+        "icon": "🚇",
+        "criteria": (
+            "Material changes to metro, buses, trams, railways, roads, electricity, water, heating, mobile or "
+            "internet service in Kyiv or elsewhere in Ukraine. Keep interruptions, restorations, major delays, "
+            "closures and actionable schedule changes; exclude routine corporate publicity and minor delays."
         ),
     },
 }
@@ -211,8 +222,6 @@ alert_started_at = None
 telegram_alert_state = None
 last_send_time = 0
 last_message_time = time.time()
-last_summary_success_time = time.monotonic()
-summary_watchdog_attempts = set()
 production_client = None
 content_source_entities = {}
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
@@ -345,16 +354,16 @@ def remember_alert_source_message(source, message_id, text, message_at=None):
     recent_alert_source_context.append((timestamp, source, message_id, text[:1000]))
     return context
 
-def is_night() -> bool:
-    h = datetime.now(TZ).hour
-    return NIGHT_START <= h < NIGHT_END
-
-
-def seconds_until_next_hour() -> float:
-    """Return the delay to the next exact Europe/Kyiv clock hour."""
-    now = datetime.now(TZ)
-    elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
-    return max(0.1, 3600 - elapsed)
+def seconds_until_next_summary(now=None) -> float:
+    """Return the delay to the next configured Europe/Kyiv summary slot."""
+    now = now or datetime.now(TZ)
+    for day_offset in (0, 1):
+        day = now.date() + timedelta(days=day_offset)
+        for hour in SUMMARY_HOURS:
+            candidate = datetime.combine(day, datetime.min.time(), TZ).replace(hour=hour)
+            if candidate > now:
+                return max(0.1, (candidate - now).total_seconds())
+    raise RuntimeError("No summary slot configured")
 
 async def reconcile_alert_state(source):
     """Apply the explicit trigger state and retry when public delivery fails."""
@@ -529,6 +538,90 @@ async def translate_message(text, context=()):
             print(f"Ops notify failed: {ops_err}")
         return None
 
+
+WAR_MONITOR_REPORT_RE = re.compile(
+    r"\A📡\s*Обстановка станом на (?:[01]\d|2[0-3]):[0-5]\d\s*\n"
+    r"(?P<date>\d{2}\.\d{2}\.\d{2,4})\b[\s\S]*#обстановка@war_monitor\b"
+)
+
+
+def is_daily_war_monitor_report(text, today=None):
+    """Accept only today's explicitly tagged daily situation report."""
+    match = WAR_MONITOR_REPORT_RE.search((text or "").strip())
+    if not match:
+        return False
+    date_format = "%d.%m.%y" if len(match.group("date")) == 8 else "%d.%m.%Y"
+    try:
+        report_date = datetime.strptime(match.group("date"), date_format).date()
+    except ValueError:
+        return False
+    return report_date == (today or datetime.now(TZ).date())
+
+
+async def translate_war_monitor_report(text):
+    """Translate the one accepted daily report without the tactical alert gate."""
+    try:
+        async with translation_slots:
+            response = await http_client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": MODEL,
+                    "max_tokens": 600,
+                    "temperature": 0,
+                    "messages": [{
+                        "role": "user",
+                        "content": (
+                            "Translate this Ukrainian daily military situation report into concise, natural "
+                            "English. Preserve its heading, date, section structure, facts, uncertainty and "
+                            "punctuation. Do not add analysis or commentary. Omit only the final source hashtag. "
+                            "Return only the translated report.\n\n" + text[:2500]
+                        ),
+                    }],
+                },
+                timeout=httpx.Timeout(30.0, connect=5.0),
+            )
+        response.raise_for_status()
+        return response.json()["content"][0]["text"].strip()
+    except Exception as exc:
+        print(f"[WAR MONITOR TRANSLATION ERROR] {type(exc).__name__}: {exc}")
+        await send_to_owner(
+            "Ops: @war_monitor daily report translation failed; nothing published."
+        )
+        return None
+
+
+async def process_war_monitor_report(message):
+    """Publish only today's tagged daily report, once, to the requested destinations."""
+    raw = (message.text or "").strip()
+    if not is_daily_war_monitor_report(raw):
+        print(f"[WAR MONITOR IGNORED] id={message.id}")
+        return False
+    if not state_store.claim_alert_feed_delivery(WAR_MONITOR_CHANNEL, message.id, raw):
+        print(f"[WAR MONITOR DUPLICATE] id={message.id}")
+        return False
+
+    translated = await translate_war_monitor_report(raw)
+    if not translated:
+        state_store.release_alert_feed_delivery(WAR_MONITOR_CHANNEL, message.id, raw)
+        return False
+
+    rendered = html.escape(translated)
+    if not await send_to_summary_group(rendered):
+        state_store.release_alert_feed_delivery(WAR_MONITOR_CHANNEL, message.id, raw)
+        await send_to_owner("Ops: @war_monitor daily report failed to publish in the news channel.")
+        return False
+    if not alert_active and not await send_to_alert_channel(rendered):
+        await send_to_owner(
+            "Ops: @war_monitor daily report reached the news channel but failed in the alert channel."
+        )
+    print(f"[WAR MONITOR PUBLISHED] id={message.id} alert_copy={not alert_active}")
+    return True
+
 async def ensure_alert_feed_membership(client, source_entities):
     """Join every ALERT feed; resolving a public channel alone does not deliver live updates."""
     for channel in ALERT_FEED_CHANNELS:
@@ -690,6 +783,7 @@ def normalize_category_result(parsed, messages):
 
     valid_ids = {item["id"] for item in messages}
     normalized = {}
+    assigned_ids = set()
     for category_key in CATEGORIES:
         category_data = supplied[category_key]
         if not isinstance(category_data, dict):
@@ -711,6 +805,10 @@ def normalize_category_result(parsed, messages):
         unknown_ids = [message_id for message_id in selected_ids if message_id not in valid_ids]
         if unknown_ids:
             raise ValueError(f"{category_key} returned unknown IDs: {unknown_ids[:5]}")
+        duplicate_ids = [message_id for message_id in selected_ids if message_id in assigned_ids]
+        if duplicate_ids:
+            raise ValueError(f"message IDs assigned to multiple categories: {duplicate_ids[:5]}")
+        assigned_ids.update(selected_ids)
 
         normalized[category_key] = {
             "selected_ids": list(dict.fromkeys(selected_ids)),
@@ -718,7 +816,7 @@ def normalize_category_result(parsed, messages):
                 bullet.strip().lstrip("•- ").strip()
                 for bullet in bullets
                 if bullet.strip()
-            ][:5],
+            ][:3],
         }
     return normalized
 
@@ -749,12 +847,16 @@ async def analyze_hourly_matrix(messages):
     )
     prompt = (
         "Classify Ukrainian news messages. The source is provenance only: evaluate EVERY message against "
-        "EVERY category below. A message may belong to multiple categories when genuinely relevant. "
+        "EVERY category below. Assign each qualifying message to exactly one best primary category; the same "
+        "message ID must never appear in multiple categories. "
         "Do not favor or exclude a message because of its source channel. Reject advertising, clickbait, "
-        "routine statements without a concrete development, and unrelated material.\n\n"
+        "routine statements without a concrete development, and unrelated material. The news channel must "
+        "not repeat the real-time alert feed: reject alert and all-clear announcements, generic shelter "
+        "instructions, live missile/UAV/object headings or locations, and bare interception claims. Keep an "
+        "attack item only when it reports a concrete consequence or a substantial quantified recap.\n\n"
         f"Categories:\n{category_text}\n\n"
         "Use the required structured output schema. selected_ids must contain exact message IDs that qualify. "
-        "bullets must contain at most five concise English summary strings per category. Within each category, "
+        "bullets must contain at most three concise English summary strings per category. Within each category, "
         "Write complete bullets; never truncate a sentence or word. "
         "order bullets chronologically from the earliest event/message time to the latest. Preserve stated "
         "locations, uncertainty, times and quantities.\n\nMessages:\n" + message_text
@@ -875,15 +977,13 @@ def build_emergency_category_result(messages):
     for item in messages:
         lowered = item["text"].lower()
         if contains_any(lowered, SECURITY_KEYWORDS):
-            category_key = "air_defence"
+            category_key = "security_consequences"
         elif item["channel"] == KYIV_INFO_CHANNEL:
-            category_key = "kyiv_city"
-        elif item["channel"] == UKRAINE_NEWS_CHANNEL:
-            category_key = "ukraine_national"
+            category_key = "kyiv_region"
         else:
-            category_key = "military"
+            category_key = "ukraine_key_developments"
         result[category_key]["selected_ids"].append(item["id"])
-        if len(result[category_key]["bullets"]) < 5:
+        if len(result[category_key]["bullets"]) < 3:
             original_excerpt = re.sub(r"\\s+", " ", item["text"]).strip()[:160]
             result[category_key]["bullets"].append(
                 f"Original source excerpt from @{item['channel']}: {original_excerpt}"
@@ -944,7 +1044,7 @@ async def send_to_alert_channel(text):
 
 
 async def send_to_summary_group(text):
-    """Send scheduled analysis only to the linked summary group."""
+    """Send news output to the linked summary group."""
     result = await send_message(SUMMARY_OUTPUT_CHAT_ID, text)
     if TEST_MODE and result and result.get("message_id"):
         bot_output_message_ids.add(result["message_id"])
@@ -1001,7 +1101,6 @@ async def safe_send(text):
 
 async def build_summary(night_recap=False, trigger="scheduled"):
     """Build and publish one summary; retain durable input until delivery is confirmed."""
-    global last_summary_success_time, summary_watchdog_attempts
     async with summary_lock:
         if not TEST_MODE and state_store.stats_db_ready and production_client and content_source_entities:
             await sync_normal_history(production_client, content_source_entities)
@@ -1131,8 +1230,6 @@ async def build_summary(night_recap=False, trigger="scheduled"):
             for channel, length in snapshot_lengths.items():
                 del buffers[channel][:length]
 
-        last_summary_success_time = time.monotonic()
-        summary_watchdog_attempts.clear()
         outcome = "delivered" if sections else "ops_heartbeat"
         print(
             f"[SUMMARY COMPLETED] trigger={trigger} "
@@ -1142,66 +1239,26 @@ async def build_summary(night_recap=False, trigger="scheduled"):
 
 
 async def summary_loop():
-    was_night = False
-    first_delay = SUMMARY_INTERVAL if TEST_MODE else seconds_until_next_hour()
-    next_run = time.monotonic() + first_delay
+    first_delay = SUMMARY_INTERVAL if TEST_MODE else seconds_until_next_summary()
     print(
         f"[SUMMARY SCHEDULE] first_run_in={first_delay:.1f}s "
-        f"interval={SUMMARY_INTERVAL}s timezone={TZ.key}"
+        f"hours={SUMMARY_HOURS} timezone={TZ.key}"
     )
+    await asyncio.sleep(first_delay)
     while True:
-        await asyncio.sleep(max(0, next_run - time.monotonic()))
-        next_run += SUMMARY_INTERVAL
         try:
-            if alert_active:
-                continue
-
-            night_now = is_night()
-            if was_night and not night_now:
-                await build_summary(night_recap=True, trigger="night_recap")
-                was_night = False
-                continue
-
-            was_night = night_now
-            if night_now:
-                continue
-
-            await build_summary(night_recap=False, trigger="scheduled")
+            if not alert_active:
+                hour = datetime.now(TZ).hour
+                await build_summary(
+                    night_recap=not TEST_MODE and hour == 7,
+                    trigger="night_recap" if not TEST_MODE and hour == 7 else "scheduled",
+                )
         except Exception as exc:
             print(f"[SUMMARY LOOP ERROR] {type(exc).__name__}: {exc}")
             await send_to_owner(
                 f"🚨 <b>Summary loop recovered</b>\n{html.escape(type(exc).__name__ + ': ' + str(exc))}"
             )
-
-
-async def summary_watchdog_loop():
-    """Retry missing production summaries at 62, 65, 67 and 70 minutes."""
-    thresholds = (62, 65, 67, 70)
-    while True:
-        await asyncio.sleep(20 if TEST_MODE else 30)
-        if alert_active or is_night():
-            continue
-        age_minutes = (time.monotonic() - last_summary_success_time) / 60
-        for threshold in thresholds:
-            if age_minutes >= threshold and threshold not in summary_watchdog_attempts:
-                summary_watchdog_attempts.add(threshold)
-                print(f"[SUMMARY WATCHDOG] no confirmed summary for {age_minutes:.1f}m; retry={threshold}m")
-                await send_to_owner(
-                    f"⚠️ <b>Summary watchdog retry</b>\n"
-                    f"No confirmed delivery for {age_minutes:.1f} minutes. Running retry {threshold}m."
-                )
-                try:
-                    success = await build_summary(trigger=f"watchdog_{threshold}m")
-                except Exception as exc:
-                    success = False
-                    print(f"[SUMMARY WATCHDOG ERROR] {type(exc).__name__}: {exc}")
-                if success:
-                    break
-                if threshold == 70:
-                    await send_to_owner(
-                        "🚨 <b>Summary watchdog critical</b>\n"
-                        "Retries at 62, 65, 67 and 70 minutes failed; buffers remain retained."
-                    )
+        await asyncio.sleep(SUMMARY_INTERVAL if TEST_MODE else seconds_until_next_summary())
 
 
 async def health_loop():
@@ -1452,7 +1509,6 @@ async def main():
             "Real Telegram sources and interactive test commands are disabled."
         )
         asyncio.create_task(summary_loop())
-        asyncio.create_task(summary_watchdog_loop())
         try:
             await asyncio.Event().wait()
         finally:
@@ -1535,7 +1591,9 @@ async def main():
         source_entities = {}
         channel_by_chat_id = {}
         production_channels = list(dict.fromkeys(
-            ALL_CONTENT_CHANNELS + ALERT_FEED_CHANNELS + [BACKUP_TRIGGER_CHANNEL]
+            ALL_CONTENT_CHANNELS
+            + ALERT_FEED_CHANNELS
+            + [BACKUP_TRIGGER_CHANNEL, WAR_MONITOR_CHANNEL]
         ))
         for channel_name in production_channels:
             entity = await client.get_entity(channel_name)
@@ -1566,6 +1624,17 @@ async def main():
             raise RuntimeError("Cannot establish initial Kyiv alert state")
 
         await apply_alert_state(telegram_alert_state, f"@{BACKUP_TRIGGER_CHANNEL}", startup=True)
+
+        recent_war_monitor_messages = await client.get_messages(
+            source_entities[WAR_MONITOR_CHANNEL], limit=5
+        )
+        for recent in recent_war_monitor_messages:
+            if (
+                is_daily_war_monitor_report(recent.text or "")
+                and time.time() - recent.date.timestamp() <= 3 * 3600
+            ):
+                await process_war_monitor_report(recent)
+                break
 
         print(
             f"✅ Connected in production. Alert trigger: @{BACKUP_TRIGGER_CHANNEL}; "
@@ -1627,6 +1696,10 @@ async def main():
                     await reconcile_alert_state(f"@{BACKUP_TRIGGER_CHANNEL}")
                 return
 
+            if channel == WAR_MONITOR_CHANNEL:
+                await process_war_monitor_report(event.message)
+                return
+
             if channel in ALERT_FEED_CHANNELS:
                 if alert_active:
                     await process_alert_feed_message(
@@ -1664,7 +1737,6 @@ async def main():
         asyncio.create_task(alert_feed_poll_loop(client, source_entities))
 
     asyncio.create_task(summary_loop())
-    asyncio.create_task(summary_watchdog_loop())
     if not TEST_MODE:
         asyncio.create_task(health_loop())
         if UKRAINE_ALARM_API_KEY:

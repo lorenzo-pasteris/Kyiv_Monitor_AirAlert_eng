@@ -8,8 +8,8 @@ two purpose-built Telegram destinations:
 
 - **Kyiv Air Alert** — a quiet, alert-only channel that becomes active when Kyiv is
   under an air alert and publishes concise real-time updates and the all-clear;
-- **Kyiv Hourly News 🇺🇦** — a separate news group with categorized hourly summaries
-  and a morning recap after the overnight pause.
+- **Kyiv News 🇺🇦** — a separate news group with categorized summaries at 01:00,
+  07:00, 10:00, 13:00, 16:00, 19:00 and 22:00 Europe/Kyiv.
 
 Public output is produced in English. The service is informational and is not a
 replacement for official Ukrainian civil-defence instructions, sirens, or local
@@ -25,7 +25,12 @@ general news are never mixed blindly into the same pipeline.
 | Kyiv local news | `@kievinfo_kyiv` | City services, infrastructure and events affecting daily life in Kyiv |
 | Ukraine news | `@shv_ukr` | Political, economic, diplomatic and national developments |
 | Military monitoring | `@AMK_Mapping` | Relevant military and strategic developments |
-| Additional news | `@insiderukr` | Additional Ukrainian current-affairs reporting for the hourly analysis |
+| Additional news | `@insiderukr` | Additional Ukrainian current-affairs reporting for scheduled analysis |
+| Kyiv official | `@KyivCityOfficial` | City decisions, emergencies, roads and public services |
+| Kyiv public media | `@suspilne_kyiv` | Reported developments and consequences across Kyiv and the region |
+| National electricity | `@ukrenergo` | Grid conditions, restrictions and emergency power cuts |
+| National railway | `@UkrzalInfo` | Train delays, cancellations, diversions and service restoration |
+| Daily situation | `@war_monitor` | Only today's post beginning `📡 Обстановка станом на HH:MM` and tagged `#обстановка@war_monitor`; every other post is ignored |
 | Alert-state trigger | `@kyiv_airraid_alert` | Explicit Kyiv alert/all-clear state only; never used as news content |
 | Live alert feed | `@kyivnebomonitoring` | Actionable real-time updates translated and published only while ALERT is active |
 
@@ -37,11 +42,13 @@ operational chats are kept in the deployment environment, never in the repositor
 
 ### NORMAL
 
-Messages from the four NORMAL sources are persisted in SQLite and evaluated across
-the Kyiv City, Ukrainian National Developments, Military Developments and Air Defence
-Monitoring categories. Selected updates are summarized hourly. Between 01:00 and
-07:00 Europe/Kyiv, hourly publishing is paused and the accumulated material is used
-for the morning recap.
+Messages from the NORMAL sources are persisted in SQLite and assigned to one primary
+category: Ukraine — Key Developments, Kyiv & Region, Security & Attack Consequences, or
+Transport & Essential Services. Each category contains at most three updates. Selected
+updates are summarized at the seven configured Kyiv-time
+slots. Routine alerts, all-clears and live threat movements are excluded because they
+belong in the real-time channel. The strict daily `@war_monitor` situation report bypasses
+the summary queue and is published immediately to news, plus to alerts when the state is NORMAL.
 
 ### ALERT
 

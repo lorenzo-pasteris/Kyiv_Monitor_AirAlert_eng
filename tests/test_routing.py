@@ -107,7 +107,6 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         monitor.production_client = None
         monitor.content_source_entities = {}
         monitor.summary_lock = asyncio.Lock()
-        monitor.summary_watchdog_attempts.clear()
 
     async def asyncTearDown(self):
         monitor.state_store.CATEGORY_STATS_DB_PATH = self.original_db_path
@@ -177,7 +176,7 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
                 for key in monitor.CATEGORIES
             }
             stable_id = f"{channel}:{message_id}"
-            result["kyiv_city"] = {
+            result["kyiv_region"] = {
                 "selected_ids": [stable_id],
                 "bullets": ["Kyiv metro announced a service disruption."],
             }
@@ -440,6 +439,32 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_insider_ua_is_an_hourly_content_source_only(self):
         self.assertIn("insiderukr", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("insiderukr", monitor.ALERT_FEED_CHANNELS)
+
+    async def test_selected_official_sources_are_content_and_war_monitor_is_special(self):
+        self.assertNotIn("agentstvonews", monitor.ALL_CONTENT_CHANNELS)
+        for channel in ("KyivCityOfficial", "suspilne_kyiv", "ukrenergo", "UkrzalInfo"):
+            self.assertIn(channel, monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("war_monitor", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("war_monitor", monitor.ALERT_FEED_CHANNELS)
+
+    async def test_war_monitor_accepts_only_todays_tagged_daily_report(self):
+        today = datetime(2026, 8, 31).date()
+        valid = (
+            "📡 Обстановка станом на 00:00\n"
+            "31.08.26\n\n— Стратегічна авіація:\nНе активна;\n\n"
+            "#обстановка@war_monitor"
+        )
+        self.assertTrue(monitor.is_daily_war_monitor_report(valid, today))
+        self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("31.08.26", "30.08.26"), today))
+        self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("📡 Обстановка", "Оновлення"), today))
+        self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("#обстановка@war_monitor", ""), today))
+
+    async def test_summary_schedule_uses_requested_kyiv_hours(self):
+        self.assertEqual(monitor.SUMMARY_HOURS, (1, 7, 10, 13, 16, 19, 22))
+        now = datetime(2026, 8, 31, 10, 30, tzinfo=monitor.TZ)
+        self.assertEqual(monitor.seconds_until_next_summary(now), 2.5 * 3600)
+        after_last = datetime(2026, 8, 31, 22, 30, tzinfo=monitor.TZ)
+        self.assertEqual(monitor.seconds_until_next_summary(after_last), 2.5 * 3600)
 
     async def test_manual_override_admin_allowlist(self):
         self.assertTrue(monitor.is_authorized_admin(392256147))

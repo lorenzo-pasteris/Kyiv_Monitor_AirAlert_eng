@@ -62,12 +62,26 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
             "at Yakimivka station, with a railway branch for rapid unloading of heavy wheeled "
             "and tracked military vehicles.",
         ]
-        parsed["categories"]["kyiv_city"]["bullets"] = bullets * 4
+        parsed["categories"]["kyiv_region"]["bullets"] = bullets * 4
 
         normalized = monitor.normalize_category_result(parsed, [])
 
-        self.assertEqual(len(normalized["kyiv_city"]["bullets"]), 5)
-        self.assertEqual(normalized["kyiv_city"]["bullets"][:2], bullets)
+        self.assertEqual(len(normalized["kyiv_region"]["bullets"]), 3)
+        self.assertEqual(normalized["kyiv_region"]["bullets"][:2], bullets)
+
+    def test_normalizer_rejects_one_message_in_multiple_categories(self):
+        message_id = "source:1"
+        parsed = {
+            "categories": {
+                key: {"selected_ids": [], "bullets": []}
+                for key in monitor.CATEGORIES
+            }
+        }
+        parsed["categories"]["ukraine_key_developments"]["selected_ids"] = [message_id]
+        parsed["categories"]["kyiv_region"]["selected_ids"] = [message_id]
+
+        with self.assertRaisesRegex(ValueError, "multiple categories"):
+            monitor.normalize_category_result(parsed, [{"id": message_id}])
 
     async def test_failed_public_start_does_not_commit_state_and_can_retry(self):
         results = [None, {"message_id": 42}]
