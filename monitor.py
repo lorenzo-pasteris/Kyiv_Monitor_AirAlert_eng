@@ -622,17 +622,36 @@ async def process_war_monitor_report(message):
     print(f"[WAR MONITOR PUBLISHED] id={message.id} alert_copy={not alert_active}")
     return True
 
-async def ensure_alert_feed_membership(client, source_entities):
-    """Join every ALERT feed; resolving a public channel alone does not deliver live updates."""
-    for channel in ALERT_FEED_CHANNELS:
+async def ensure_live_source_membership(client, source_entities):
+    """Join sources that depend on Telegram push updates."""
+    for channel in ALERT_FEED_CHANNELS + [WAR_MONITOR_CHANNEL]:
         try:
             await client(JoinChannelRequest(source_entities[channel]))
-            print(f"[ALERT SOURCE MEMBERSHIP] joined=@{channel}")
+            print(f"[LIVE SOURCE MEMBERSHIP] joined=@{channel}")
         except Exception as exc:
             if type(exc).__name__ == "UserAlreadyParticipantError":
-                print(f"[ALERT SOURCE MEMBERSHIP] already_joined=@{channel}")
+                print(f"[LIVE SOURCE MEMBERSHIP] already_joined=@{channel}")
                 continue
-            raise RuntimeError(f"Cannot join required ALERT feed @{channel}") from exc
+            raise RuntimeError(f"Cannot join required live source @{channel}") from exc
+
+
+async def recover_war_monitor_report(client, source_entities):
+    """Recover today's recent report if a Telegram push update was missed."""
+    messages = await client.get_messages(source_entities[WAR_MONITOR_CHANNEL], limit=5)
+    for message in messages:
+        age = max(0, time.time() - message.date.timestamp())
+        if is_daily_war_monitor_report(message.text or "") and age <= 3 * 3600:
+            return await process_war_monitor_report(message)
+    return False
+
+
+async def war_monitor_poll_loop(client, source_entities):
+    while True:
+        try:
+            await recover_war_monitor_report(client, source_entities)
+        except Exception as exc:
+            print(f"[WAR MONITOR POLL ERROR] {type(exc).__name__}: {exc}")
+        await asyncio.sleep(60)
 
 
 async def backfill_alert_feed(client, source_entities):
@@ -1603,7 +1622,7 @@ async def main():
         content_source_entities = {
             channel: source_entities[channel] for channel in ALL_CONTENT_CHANNELS
         }
-        await ensure_alert_feed_membership(client, source_entities)
+        await ensure_live_source_membership(client, source_entities)
 
         # Establish the Telegram trigger state immediately from its latest explicit event.
         recent_trigger_messages = await client.get_messages(source_entities[BACKUP_TRIGGER_CHANNEL], limit=20)
@@ -1625,16 +1644,7 @@ async def main():
 
         await apply_alert_state(telegram_alert_state, f"@{BACKUP_TRIGGER_CHANNEL}", startup=True)
 
-        recent_war_monitor_messages = await client.get_messages(
-            source_entities[WAR_MONITOR_CHANNEL], limit=5
-        )
-        for recent in recent_war_monitor_messages:
-            if (
-                is_daily_war_monitor_report(recent.text or "")
-                and time.time() - recent.date.timestamp() <= 3 * 3600
-            ):
-                await process_war_monitor_report(recent)
-                break
+        await recover_war_monitor_report(client, source_entities)
 
         print(
             f"✅ Connected in production. Alert trigger: @{BACKUP_TRIGGER_CHANNEL}; "
@@ -1735,6 +1745,7 @@ async def main():
         # Telethon push events are best-effort. The cursor-based poller is the
         # production safety net and recovers any post the live listener misses.
         asyncio.create_task(alert_feed_poll_loop(client, source_entities))
+        asyncio.create_task(war_monitor_poll_loop(client, source_entities))
 
     asyncio.create_task(summary_loop())
     if not TEST_MODE:
