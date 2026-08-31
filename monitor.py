@@ -91,6 +91,8 @@ SUSPILNE_KYIV_CHANNEL = "suspilne_kyiv"
 UKRENERGO_CHANNEL = "ukrenergo"
 UKRZALINFO_CHANNEL = "UkrzalInfo"
 WAR_MONITOR_CHANNEL = "war_monitor"
+WAR_MONITOR_POLL_START = (23, 30)
+WAR_MONITOR_POLL_END = (1, 0)
 ALERT_FEED_CHANNEL = "kyivnebomonitoring"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
@@ -603,7 +605,7 @@ async def process_war_monitor_report(message):
         return False
     if not state_store.claim_alert_feed_delivery(WAR_MONITOR_CHANNEL, message.id, raw):
         print(f"[WAR MONITOR DUPLICATE] id={message.id}")
-        return False
+        return True
 
     translated = await translate_war_monitor_report(raw)
     if not translated:
@@ -645,10 +647,36 @@ async def recover_war_monitor_report(client, source_entities):
     return False
 
 
+def is_war_monitor_poll_window(now=None):
+    local_now = (now or datetime.now(TZ)).astimezone(TZ)
+    minutes = local_now.hour * 60 + local_now.minute
+    start = WAR_MONITOR_POLL_START[0] * 60 + WAR_MONITOR_POLL_START[1]
+    end = WAR_MONITOR_POLL_END[0] * 60 + WAR_MONITOR_POLL_END[1]
+    return minutes >= start or minutes < end
+
+
+def seconds_until_war_monitor_poll_start(now=None):
+    local_now = (now or datetime.now(TZ)).astimezone(TZ)
+    target = local_now.replace(
+        hour=WAR_MONITOR_POLL_START[0],
+        minute=WAR_MONITOR_POLL_START[1],
+        second=0,
+        microsecond=0,
+    )
+    if local_now >= target:
+        target += timedelta(days=1)
+    return max(0, (target - local_now).total_seconds())
+
+
 async def war_monitor_poll_loop(client, source_entities):
     while True:
+        if not is_war_monitor_poll_window():
+            await asyncio.sleep(seconds_until_war_monitor_poll_start())
+            continue
         try:
-            await recover_war_monitor_report(client, source_entities)
+            if await recover_war_monitor_report(client, source_entities):
+                await asyncio.sleep(seconds_until_war_monitor_poll_start())
+                continue
         except Exception as exc:
             print(f"[WAR MONITOR POLL ERROR] {type(exc).__name__}: {exc}")
         await asyncio.sleep(60)
@@ -1644,7 +1672,8 @@ async def main():
 
         await apply_alert_state(telegram_alert_state, f"@{BACKUP_TRIGGER_CHANNEL}", startup=True)
 
-        await recover_war_monitor_report(client, source_entities)
+        if is_war_monitor_poll_window():
+            await recover_war_monitor_report(client, source_entities)
 
         print(
             f"✅ Connected in production. Alert trigger: @{BACKUP_TRIGGER_CHANNEL}; "
