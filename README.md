@@ -8,8 +8,8 @@ two purpose-built Telegram destinations:
 
 - **Kyiv Air Alert** — a quiet, alert-only channel that becomes active when Kyiv is
   under an air alert and publishes concise real-time updates and the all-clear;
-- **Kyiv News 🇺🇦** — a separate news group with categorized summaries at 01:00,
-  07:00, 10:00, 13:00, 16:00, 19:00 and 22:00 Europe/Kyiv.
+- **Kyiv News 🇺🇦** — a separate news group with categorized summaries every two
+  hours from 07:00 through 01:00 Europe/Kyiv.
 
 Public output is produced in English. The service is informational and is not a
 replacement for official Ukrainian civil-defence instructions, sirens, or local
@@ -45,8 +45,8 @@ operational chats are kept in the deployment environment, never in the repositor
 Messages from the NORMAL sources are persisted in SQLite and assigned to one primary
 category: Ukraine — Key Developments, Kyiv & Region, Security & Attack Consequences, or
 Transport & Essential Services. Each category contains at most three updates. Selected
-updates are summarized at the seven configured Kyiv-time
-slots. Routine alerts, all-clears and live threat movements are excluded because they
+updates are summarized at 01:00 and every two hours from 07:00 through 23:00 Kyiv time.
+Routine alerts, all-clears and live threat movements are excluded because they
 belong in the real-time channel. The strict daily `@war_monitor` situation report bypasses
 the summary queue and is published immediately to news, plus to alerts when the state is NORMAL.
 

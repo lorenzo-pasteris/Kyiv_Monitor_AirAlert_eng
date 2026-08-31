@@ -460,11 +460,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("#обстановка@war_monitor", ""), today))
 
     async def test_summary_schedule_uses_requested_kyiv_hours(self):
-        self.assertEqual(monitor.SUMMARY_HOURS, (1, 7, 10, 13, 16, 19, 22))
+        self.assertEqual(monitor.SUMMARY_HOURS, (1, 7, 9, 11, 13, 15, 17, 19, 21, 23))
         now = datetime(2026, 8, 31, 10, 30, tzinfo=monitor.TZ)
-        self.assertEqual(monitor.seconds_until_next_summary(now), 2.5 * 3600)
+        self.assertEqual(monitor.seconds_until_next_summary(now), 0.5 * 3600)
         after_last = datetime(2026, 8, 31, 22, 30, tzinfo=monitor.TZ)
-        self.assertEqual(monitor.seconds_until_next_summary(after_last), 2.5 * 3600)
+        self.assertEqual(monitor.seconds_until_next_summary(after_last), 0.5 * 3600)
 
     async def test_manual_override_admin_allowlist(self):
         self.assertTrue(monitor.is_authorized_admin(392256147))
