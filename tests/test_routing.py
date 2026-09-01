@@ -210,6 +210,26 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(status, "processed")
 
+    async def test_rejected_analysis_stays_private_and_retains_pending(self):
+        monitor.state_store.persist_normal_message(
+            monitor.KYIV_INFO_CHANNEL,
+            502,
+            datetime.now(timezone.utc),
+            "A relevant Kyiv update that must be retried.",
+        )
+        public_messages = []
+        owner_messages = []
+        monitor.analyze_hourly_matrix = lambda *args: asyncio.sleep(0, result=None)
+        monitor.send_to_summary_group = lambda text: asyncio.sleep(0, result=public_messages.append(text))
+        monitor.send_to_owner = lambda text: asyncio.sleep(
+            0, result=owner_messages.append(text) or {"message_id": 1}
+        )
+
+        self.assertFalse(await monitor.build_summary(trigger="rejected-analysis"))
+        self.assertEqual(public_messages, [])
+        self.assertEqual(len(monitor.state_store.load_pending_normal_messages()), 1)
+        self.assertIn("Nothing was published", owner_messages[0])
+
     async def test_alert_discards_pending_and_clear_advances_all_cursors(self):
         now = datetime.now(timezone.utc)
         monitor.state_store.persist_normal_message(
