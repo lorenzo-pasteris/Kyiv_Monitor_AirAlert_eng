@@ -474,6 +474,50 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("📡 Обстановка", "Оновлення"), today))
         self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("#обстановка@war_monitor", ""), today))
 
+    async def test_preparation_signal_filter_keeps_indicators_not_routine_trajectories(self):
+        self.assertTrue(monitor.is_preparation_signal_candidate("Активні частоти стратегічної авіації"))
+        self.assertTrue(monitor.is_preparation_signal_candidate("Розвід БпЛА працює як ретранслятор"))
+        self.assertFalse(monitor.is_preparation_signal_candidate("Один БпЛА летить на Бровари"))
+
+    async def test_war_monitor_publishes_to_news_only(self):
+        original_claim = monitor.state_store.claim_alert_feed_delivery
+        original_collect = monitor.collect_preparation_signals
+        original_translate = monitor.translate_war_monitor_report
+        original_summary_sender = monitor.send_to_summary_group
+        original_alert_sender = monitor.send_to_alert_channel
+        news_messages = []
+        alert_messages = []
+
+        monitor.state_store.claim_alert_feed_delivery = lambda *args: True
+        monitor.collect_preparation_signals = lambda: asyncio.sleep(0, result=[])
+        monitor.translate_war_monitor_report = lambda *args: asyncio.sleep(0, result="assessment")
+        monitor.send_to_summary_group = lambda text: asyncio.sleep(0, result=news_messages.append(text) or {"message_id": 1})
+        monitor.send_to_alert_channel = lambda text: asyncio.sleep(0, result=alert_messages.append(text) or {"message_id": 2})
+        try:
+            message = FakeTelegramMessage(
+                99,
+                "📡 Обстановка станом на 00:00\n01.09.26\n\n#обстановка@war_monitor",
+                datetime(2026, 9, 1, 0, 1, tzinfo=monitor.TZ),
+            )
+            self.assertTrue(await monitor.process_war_monitor_report(message))
+            self.assertEqual(news_messages, ["assessment"])
+            self.assertEqual(alert_messages, [])
+        finally:
+            monitor.state_store.claim_alert_feed_delivery = original_claim
+            monitor.collect_preparation_signals = original_collect
+            monitor.translate_war_monitor_report = original_translate
+            monitor.send_to_summary_group = original_summary_sender
+            monitor.send_to_alert_channel = original_alert_sender
+
+    async def test_night_recap_is_capped_to_seven_bullets_and_two_per_category(self):
+        result = {
+            key: {"selected_ids": [], "bullets": [f"{key}-{index}" for index in range(3)]}
+            for key in monitor.CATEGORIES
+        }
+        capped = monitor.cap_night_recap_bullets(result)
+        self.assertEqual(sum(len(data["bullets"]) for data in capped.values()), 7)
+        self.assertTrue(all(len(data["bullets"]) <= 2 for data in capped.values()))
+
     async def test_war_monitor_polls_only_during_the_night_window(self):
         self.assertFalse(monitor.is_war_monitor_poll_window(datetime(2026, 9, 1, 23, 29, tzinfo=monitor.TZ)))
         self.assertTrue(monitor.is_war_monitor_poll_window(datetime(2026, 9, 1, 23, 30, tzinfo=monitor.TZ)))

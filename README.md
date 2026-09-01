@@ -30,7 +30,7 @@ general news are never mixed blindly into the same pipeline.
 | Kyiv public media | `@suspilne_kyiv` | Reported developments and consequences across Kyiv and the region |
 | National electricity | `@ukrenergo` | Grid conditions, restrictions and emergency power cuts |
 | National railway | `@UkrzalInfo` | Train delays, cancellations, diversions and service restoration |
-| Daily situation | `@war_monitor` | Only today's post beginning `📡 Обстановка станом на HH:MM` and tagged `#обстановка@war_monitor`; every other post is ignored |
+| Night threat assessment | `@war_monitor` + preparation signals from configured news sources | Only today's post beginning `📡 Обстановка станом на HH:MM` and tagged `#обстановка@war_monitor` triggers one civilian-facing assessment in the News channel; every other post is ignored |
 | Alert-state trigger | `@kyiv_airraid_alert` | Explicit Kyiv alert/all-clear state only; never used as news content |
 | Live alert feed | `@kyivnebomonitoring` | Actionable real-time updates translated and published only while ALERT is active |
 
@@ -44,11 +44,13 @@ operational chats are kept in the deployment environment, never in the repositor
 
 Messages from the NORMAL sources are persisted in SQLite and assigned to one primary
 category: Ukraine — Key Developments, Kyiv & Region, Security & Attack Consequences, or
-Transport & Essential Services. Each category contains at most three updates. Selected
-updates are summarized at 01:00 and every two hours from 07:00 through 23:00 Kyiv time.
+Transport & Essential Services. Each category contains at most three updates, while the
+07:00 overnight recap is capped at seven events and two per category. Selected updates
+are summarized at 01:00 and every two hours from 07:00 through 23:00 Kyiv time.
 Routine alerts, all-clears and live threat movements are excluded because they
 belong in the real-time channel. The strict daily `@war_monitor` situation report bypasses
-the summary queue and is published immediately to news, plus to alerts when the state is NORMAL.
+the summary queue and produces one News-only threat assessment using up to eight preparation
+signals from the preceding six hours.
 
 ### ALERT
 
