@@ -79,7 +79,7 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
             bullets,
         )
 
-    def test_normalizer_rejects_one_message_in_multiple_categories(self):
+    def test_normalizer_keeps_one_message_in_only_one_category(self):
         message_id = "source:1"
         parsed = {
             "categories": {
@@ -90,8 +90,13 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         parsed["categories"]["ukraine_key_developments"]["selected_ids"] = [message_id]
         parsed["categories"]["kyiv_region"]["selected_ids"] = [message_id]
 
-        with self.assertRaisesRegex(ValueError, "multiple categories"):
-            monitor.normalize_category_result(parsed, [{"id": message_id}])
+        normalized = monitor.normalize_category_result(parsed, [{"id": message_id}])
+
+        self.assertEqual(
+            normalized["ukraine_key_developments"]["selected_ids"],
+            [message_id],
+        )
+        self.assertEqual(normalized["kyiv_region"]["selected_ids"], [])
 
     async def test_failed_public_start_does_not_commit_state_and_can_retry(self):
         results = [None, {"message_id": 42}]

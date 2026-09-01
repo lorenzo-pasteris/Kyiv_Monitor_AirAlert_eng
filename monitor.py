@@ -26,12 +26,10 @@ import state_store
 from alert_rules import classify_telegram_alert
 from predeploy_check import validate_environment
 from text_processing import (
-    SECURITY_KEYWORDS,
     build_alert_translation_prompt,
     clean_alert_source_text,
     clean_text,
     contains_operational_location,  # noqa: F401 -- re-exported for routing regressions
-    contains_any,
     is_actionable_alert_message,
     is_commentary_alert_message,
     is_non_operational_alert_message,
@@ -939,7 +937,11 @@ def normalize_category_result(parsed, messages):
             raise ValueError(f"{category_key} returned unknown IDs: {unknown_ids[:5]}")
         duplicate_ids = [message_id for message_id in selected_ids if message_id in assigned_ids]
         if duplicate_ids:
-            raise ValueError(f"message IDs assigned to multiple categories: {duplicate_ids[:5]}")
+            print(
+                f"[CATEGORY DUPLICATE IDS] category={category_key} "
+                f"removed={duplicate_ids[:5]}"
+            )
+            selected_ids = [message_id for message_id in selected_ids if message_id not in assigned_ids]
         assigned_ids.update(selected_ids)
 
         normalized_items = []
@@ -1233,31 +1235,6 @@ def cap_night_recap_bullets(category_results):
     return category_results
 
 
-def build_emergency_category_result(messages):
-    """Last resort: publish only original source excerpts, without AI synthesis."""
-    result = {
-        category_key: {"selected_ids": [], "items": []}
-        for category_key in CATEGORIES
-    }
-    for item in messages:
-        lowered = item["text"].lower()
-        if contains_any(lowered, SECURITY_KEYWORDS):
-            category_key = "security_consequences"
-        elif item["channel"] == KYIV_INFO_CHANNEL:
-            category_key = "kyiv_region"
-        else:
-            category_key = "ukraine_key_developments"
-        result[category_key]["selected_ids"].append(item["id"])
-        if len(result[category_key]["items"]) < 3:
-            original_excerpt = re.sub(r"\\s+", " ", item["text"]).strip()[:160]
-            result[category_key]["items"].append({
-                "event_key": f"fallback|{item['id'].lower()}",
-                "text": f"Original source excerpt from @{item['channel']}: {original_excerpt}",
-                "is_update": False,
-            })
-    return result
-
-
 async def telegram_request(method, payload):
     """Telegram Bot API request with bounded retries that honor flood control."""
     for attempt in range(4):
@@ -1417,13 +1394,13 @@ async def build_summary(night_recap=False, trigger="scheduled"):
             published_history,
             published_source_history,
         )
-        used_emergency_fallback = category_results is None
-        if used_emergency_fallback:
-            category_results = build_emergency_category_result(snapshots)
+        if category_results is None:
             await send_to_owner(
-                "⚠️ <b>Hourly summary AI fallback used</b>\n"
-                "All AI retries failed; a deterministic source-text summary was generated."
+                "⚠️ <b>News summary analysis rejected</b>\n"
+                "Nothing was published. Pending messages were retained for the next update."
             )
+            print(f"[SUMMARY ANALYSIS REJECTED] trigger={trigger}; buffers retained")
+            return False
         if night_recap:
             category_results = cap_night_recap_bullets(category_results)
         category_results = filter_previously_published_events(
@@ -1437,7 +1414,7 @@ async def build_summary(night_recap=False, trigger="scheduled"):
 
         print(
             f"[HOURLY CATEGORY STATS] run_at={run_at} trigger={trigger} "
-            f"emergency_fallback={used_emergency_fallback}"
+            "emergency_fallback=False"
         )
         for category_key, category_meta in CATEGORIES.items():
             category_data = category_results[category_key]
@@ -1466,16 +1443,9 @@ async def build_summary(night_recap=False, trigger="scheduled"):
                     f"{category_meta['icon']} <b>{category_meta['name']}</b>\n{bullets}"
                 )
 
-        if used_emergency_fallback:
-            sections.insert(
-                0,
-                "⚠️ <b>AI synthesis unavailable</b>\n"
-                "The entries below are unchanged original-source excerpts, not an AI summary.",
-            )
-
         time_label = datetime.now(TZ).strftime("%H:%M %Z")
         if sections:
-            title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>Hourly Update"
+            title = "🌙 <b>Overnight Recap" if night_recap else "📋 <b>News Update"
             result = await send_to_summary_group(
                 f"{title} — {time_label}</b>\n\n" + "\n\n".join(sections)
             )
@@ -1487,8 +1457,8 @@ async def build_summary(night_recap=False, trigger="scheduled"):
                 )
             else:
                 heartbeat = (
-                    f"📋 <b>Hourly Update — {time_label}</b>\n\n"
-                    "No relevant updates in the last hour."
+                    f"📋 <b>News Update — {time_label}</b>\n\n"
+                    "No relevant updates since the previous update."
                 )
             heartbeat_sender = send_to_summary_group if TEST_MODE else send_to_owner
             result = await heartbeat_sender(heartbeat)
