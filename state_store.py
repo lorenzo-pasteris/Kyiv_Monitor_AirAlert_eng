@@ -404,3 +404,26 @@ def persist_category_stats(run_at, snapshots, category_results, channels):
                         )
     except Exception as exc:
         print(f"[STATS DB ERROR] write failed: {type(exc).__name__}: {exc}")
+
+
+def load_recent_published_classifications(hours=24, limit=40):
+    """Return recent source material already used in public summaries."""
+    if not stats_db_ready:
+        return []
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            rows = connection.execute(
+                """SELECT run_at, category, preview
+                   FROM hourly_classifications
+                   ORDER BY run_at DESC
+                   LIMIT 200""",
+            ).fetchall()
+        return [
+            {"run_at": run_at, "category": category, "preview": preview}
+            for run_at, category, preview in rows
+            if datetime.fromisoformat(run_at).astimezone(timezone.utc) >= cutoff
+        ][:int(limit)]
+    except Exception as exc:
+        print(f"[STATS DB ERROR] recent classification read failed: {type(exc).__name__}: {exc}")
+        return []

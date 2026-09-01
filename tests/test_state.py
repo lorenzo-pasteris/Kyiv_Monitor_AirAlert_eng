@@ -50,7 +50,7 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
     def test_normalizer_caps_bullet_count_without_truncating_text(self):
         parsed = {
             "categories": {
-                key: {"selected_ids": [], "bullets": []}
+                key: {"selected_ids": [], "items": []}
                 for key in monitor.CATEGORIES
             }
         }
@@ -62,18 +62,28 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
             "at Yakimivka station, with a railway branch for rapid unloading of heavy wheeled "
             "and tracked military vehicles.",
         ]
-        parsed["categories"]["kyiv_region"]["bullets"] = bullets * 4
+        parsed["categories"]["kyiv_region"]["items"] = [
+            {
+                "event_key": f"2026-09-01|kyiv|event-{index}",
+                "text": bullet,
+                "is_update": False,
+            }
+            for index, bullet in enumerate(bullets * 4)
+        ]
 
         normalized = monitor.normalize_category_result(parsed, [])
 
-        self.assertEqual(len(normalized["kyiv_region"]["bullets"]), 3)
-        self.assertEqual(normalized["kyiv_region"]["bullets"][:2], bullets)
+        self.assertEqual(len(normalized["kyiv_region"]["items"]), 3)
+        self.assertEqual(
+            [item["text"] for item in normalized["kyiv_region"]["items"][:2]],
+            bullets,
+        )
 
     def test_normalizer_rejects_one_message_in_multiple_categories(self):
         message_id = "source:1"
         parsed = {
             "categories": {
-                key: {"selected_ids": [], "bullets": []}
+                key: {"selected_ids": [], "items": []}
                 for key in monitor.CATEGORIES
             }
         }
@@ -433,9 +443,12 @@ class PersistenceEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         snapshots = [{"id": "a:1", "channel": channel, "text": "some classified text"}]
         category_key = next(iter(monitor.CATEGORIES))
         category_results = {
-            key: {"selected_ids": [], "bullets": []} for key in monitor.CATEGORIES
+            key: {"selected_ids": [], "items": []} for key in monitor.CATEGORIES
         }
-        category_results[category_key] = {"selected_ids": ["a:1"], "bullets": ["x"]}
+        category_results[category_key] = {
+            "selected_ids": ["a:1"],
+            "items": [{"event_key": "test|event", "text": "x", "is_update": False}],
+        }
 
         monitor.state_store.persist_category_stats(
             run_at, snapshots, category_results, monitor.ALL_CONTENT_CHANNELS
@@ -454,6 +467,9 @@ class PersistenceEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()
         self.assertEqual(valid, 1)
         self.assertEqual(classification[0], "some classified text")
+        recent = monitor.state_store.load_recent_published_classifications()
+        self.assertEqual(recent[0]["category"], category_key)
+        self.assertEqual(recent[0]["preview"], "some classified text")
 
     # -- acquire_telethon_session_lock -------------------------------------------------
 

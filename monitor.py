@@ -95,6 +95,8 @@ WAR_MONITOR_POLL_START = (23, 30)
 WAR_MONITOR_POLL_END = (1, 0)
 PREPARATION_LOOKBACK_HOURS = 6
 PREPARATION_MAX_SIGNALS = 8
+SUMMARY_EVENT_HISTORY_KEY = "summary_event_history_v1"
+SUMMARY_EVENT_HISTORY_HOURS = 24
 ALERT_FEED_CHANNEL = "kyivnebomonitoring"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
@@ -206,12 +208,21 @@ CATEGORY_RESULT_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                         },
-                        "bullets": {
+                        "items": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "event_key": {"type": "string"},
+                                    "text": {"type": "string"},
+                                    "is_update": {"type": "boolean"},
+                                },
+                                "required": ["event_key", "text", "is_update"],
+                                "additionalProperties": False,
+                            },
                         },
                     },
-                    "required": ["selected_ids", "bullets"],
+                    "required": ["selected_ids", "items"],
                     "additionalProperties": False,
                 }
                 for key in CATEGORIES
@@ -906,23 +917,22 @@ def normalize_category_result(parsed, messages):
     valid_ids = {item["id"] for item in messages}
     normalized = {}
     assigned_ids = set()
+    assigned_event_keys = set()
     for category_key in CATEGORIES:
         category_data = supplied[category_key]
         if not isinstance(category_data, dict):
             raise TypeError(f"{category_key} must be an object")
-        if set(category_data.keys()) != {"selected_ids", "bullets"}:
-            raise ValueError(f"{category_key} must contain only selected_ids and bullets")
+        if set(category_data.keys()) != {"selected_ids", "items"}:
+            raise ValueError(f"{category_key} must contain only selected_ids and items")
 
         selected_ids = category_data["selected_ids"]
-        bullets = category_data["bullets"]
+        items = category_data["items"]
         if not isinstance(selected_ids, list) or not all(
             isinstance(message_id, str) for message_id in selected_ids
         ):
             raise TypeError(f"{category_key}.selected_ids must be an array of strings")
-        if not isinstance(bullets, list) or not all(
-            isinstance(bullet, str) for bullet in bullets
-        ):
-            raise TypeError(f"{category_key}.bullets must be an array of strings")
+        if not isinstance(items, list):
+            raise TypeError(f"{category_key}.items must be an array")
 
         unknown_ids = [message_id for message_id in selected_ids if message_id not in valid_ids]
         if unknown_ids:
@@ -932,15 +942,115 @@ def normalize_category_result(parsed, messages):
             raise ValueError(f"message IDs assigned to multiple categories: {duplicate_ids[:5]}")
         assigned_ids.update(selected_ids)
 
+        normalized_items = []
+        for item in items:
+            if not isinstance(item, dict) or set(item.keys()) != {"event_key", "text", "is_update"}:
+                raise TypeError(f"{category_key}.items contains an invalid event")
+            if not isinstance(item["event_key"], str) or not isinstance(item["text"], str):
+                raise TypeError(f"{category_key}.items event_key and text must be strings")
+            if not isinstance(item["is_update"], bool):
+                raise TypeError(f"{category_key}.items is_update must be boolean")
+            event_key = re.sub(r"[^a-z0-9|_-]+", "-", item["event_key"].lower()).strip("-")[:120]
+            text = item["text"].strip().lstrip("•- ").strip()
+            if not event_key or not text or event_key in assigned_event_keys:
+                continue
+            assigned_event_keys.add(event_key)
+            normalized_items.append({
+                "event_key": event_key,
+                "text": text,
+                "is_update": item["is_update"],
+            })
+            if len(normalized_items) == 3:
+                break
+
         normalized[category_key] = {
             "selected_ids": list(dict.fromkeys(selected_ids)),
-            "bullets": [
-                bullet.strip().lstrip("•- ").strip()
-                for bullet in bullets
-                if bullet.strip()
-            ][:3],
+            "items": normalized_items,
         }
     return normalized
+
+
+def load_summary_event_history(now=None):
+    raw = state_store.load_operational_state(SUMMARY_EVENT_HISTORY_KEY)
+    if not raw:
+        return []
+    cutoff = (now or datetime.now(TZ)) - timedelta(hours=SUMMARY_EVENT_HISTORY_HOURS)
+    try:
+        items = json.loads(raw)
+        return [
+            item for item in items
+            if isinstance(item, dict)
+            and set(item) == {"event_key", "category", "text", "published_at"}
+            and datetime.fromisoformat(item["published_at"]) >= cutoff
+        ]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+
+def persist_summary_event_history(previous, category_results, published_at):
+    by_key = {item["event_key"]: item for item in previous}
+    for category_key, category_data in category_results.items():
+        for item in category_data["items"]:
+            by_key.pop(item["event_key"], None)
+            by_key[item["event_key"]] = {
+                "event_key": item["event_key"],
+                "category": category_key,
+                "text": item["text"],
+                "published_at": published_at,
+            }
+    state_store.persist_operational_state(
+        SUMMARY_EVENT_HISTORY_KEY,
+        json.dumps(list(by_key.values())[-40:], ensure_ascii=False),
+    )
+
+
+def summary_event_similarity(left, right):
+    def normalized(value):
+        value = re.sub(r"\d+(?:[.,]\d+)?", " ", value.lower())
+        return re.sub(r"[^a-zа-яіїєґ]+", " ", value).strip()
+
+    left_normalized = normalized(left)
+    right_normalized = normalized(right)
+    if not left_normalized or not right_normalized:
+        return 0.0
+    left_tokens = set(left_normalized.split())
+    right_tokens = set(right_normalized.split())
+    overlap = len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+    return max(overlap, SequenceMatcher(None, left_normalized, right_normalized).ratio())
+
+
+def filter_previously_published_events(category_results, history):
+    """Suppress repeats globally and keep material updates in their original category."""
+    accepted = {key: {"selected_ids": data["selected_ids"], "items": []} for key, data in category_results.items()}
+    known = list(history)
+    current = []
+    for category_key in CATEGORIES:
+        for item in category_results[category_key]["items"]:
+            match = next((old for old in known if old["event_key"] == item["event_key"]), None)
+            if match is None:
+                match = next(
+                    (old for old in known if summary_event_similarity(old["text"], item["text"]) >= 0.82),
+                    None,
+                )
+            if match:
+                if not item["is_update"] or summary_event_similarity(match["text"], item["text"]) >= 0.97:
+                    print(f"[SUMMARY DUPLICATE] event={match['event_key']} category={category_key}")
+                    continue
+                item = dict(item, event_key=match["event_key"])
+                category_key = match["category"] if match["category"] in CATEGORIES else category_key
+                if not item["text"].lower().startswith("update"):
+                    item["text"] = "Update — " + item["text"]
+
+            duplicate_now = next(
+                (old for old in current if old["event_key"] == item["event_key"] or summary_event_similarity(old["text"], item["text"]) >= 0.82),
+                None,
+            )
+            if duplicate_now or len(accepted[category_key]["items"]) >= 3:
+                print(f"[SUMMARY CROSS-CATEGORY DUPLICATE] event={item['event_key']} category={category_key}")
+                continue
+            accepted[category_key]["items"].append(item)
+            current.append({"event_key": item["event_key"], "text": item["text"]})
+    return accepted
 
 
 def retry_after_seconds(response, default):
@@ -952,11 +1062,11 @@ def retry_after_seconds(response, default):
         return default
 
 
-async def analyze_hourly_matrix(messages):
+async def analyze_hourly_matrix(messages, published_history=None, published_source_history=None):
     """Use Anthropic Structured Outputs with error-specific retry policies."""
     if not messages:
         return {
-            category_key: {"selected_ids": [], "bullets": []}
+            category_key: {"selected_ids": [], "items": []}
             for category_key in CATEGORIES
         }
 
@@ -967,6 +1077,14 @@ async def analyze_hourly_matrix(messages):
         f"ID={item['id']} SOURCE=@{item['channel']} TIME={item['time']}\n{item['text'][:500]}"
         for item in messages
     )
+    prior_event_text = "\n".join(
+        f"EVENT={item['event_key']} CATEGORY={item['category']} TEXT={item['text'][:200]}"
+        for item in (published_history or [])[-20:]
+    ) or "None recorded."
+    prior_source_text = "\n".join(
+        f"CATEGORY={item['category']} TEXT={item['preview'][:180]}"
+        for item in (published_source_history or [])
+    ) or "None recorded."
     prompt = (
         "Classify Ukrainian news messages. The source is provenance only: evaluate EVERY message against "
         "EVERY category below. Assign each qualifying message to exactly one best primary category; the same "
@@ -986,10 +1104,17 @@ async def analyze_hourly_matrix(messages):
         "service disruption, transport changes and official public guidance over weapon inventories.\n\n"
         f"Categories:\n{category_text}\n\n"
         "Use the required structured output schema. selected_ids must contain exact message IDs that qualify. "
-        "bullets must contain at most three concise English summary strings per category. Within each category, "
+        "items must contain at most three concise English events per category. event_key must be a stable lowercase "
+        "key in the form YYYY-MM-DD|location|event-type. Reuse the exact prior event_key for a material update. "
+        "Set is_update=true only when a previously published event has a concrete new consequence, revised official "
+        "figure, restoration or closure; otherwise reject it. Do not republish an old event merely because a new "
+        "source repeats it. Within each category, "
         "Write complete bullets; never truncate a sentence or word. "
         "order bullets chronologically from the earliest event/message time to the latest. Preserve stated "
-        "locations, uncertainty, times and quantities.\n\nMessages:\n" + message_text
+        "locations, uncertainty, times and quantities.\n\n"
+        "PREVIOUSLY PUBLISHED EVENTS (reuse keys only for material updates):\n" + prior_event_text + "\n\n"
+        "PREVIOUSLY USED SOURCE MATERIAL (do not summarize again without a material update):\n" + prior_source_text + "\n\n"
+        "NEW MESSAGES:\n" + message_text
     )
 
     token_budgets = (2000,)
@@ -1102,16 +1227,16 @@ def cap_night_recap_bullets(category_results):
     """Keep the overnight product readable even if the model returns every allowed item."""
     remaining = 7
     for category_key in CATEGORIES:
-        bullets = category_results[category_key]["bullets"]
-        category_results[category_key]["bullets"] = bullets[:min(2, remaining)]
-        remaining -= len(category_results[category_key]["bullets"])
+        items = category_results[category_key]["items"]
+        category_results[category_key]["items"] = items[:min(2, remaining)]
+        remaining -= len(category_results[category_key]["items"])
     return category_results
 
 
 def build_emergency_category_result(messages):
     """Last resort: publish only original source excerpts, without AI synthesis."""
     result = {
-        category_key: {"selected_ids": [], "bullets": []}
+        category_key: {"selected_ids": [], "items": []}
         for category_key in CATEGORIES
     }
     for item in messages:
@@ -1123,11 +1248,13 @@ def build_emergency_category_result(messages):
         else:
             category_key = "ukraine_key_developments"
         result[category_key]["selected_ids"].append(item["id"])
-        if len(result[category_key]["bullets"]) < 3:
+        if len(result[category_key]["items"]) < 3:
             original_excerpt = re.sub(r"\\s+", " ", item["text"]).strip()[:160]
-            result[category_key]["bullets"].append(
-                f"Original source excerpt from @{item['channel']}: {original_excerpt}"
-            )
+            result[category_key]["items"].append({
+                "event_key": f"fallback|{item['id'].lower()}",
+                "text": f"Original source excerpt from @{item['channel']}: {original_excerpt}",
+                "is_update": False,
+            })
     return result
 
 
@@ -1280,7 +1407,16 @@ async def build_summary(night_recap=False, trigger="scheduled"):
                         "text": message["text"],
                     })
 
-        category_results = await analyze_hourly_matrix(snapshots)
+        published_history = load_summary_event_history()
+        published_source_history = state_store.load_recent_published_classifications(
+            hours=SUMMARY_EVENT_HISTORY_HOURS,
+            limit=24,
+        )
+        category_results = await analyze_hourly_matrix(
+            snapshots,
+            published_history,
+            published_source_history,
+        )
         used_emergency_fallback = category_results is None
         if used_emergency_fallback:
             category_results = build_emergency_category_result(snapshots)
@@ -1290,6 +1426,10 @@ async def build_summary(night_recap=False, trigger="scheduled"):
             )
         if night_recap:
             category_results = cap_night_recap_bullets(category_results)
+        category_results = filter_previously_published_events(
+            category_results,
+            published_history,
+        )
 
         by_id = {item["id"]: item for item in snapshots}
         run_at = datetime.now(TZ).isoformat(timespec="seconds")
@@ -1318,9 +1458,9 @@ async def build_summary(night_recap=False, trigger="scheduled"):
                         f"[CATEGORY ITEM] category={category_key} @{item['channel']} "
                         f"id={message_id} text={item['text'][:100]}"
                     )
-            if category_data["bullets"]:
+            if category_data["items"]:
                 bullets = "\n".join(
-                    f"• {html.escape(bullet)}" for bullet in category_data["bullets"]
+                    f"• {html.escape(item['text'])}" for item in category_data["items"]
                 )
                 sections.append(
                     f"{category_meta['icon']} <b>{category_meta['name']}</b>\n{bullets}"
@@ -1366,6 +1506,8 @@ async def build_summary(night_recap=False, trigger="scheduled"):
             return False
 
         state_store.persist_category_stats(run_at, snapshots, category_results, ALL_CONTENT_CHANNELS)
+        if sections:
+            persist_summary_event_history(published_history, category_results, run_at)
         if not TEST_MODE and state_store.stats_db_ready:
             state_store.mark_normal_messages_processed(snapshot_message_keys)
         else:
