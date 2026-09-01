@@ -93,6 +93,8 @@ UKRZALINFO_CHANNEL = "UkrzalInfo"
 WAR_MONITOR_CHANNEL = "war_monitor"
 WAR_MONITOR_POLL_START = (23, 30)
 WAR_MONITOR_POLL_END = (1, 0)
+PREPARATION_LOOKBACK_HOURS = 6
+PREPARATION_MAX_SIGNALS = 8
 ALERT_FEED_CHANNEL = "kyivnebomonitoring"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
 BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
@@ -125,6 +127,17 @@ UKRAINE_ALARM_URL = (
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
 
 MODEL = "claude-haiku-4-5"
+
+PREPARATION_SIGNAL_RE = re.compile(
+    r"(?:підготов|подготов|стратегічн|стратегическ|ту[-\s]?(?:95|160|22)|"
+    r"міг[-\s]?31|миг[-\s]?31|зліт|взл[её]т|виліт|вылет|дозаправ|"
+    r"пусков|рубеж|споряджен|снаряж|ракетонос|носії|носители|"
+    r"калібр|калибр|іскандер|искандер|кинджал|кінджал|циркон|бандерол|"
+    r"аеродром|аэродром|командн|частот|зв['’]?яз|связ|радіо|радио|"
+    r"цілевказ|целеуказ|підсвіт|подсвет|розвід|развед|ретранслятор|"
+    r"навігац|навигац|gps|\bреб\b|\bрер\b|notam|airspace clos)",
+    re.IGNORECASE,
+)
 
 ALERT_START_MESSAGE = "🚨 <b>AIR ALERT — KYIV</b>"
 
@@ -560,8 +573,52 @@ def is_daily_war_monitor_report(text, today=None):
     return report_date == (today or datetime.now(TZ).date())
 
 
-async def translate_war_monitor_report(text):
-    """Translate the one accepted daily report without the tactical alert gate."""
+def is_preparation_signal_candidate(text):
+    return bool(PREPARATION_SIGNAL_RE.search(text or ""))
+
+
+async def collect_preparation_signals():
+    """Collect a small, evidence-only context window from existing news sources."""
+    if not production_client or not content_source_entities:
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=PREPARATION_LOOKBACK_HOURS)
+    candidates = []
+    seen = set()
+    for channel, entity in content_source_entities.items():
+        try:
+            messages = await production_client.get_messages(entity, limit=20)
+        except Exception as exc:
+            print(f"[PREPARATION CONTEXT ERROR] @{channel}: {type(exc).__name__}: {exc}")
+            continue
+        for message in messages:
+            if message.date < cutoff:
+                continue
+            clean = clean_text(message.text or "")
+            fingerprint = re.sub(r"\W+", " ", clean.lower()).strip()
+            if (
+                not clean
+                or is_pure_ad(clean)
+                or not is_preparation_signal_candidate(clean)
+                or fingerprint in seen
+            ):
+                continue
+            seen.add(fingerprint)
+            candidates.append({
+                "channel": channel,
+                "time": message.date.astimezone(TZ).strftime("%H:%M"),
+                "date": message.date,
+                "text": clean[:500],
+            })
+    candidates.sort(key=lambda item: item["date"], reverse=True)
+    return list(reversed(candidates[:PREPARATION_MAX_SIGNALS]))
+
+
+async def translate_war_monitor_report(text, signals=None):
+    """Turn the accepted daily report into a civilian-facing threat assessment."""
+    signal_text = "\n\n".join(
+        f"SOURCE=@{item['channel']} TIME={item['time']}\n{item['text']}"
+        for item in (signals or [])
+    ) or "No qualifying secondary-source preparation signals were found."
     try:
         async with translation_slots:
             response = await http_client.post(
@@ -573,15 +630,36 @@ async def translate_war_monitor_report(text):
                 },
                 json={
                     "model": MODEL,
-                    "max_tokens": 600,
+                    "max_tokens": 700,
                     "temperature": 0,
                     "messages": [{
                         "role": "user",
                         "content": (
-                            "Translate this Ukrainian daily military situation report into concise, natural "
-                            "English. Preserve its heading, date, section structure, facts, uncertainty and "
-                            "punctuation. Do not add analysis or commentary. Omit only the final source hashtag. "
-                            "Return only the translated report.\n\n" + text[:2500]
+                            "Create a concise English Night Threat Assessment for civilians in Ukraine. The "
+                            "@war_monitor daily report is the authoritative baseline for the current posture. "
+                            "Secondary monitoring posts are unconfirmed context and may be used only when they "
+                            "contain a concrete preparation indicator: strategic-aircraft movement or readiness, "
+                            "missile-carrier deployment, UAV launch preparation, reconnaissance or target-designation "
+                            "activity, command/radio activity, airspace closure, navigation interference, or electronic "
+                            "warfare activity. Do not turn an attack already completed, a routine trajectory update, "
+                            "or vague channel chatter into evidence of preparation. A single uncorroborated signal must "
+                            "remain explicitly unconfirmed. Never invent timing, probability, intent, targets or "
+                            "military activity. Say 'no indicators were reported' rather than 'there is no threat'. "
+                            "Use civilian language: 'Russian long-range bombers' instead of 'strategic aviation' and "
+                            "'Black Sea fleet' when the source refers to the fleet.\n\n"
+                            "Return only this compact plain-text structure:\n"
+                            "📡 Night Threat Assessment — HH:MM\n"
+                            "D Month YYYY\n\n"
+                            "Current posture\n"
+                            "• up to three factual bullets\n\n"
+                            "Preparation indicators\n"
+                            "• up to three evidence-qualified bullets\n\n"
+                            "Assessment: choose and explain one level: No preparation indicators detected; "
+                            "Limited / unconfirmed indicators; Multiple corroborated indicators; Elevated preparation "
+                            "indicators. End by reminding readers that the assessment can change rapidly and to follow "
+                            "official air-alert instructions. Omit the source hashtag.\n\n"
+                            "DAILY REPORT:\n" + text[:2500] + "\n\n"
+                            "SECONDARY MONITORING POSTS:\n" + signal_text
                         ),
                     }],
                 },
@@ -598,7 +676,7 @@ async def translate_war_monitor_report(text):
 
 
 async def process_war_monitor_report(message):
-    """Publish only today's tagged daily report, once, to the requested destinations."""
+    """Publish only today's tagged daily report, once, to News."""
     raw = (message.text or "").strip()
     if not is_daily_war_monitor_report(raw):
         print(f"[WAR MONITOR IGNORED] id={message.id}")
@@ -607,7 +685,8 @@ async def process_war_monitor_report(message):
         print(f"[WAR MONITOR DUPLICATE] id={message.id}")
         return True
 
-    translated = await translate_war_monitor_report(raw)
+    signals = await collect_preparation_signals()
+    translated = await translate_war_monitor_report(raw, signals)
     if not translated:
         state_store.release_alert_feed_delivery(WAR_MONITOR_CHANNEL, message.id, raw)
         return False
@@ -617,11 +696,7 @@ async def process_war_monitor_report(message):
         state_store.release_alert_feed_delivery(WAR_MONITOR_CHANNEL, message.id, raw)
         await send_to_owner("Ops: @war_monitor daily report failed to publish in the news channel.")
         return False
-    if not alert_active and not await send_to_alert_channel(rendered):
-        await send_to_owner(
-            "Ops: @war_monitor daily report reached the news channel but failed in the alert channel."
-        )
-    print(f"[WAR MONITOR PUBLISHED] id={message.id} alert_copy={not alert_active}")
+    print(f"[WAR MONITOR PUBLISHED] id={message.id} destination=news signals={len(signals)}")
     return True
 
 async def ensure_live_source_membership(client, source_entities):
@@ -901,6 +976,14 @@ async def analyze_hourly_matrix(messages):
         "not repeat the real-time alert feed: reject alert and all-clear announcements, generic shelter "
         "instructions, live missile/UAV/object headings or locations, and bare interception claims. Keep an "
         "attack item only when it reports a concrete consequence or a substantial quantified recap.\n\n"
+        "Treat posts about the same real-world incident as updates to one event, even when casualty counts or "
+        "technical details change. Write that event once, in one category. Prefer the latest corroborated update; "
+        "if credible reports still conflict, say that figures remain inconsistent rather than adding or choosing "
+        "between them. Never combine weapon quantities from separate messages into a new aggregate. Attribute "
+        "technical counts and claims to the stated authority, monitoring source or OSINT source. Preserve words "
+        "such as likely, possible, estimated and unconfirmed. A thermal anomaly does not prove its cause. Do not "
+        "publish exact coordinates, unsupported superlatives or inferred targets. Prioritize civilian consequences, "
+        "service disruption, transport changes and official public guidance over weapon inventories.\n\n"
         f"Categories:\n{category_text}\n\n"
         "Use the required structured output schema. selected_ids must contain exact message IDs that qualify. "
         "bullets must contain at most three concise English summary strings per category. Within each category, "
@@ -1013,6 +1096,16 @@ async def analyze_hourly_matrix(messages):
 
     print("[CATEGORY ANALYSIS ERROR] max_tokens exhausted at 8000")
     return None
+
+
+def cap_night_recap_bullets(category_results):
+    """Keep the overnight product readable even if the model returns every allowed item."""
+    remaining = 7
+    for category_key in CATEGORIES:
+        bullets = category_results[category_key]["bullets"]
+        category_results[category_key]["bullets"] = bullets[:min(2, remaining)]
+        remaining -= len(category_results[category_key]["bullets"])
+    return category_results
 
 
 def build_emergency_category_result(messages):
@@ -1195,6 +1288,8 @@ async def build_summary(night_recap=False, trigger="scheduled"):
                 "⚠️ <b>Hourly summary AI fallback used</b>\n"
                 "All AI retries failed; a deterministic source-text summary was generated."
             )
+        if night_recap:
+            category_results = cap_night_recap_bullets(category_results)
 
         by_id = {item["id"]: item for item in snapshots}
         run_at = datetime.now(TZ).isoformat(timespec="seconds")
