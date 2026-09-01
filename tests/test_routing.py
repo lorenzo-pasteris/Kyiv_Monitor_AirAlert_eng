@@ -170,15 +170,19 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
             "Kyiv metro announced a concrete service disruption.",
         )
 
-        async def fake_analyzer(messages):
+        async def fake_analyzer(messages, *args):
             result = {
-                key: {"selected_ids": [], "bullets": []}
+                key: {"selected_ids": [], "items": []}
                 for key in monitor.CATEGORIES
             }
             stable_id = f"{channel}:{message_id}"
             result["kyiv_region"] = {
                 "selected_ids": [stable_id],
-                "bullets": ["Kyiv metro announced a service disruption."],
+                "items": [{
+                    "event_key": "2026-09-01|kyiv|metro-disruption",
+                    "text": "Kyiv metro announced a service disruption.",
+                    "is_update": False,
+                }],
             }
             return result
 
@@ -511,12 +515,60 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_night_recap_is_capped_to_seven_bullets_and_two_per_category(self):
         result = {
-            key: {"selected_ids": [], "bullets": [f"{key}-{index}" for index in range(3)]}
+            key: {
+                "selected_ids": [],
+                "items": [
+                    {"event_key": f"{key}-{index}", "text": f"{key}-{index}", "is_update": False}
+                    for index in range(3)
+                ],
+            }
             for key in monitor.CATEGORIES
         }
         capped = monitor.cap_night_recap_bullets(result)
-        self.assertEqual(sum(len(data["bullets"]) for data in capped.values()), 7)
-        self.assertTrue(all(len(data["bullets"]) <= 2 for data in capped.values()))
+        self.assertEqual(sum(len(data["items"]) for data in capped.values()), 7)
+        self.assertTrue(all(len(data["items"]) <= 2 for data in capped.values()))
+
+    async def test_summary_event_filter_blocks_history_and_cross_category_duplicates(self):
+        empty = {key: {"selected_ids": [], "items": []} for key in monitor.CATEGORIES}
+        empty["kyiv_region"]["items"] = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "text": "A residential building in Boryspil was damaged overnight.",
+            "is_update": False,
+        }]
+        empty["security_consequences"]["items"] = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "text": "The Boryspil residential building sustained blast damage.",
+            "is_update": False,
+        }]
+        filtered = monitor.filter_previously_published_events(empty, [])
+        self.assertEqual(len(filtered["kyiv_region"]["items"]), 1)
+        self.assertEqual(filtered["security_consequences"]["items"], [])
+
+        history = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "category": "kyiv_region",
+            "text": "A residential building in Boryspil was damaged overnight.",
+            "published_at": datetime.now(monitor.TZ).isoformat(),
+        }]
+        repeated = {key: {"selected_ids": [], "items": []} for key in monitor.CATEGORIES}
+        repeated["security_consequences"]["items"] = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "text": "A residential building in Boryspil was damaged overnight.",
+            "is_update": False,
+        }]
+        filtered = monitor.filter_previously_published_events(repeated, history)
+        self.assertTrue(all(not data["items"] for data in filtered.values()))
+
+        update = {key: {"selected_ids": [], "items": []} for key in monitor.CATEGORIES}
+        update["security_consequences"]["items"] = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "text": "Authorities now report 12 people wounded in the Boryspil residential strike.",
+            "is_update": True,
+        }]
+        filtered = monitor.filter_previously_published_events(update, history)
+        self.assertEqual(filtered["security_consequences"]["items"], [])
+        self.assertEqual(len(filtered["kyiv_region"]["items"]), 1)
+        self.assertTrue(filtered["kyiv_region"]["items"][0]["text"].startswith("Update —"))
 
     async def test_war_monitor_polls_only_during_the_night_window(self):
         self.assertFalse(monitor.is_war_monitor_poll_window(datetime(2026, 9, 1, 23, 29, tzinfo=monitor.TZ)))

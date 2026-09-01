@@ -47,6 +47,9 @@ category: Ukraine — Key Developments, Kyiv & Region, Security & Attack Consequ
 Transport & Essential Services. Each category contains at most three updates, while the
 07:00 overnight recap is capped at seven events and two per category. Selected updates
 are summarized at 01:00 and every two hours from 07:00 through 23:00 Kyiv time.
+Published events retain a stable key and category for 24 hours: repetitions are suppressed
+across summaries and categories, while material changes are labeled as updates in the
+event's original category.
 Routine alerts, all-clears and live threat movements are excluded because they
 belong in the real-time channel. The strict daily `@war_monitor` situation report bypasses
 the summary queue and produces one News-only threat assessment using up to eight preparation
