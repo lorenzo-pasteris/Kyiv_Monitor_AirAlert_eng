@@ -518,10 +518,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         monitor.send_to_summary_group = lambda text: asyncio.sleep(0, result=news_messages.append(text) or {"message_id": 1})
         monitor.send_to_alert_channel = lambda text: asyncio.sleep(0, result=alert_messages.append(text) or {"message_id": 2})
         try:
+            now = datetime.now(monitor.TZ)
             message = FakeTelegramMessage(
                 99,
-                "📡 Обстановка станом на 00:00\n01.09.26\n\n#обстановка@war_monitor",
-                datetime(2026, 9, 1, 0, 1, tzinfo=monitor.TZ),
+                f"📡 Обстановка станом на 00:00\n{now:%d.%m.%y}\n\n#обстановка@war_monitor",
+                now,
             )
             self.assertTrue(await monitor.process_war_monitor_report(message))
             self.assertEqual(news_messages, ["assessment"])
@@ -661,6 +662,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_known_terse_alert_fragments_never_need_model_context(self):
         self.assertEqual(monitor.translate_known_terse_fragment("Дарниця"), "Darnytsia")
+        self.assertEqual(monitor.translate_known_terse_fragment("Стоянка"), "Stoianka")
         self.assertEqual(monitor.translate_known_terse_fragment("ТЕЦ-5"), "CHP-5")
         self.assertEqual(monitor.translate_known_terse_fragment("Збили"), "Shot down")
         self.assertIsNone(
@@ -674,6 +676,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         prompt = monitor.build_alert_translation_prompt("Дарниця")
         self.assertIn("Never ask for more context", prompt)
         self.assertIn("'Дарниця' = 'Darnytsia'", prompt)
+        self.assertIn("Стоянка is the settlement Stoianka", prompt)
 
     async def test_semantic_alert_gate_allows_only_evidenced_closed_category_drops(self):
         prompt = monitor.build_alert_translation_prompt(
@@ -718,6 +721,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Вилітає в район Василькова",
             "Жуляни, Вишневе",
             "Другий Нивки, Солома",
+            "Стоянка",
+            "Осещина",
+            "Пуща-Водиця",
         )
         for text in real_tactical_updates:
             self.assertTrue(monitor.contains_operational_location(text), text)

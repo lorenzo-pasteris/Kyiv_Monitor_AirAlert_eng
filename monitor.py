@@ -26,6 +26,7 @@ import state_store
 from alert_rules import classify_telegram_alert
 from predeploy_check import validate_environment
 from text_processing import (
+    CANONICAL_PLACE_SPELLINGS,
     build_alert_translation_prompt,
     clean_alert_source_text,
     clean_text,
@@ -655,7 +656,9 @@ async def translate_war_monitor_report(text, signals=None):
                             "remain explicitly unconfirmed. Never invent timing, probability, intent, targets or "
                             "military activity. Say 'no indicators were reported' rather than 'there is no threat'. "
                             "Use civilian language: 'Russian long-range bombers' instead of 'strategic aviation' and "
-                            "'Black Sea fleet' when the source refers to the fleet.\n\n"
+                            "'Black Sea fleet' when the source refers to the fleet. "
+                            f"Canonical place spellings: {CANONICAL_PLACE_SPELLINGS}. "
+                            "Стоянка is the settlement Stoianka; NEVER translate it as parking or a parking area.\n\n"
                             "Return only this compact plain-text structure:\n"
                             "📡 Night Threat Assessment — HH:MM\n"
                             "D Month YYYY\n\n"
@@ -1104,6 +1107,8 @@ async def analyze_hourly_matrix(messages, published_history=None, published_sour
         "such as likely, possible, estimated and unconfirmed. A thermal anomaly does not prove its cause. Do not "
         "publish exact coordinates, unsupported superlatives or inferred targets. Prioritize civilian consequences, "
         "service disruption, transport changes and official public guidance over weapon inventories.\n\n"
+        f"Canonical place spellings: {CANONICAL_PLACE_SPELLINGS}. "
+        "Стоянка is the settlement Stoianka; NEVER translate it as parking or a parking area.\n\n"
         f"Categories:\n{category_text}\n\n"
         "Use the required structured output schema. selected_ids must contain exact message IDs that qualify. "
         "items must contain at most three concise English events per category. event_key must be a stable lowercase "

@@ -35,18 +35,35 @@ ALERT_BLOCK_CATEGORIES = {
 }
 # Ukrainian stems intentionally cover inflected forms used in terse updates.
 OPERATIONAL_LOCATION_STEMS = {
+    "київ": "Kyiv",
     "нивк": "Nyvky",
     "шуляв": "Shuliavka",
     "жулян": "Zhuliany",
     "солом": "Solomianskyi district",
     "оболон": "Obolon",
     "поділ": "Podil",
+    "печер": "Pechersk",
+    "святошин": "Sviatoshyn",
+    "голосіїв": "Holosiivskyi district",
+    "деснян": "Desnianskyi district",
+    "дніпров": "Dniprovskyi district",
+    "шевченків": "Shevchenkivskyi district",
     "троєщин": "Troieshchyna",
     "теремк": "Teremky",
     "дарниц": "Darnytsia",
+    "русанів": "Rusanivka",
+    "березняк": "Berezniaky",
+    "осокорк": "Osokorky",
+    "позняк": "Pozniaky",
+    "пуща-водиц": "Pushcha-Vodytsia",
+    "виноградар": "Vynohradar",
     "ірпін": "Irpin",
     "буч": "Bucha",
     "бровар": "Brovary",
+    "борисп": "Boryspil",
+    "обух": "Obukhiv",
+    "фаст": "Fastiv",
+    "біла церк": "Bila Tserkva",
     "вишгород": "Vyshhorod",
     "вишнев": "Vyshneve",
     "боярк": "Boyarka",
@@ -55,7 +72,20 @@ OPERATIONAL_LOCATION_STEMS = {
     "гатн": "Hatne",
     "глевах": "Hlevakha",
     "гостомел": "Hostomel",
+    "стоянк": "Stoianka",
+    "коцюбин": "Kotsiubynske",
+    "борщагів": "Borshchahivka",
+    "димер": "Dymer",
+    "осещин": "Oseshchyna",
+    "тарасів": "Tarasivka",
+    "заліс": "Zalissia",
+    "яготин": "Yahotyn",
+    "українк": "Ukrainka",
+    "березан": "Berezan",
+    "рембаз": "Rembaza",
+    "конча-засп": "Koncha-Zaspa",
 }
+CANONICAL_PLACE_SPELLINGS = ", ".join(dict.fromkeys(OPERATIONAL_LOCATION_STEMS.values()))
 ALERT_TACTICAL_KEYWORDS = SECURITY_KEYWORDS + [
     "ціль", "цілі", "рух", "рухається", "рухаються", "курс", "напрям", "летить",
     "летять", "чисто", "знищено", "знищена", "знищений", "збито", "увага",
@@ -270,10 +300,9 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> st
         "Never ask for more context. A one-word place, target, or outcome is intentional and must be "
         "translated as a one-word fragment. Examples: 'Дарниця' = 'Darnytsia'; 'ТЕЦ-5' = "
         "'CHP-5'; 'Збили' = 'Shot down'. Keep terse fragments terse. Retain Ukrainian place "
-        "names using standard transliteration. Remove "
-        "promo, subscribe, and LIVE tags. Known spellings include Kyiv, Brovary, Boryspil, Obukhiv, "
-        "Vyshhorod, Bucha, Irpin, Fastiv, Bila Tserkva, Berezniaky, Osokorky, Pozniaky, Troieshchyna, "
-        "Vyshneve, Dymer, Boyarka, Yahotyn, Hostomel, Rembaza, and Koncha-Zaspa.\n\n"
+        "names using standard transliteration. Remove promo, subscribe, and LIVE tags. "
+        f"Canonical place spellings: {CANONICAL_PLACE_SPELLINGS}. "
+        "Стоянка is the settlement Stoianka; NEVER translate it as parking.\n\n"
         "Return exactly one JSON object and nothing else. Always provide a valid English translation, "
         "including when proposing DROP. For DROP, evidence must be an exact non-empty excerpt from the "
         "current source message that proves the selected closed category. Use null block_category and "
@@ -294,6 +323,7 @@ def translate_known_terse_fragment(text: str) -> str | None:
     normalized = re.sub(r"[.!…\s]+$", "", text.strip()).casefold()
     return {
         "дарниця": "Darnytsia",
+        "стоянка": "Stoianka",
         "тец-5": "CHP-5",
         "тец 5": "CHP-5",
         "збили": "Shot down",
