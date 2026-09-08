@@ -340,7 +340,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         await monitor.reconcile_alert_state("random-test")
         self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🚨 <b>AIR ALERT — KYIV</b>"))
         self.assertNotIn("REAL-TIME mode", self.sent[-1][1])
-        self.assertTrue(all(not items for items in monitor.buffers.values()))
+        self.assertTrue(all(len(items) == 1 for items in monitor.buffers.values()))
+        for items in monitor.buffers.values():
+            items.clear()
 
         monitor.telegram_alert_state = False
         await monitor.reconcile_alert_state("random-test")
@@ -396,6 +398,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         hope_commentary = "Сподіваємось більше нічого не прилетить і буде відбій"
         camera_speculation = "Ці просто кружляють над Києвом. Не здивуюсь, якщо на них камери"
         petya_commentary = "Нарешті у Києві вперше за 2 місяці Петя відпрацював на повну"
+        survived_volley_commentary = "Наче другий залп пережили, ви як там?"
         debris_warning = "ППО працює добре, але уламки ніхто не скасовував, тому на вулицю не виходимо"
 
         self.assertTrue(monitor.is_commentary_alert_message(commentary))
@@ -407,6 +410,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.is_commentary_alert_message(hope_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(camera_speculation))
         self.assertTrue(monitor.is_commentary_alert_message(petya_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(survived_volley_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message("Seems we survived a second volley. How are you?"))
         self.assertFalse(monitor.is_commentary_alert_message(debris_warning))
         self.assertFalse(monitor.is_commentary_alert_message(operational))
         self.assertEqual(
@@ -420,13 +425,15 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         try:
             monitor.alert_active = True
             self.assertTrue(await monitor.handle_alert_message(commentary))
+            self.assertTrue(await monitor.handle_alert_message(survived_volley_commentary))
         finally:
             monitor.alert_active = original_active
 
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual(self.sent[0][0], monitor.OPS_CHAT_ID)
-        self.assertIn("<b>COMMENTO</b>", self.sent[0][1])
-        self.assertNotEqual(self.sent[0][0], monitor.ALERT_OUTPUT_CHAT_ID)
+        self.assertEqual(len(self.sent), 2)
+        for destination, message in self.sent:
+            self.assertEqual(destination, monitor.OPS_CHAT_ID)
+            self.assertIn("<b>COMMENTO</b>", message)
+            self.assertNotEqual(destination, monitor.ALERT_OUTPUT_CHAT_ID)
 
     async def test_alert_source_promotional_footer_is_removed(self):
         raw = (
@@ -763,6 +770,54 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             ("DROP", "", "DISTANT_WITHOUT_KYIV_TRAJECTORY"),
         )
 
+    async def test_priority_threats_cannot_be_dropped_as_distant(self):
+        priority_updates = (
+            ("Загроза з Брянська!!", "Загроза"),
+            (
+                "Вибухи в Брянську, робота ворожого ППО, але все одно максимально уважно",
+                "Вибухи",
+            ),
+            ("Загроза балістики з Курська", "балістики"),
+            ("Вихід ракет з Брянської області", "ракет"),
+            ("Перші ракети Х101 залітають на Сумщину", "ракети"),
+            ("Х101 залітають на Сумщину", "Х101"),
+            ("Калібри проходять Вінниччину", "Калібри"),
+        )
+        for text, evidence in priority_updates:
+            self.assertTrue(monitor.is_priority_alert_message(text), text)
+            self.assertEqual(
+                monitor.parse_alert_gate_output(
+                    '{"decision":"DROP","block_category":"DISTANT_WITHOUT_KYIV_TRAJECTORY",'
+                    f'"translation":"Priority threat update.","evidence":"{evidence}",'
+                    '"reason":"distant"}',
+                    text,
+                ),
+                (
+                    "PUBLISH",
+                    "Priority threat update.",
+                    "override_unapproved_drop:DISTANT_WITHOUT_KYIV_TRAJECTORY",
+                ),
+            )
+
+        prompt = monitor.build_alert_translation_prompt(priority_updates[0][0])
+        self.assertIn("Those priority updates always PUBLISH", prompt)
+        self.assertIn("ANY Ukrainian region is tactical", prompt)
+        self.assertIn("Брянськ / Брянська / Брянську = Bryansk", prompt)
+        self.assertIn("Воронеж / Воронежа = Voronezh", prompt)
+        self.assertIn("Х-101 / Х101 = Kh-101 missile(s)", prompt)
+
+        for origin in ("Брянськ", "Воронеж", "Курськ", "Крим", "Каспій"):
+            self.assertTrue(monitor.contains_operational_location(origin), origin)
+            self.assertEqual(
+                monitor.parse_alert_gate_output(
+                    '{"decision":"DROP","block_category":"DISTANT_WITHOUT_KYIV_TRAJECTORY",'
+                    f'"translation":"Launch-area update.","evidence":"{origin}",'
+                    '"reason":"distant"}',
+                    origin,
+                )[0],
+                "PUBLISH",
+            )
+
     async def test_semantic_drop_is_checkpointed_instead_of_retried(self):
         original_active = monitor.alert_active
         original_translate = monitor.translate_message
@@ -782,6 +837,77 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         finally:
             monitor.alert_active = original_active
             monitor.translate_message = original_translate
+
+    async def test_translation_failure_is_bounded_and_checkpointed(self):
+        class InvalidResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"content": [{"text": "{}"}]}
+
+        class InvalidTranslationClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, *args, **kwargs):
+                self.calls += 1
+                return InvalidResponse()
+
+        original_active = monitor.alert_active
+        original_client = monitor.http_client
+        original_slots = monitor.translation_slots
+        original_owner = monitor.send_to_owner
+        original_timeout = getattr(monitor.httpx, "Timeout", None)
+        client = InvalidTranslationClient()
+        owner_messages = []
+
+        try:
+            monitor.alert_active = True
+            monitor.http_client = client
+            monitor.translation_slots = asyncio.Semaphore(1)
+            monitor.httpx.Timeout = lambda *args, **kwargs: None
+            monitor.send_to_owner = lambda text: asyncio.sleep(
+                0, result=owner_messages.append(text) or {"message_id": 1}
+            )
+
+            self.assertTrue(
+                await monitor.handle_alert_message(
+                    "Невідомий об'єкт рухається поблизу Києва",
+                    generation=monitor.alert_generation,
+                )
+            )
+        finally:
+            monitor.alert_active = original_active
+            monitor.http_client = original_client
+            monitor.translation_slots = original_slots
+            monitor.send_to_owner = original_owner
+            if original_timeout is None:
+                delattr(monitor.httpx, "Timeout")
+            else:
+                monitor.httpx.Timeout = original_timeout
+
+        self.assertEqual(client.calls, monitor.TRANSLATION_MAX_ATTEMPTS)
+        self.assertEqual(len(owner_messages), 1)
+
+    async def test_scheduled_summary_runs_during_active_alert(self):
+        original_active = monitor.alert_active
+        original_builder = monitor.build_summary
+        calls = []
+
+        async def fake_builder(**kwargs):
+            calls.append(kwargs)
+            return True
+
+        try:
+            monitor.alert_active = True
+            monitor.build_summary = fake_builder
+            self.assertTrue(await monitor.run_scheduled_summary())
+        finally:
+            monitor.alert_active = original_active
+            monitor.build_summary = original_builder
+
+        self.assertEqual(len(calls), 1)
 
     async def test_alert_source_context_resolves_terse_followups_and_expires(self):
         monitor.recent_alert_source_context.clear()

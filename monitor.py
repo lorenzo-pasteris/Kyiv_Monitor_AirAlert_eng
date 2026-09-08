@@ -34,6 +34,7 @@ from text_processing import (
     is_actionable_alert_message,
     is_commentary_alert_message,
     is_non_operational_alert_message,
+    is_priority_alert_message,  # noqa: F401 -- re-exported for routing regressions
     is_pure_ad,
     is_translation_meta_output,  # noqa: F401 -- re-exported for tests/test_routing.py
     is_valid_alert_translation,  # noqa: F401 -- re-exported for tests/test_routing.py
@@ -128,6 +129,7 @@ UKRAINE_ALARM_URL = (
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
 
 MODEL = "claude-haiku-4-5"
+TRANSLATION_MAX_ATTEMPTS = 2
 
 PREPARATION_SIGNAL_RE = re.compile(
     r"(?:підготов|подготов|стратегічн|стратегическ|ту[-\s]?(?:95|160|22)|"
@@ -494,9 +496,6 @@ async def apply_alert_state(desired, source, *, startup=False, public_message=No
             set_alert_state(desired, f"startup:{source}")
             if desired:
                 recent_alert_messages.clear()
-                for channel_name in ALL_CONTENT_CHANNELS:
-                    buffers[channel_name].clear()
-                state_store.discard_pending_normal_messages(f"startup_alert:{source}")
                 await send_to_owner(
                     "⚠️ <b>ALERT state restored after restart</b>\n"
                     "The worker entered ALERT without duplicating the public start message."
@@ -518,13 +517,6 @@ async def apply_alert_state(desired, source, *, startup=False, public_message=No
         set_alert_state(desired, source)
         if desired:
             recent_alert_messages.clear()
-            for channel_name in ALL_CONTENT_CHANNELS:
-                buffers[channel_name].clear()
-            state_store.discard_pending_normal_messages(f"alert_started:{source}")
-        elif production_client and content_source_entities:
-            await advance_normal_cursors_to_latest(
-                production_client, content_source_entities, f"alert_ended:{source}"
-            )
         print(f"[ALERT TRANSITION] committed={'ALERT' if desired else 'NORMAL'} source={source}")
         return True
 
@@ -533,35 +525,34 @@ async def translate_message(text, context=()):
     known_fragment = translate_known_terse_fragment(text)
     if known_fragment:
         return known_fragment
-    try:
-        async with translation_slots:
-            r = await http_client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 200, "temperature": 0, "messages": [{
-                "role": "user", "content": build_alert_translation_prompt(text, context)
-            }]},
-            timeout=httpx.Timeout(15.0, connect=5.0)
-            )
-        r.raise_for_status()
-        result = r.json()["content"][0]["text"].strip()
-        decision, translation, reason = parse_alert_gate_output(result, text)
-        if decision == "DROP":
-            print(f"[ALERT SEMANTIC DROP] reason={reason!r} input={text[:120]!r}")
-            return False
-        if reason.startswith("override_unapproved_drop:"):
-            print(f"[ALERT DROP OVERRIDDEN] reason={reason!r} input={text[:120]!r}")
-        print(f"[TRANSLATION OK] input={text[:120]!r} output={translation[:120]!r}")
-        return translation
-    except Exception as e:
-        print(f"Translation error: {e}")
+    for attempt in range(1, TRANSLATION_MAX_ATTEMPTS + 1):
         try:
-            await send_to_owner(
-                f"Ops: translation request failed; nothing published.\nInput: {text[:300]}"
+            async with translation_slots:
+                r = await http_client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={"model": MODEL, "max_tokens": 200, "temperature": 0, "messages": [{
+                        "role": "user", "content": build_alert_translation_prompt(text, context)
+                    }]},
+                    timeout=httpx.Timeout(15.0, connect=5.0),
+                )
+            r.raise_for_status()
+            result = r.json()["content"][0]["text"].strip()
+            decision, translation, reason = parse_alert_gate_output(result, text)
+            if decision == "DROP":
+                print(f"[ALERT SEMANTIC DROP] reason={reason!r} input={text[:120]!r}")
+                return False
+            if reason.startswith("override_unapproved_drop:"):
+                print(f"[ALERT DROP OVERRIDDEN] reason={reason!r} input={text[:120]!r}")
+            print(f"[TRANSLATION OK] input={text[:120]!r} output={translation[:120]!r}")
+            return translation
+        except Exception as exc:
+            state = "RETRY" if attempt < TRANSLATION_MAX_ATTEMPTS else "FAILED"
+            print(
+                f"[TRANSLATION {state}] attempt={attempt}/{TRANSLATION_MAX_ATTEMPTS} "
+                f"{type(exc).__name__}: {exc}"
             )
-        except Exception as ops_err:
-            print(f"Ops notify failed: {ops_err}")
-        return None
+    return None
 
 
 WAR_MONITOR_REPORT_RE = re.compile(
@@ -1506,18 +1497,22 @@ async def summary_loop():
     await asyncio.sleep(first_delay)
     while True:
         try:
-            if not alert_active:
-                hour = datetime.now(TZ).hour
-                await build_summary(
-                    night_recap=not TEST_MODE and hour == 7,
-                    trigger="night_recap" if not TEST_MODE and hour == 7 else "scheduled",
-                )
+            await run_scheduled_summary()
         except Exception as exc:
             print(f"[SUMMARY LOOP ERROR] {type(exc).__name__}: {exc}")
             await send_to_owner(
                 f"🚨 <b>Summary loop recovered</b>\n{html.escape(type(exc).__name__ + ': ' + str(exc))}"
             )
         await asyncio.sleep(SUMMARY_INTERVAL if TEST_MODE else seconds_until_next_summary())
+
+
+async def run_scheduled_summary():
+    """Publish the due news summary independently of the real-time alert state."""
+    hour = datetime.now(TZ).hour
+    return await build_summary(
+        night_recap=not TEST_MODE and hour == 7,
+        trigger="night_recap" if not TEST_MODE and hour == 7 else "scheduled",
+    )
 
 
 async def health_loop():
@@ -1614,7 +1609,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         # source cursor so the poller cannot bill the same classification forever.
         return True
     if not translation:
-        print(f"[ALERT NOT PUBLISHED] translation unavailable source=@{source}")
+        print(f"[ALERT CHECKPOINTED] translation unavailable source=@{source}")
         try:
             await send_to_owner(
                 f"Ops: alert not published because translation was unavailable.\n"
@@ -1622,7 +1617,9 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
             )
         except Exception as ops_err:
             print(f"Ops notify failed: {ops_err}")
-        return False
+        # translate_message already exhausted its bounded attempts. Treat this as
+        # handled so the five-second recovery poll cannot bill it indefinitely.
+        return True
 
     return bool(await safe_send(f"🔴 {html.escape(translation)}"))
 
@@ -1962,9 +1959,6 @@ async def main():
 
             if is_pure_ad(clean):
                 print(f"[FILTERED AD] @{channel}: {clean[:80]}")
-                return
-
-            if alert_active:
                 return
 
             time_str = datetime.now(TZ).strftime("%H:%M")

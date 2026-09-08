@@ -33,6 +33,14 @@ ALERT_BLOCK_CATEGORIES = {
     "RHETORICAL_QUESTION",
     "DISTANT_WITHOUT_KYIV_TRAJECTORY",
 }
+PRIORITY_ALERT_RE = re.compile(
+    r"\b(?:баліст\w*|баллист\w*|ракет\w*|missile\w*|ballistic\w*|крилат\w*|"
+    r"х[-\s]?(?:101|55|59|22|47)\w*|калібр\w*|калибр\w*|іскандер\w*|искандер\w*|"
+    r"кинджал\w*|кінджал\w*|циркон\w*|бандерол\w*|с[-\s]?(?:300|400)\w*|"
+    r"загроз\w*|угроз\w*|threat\w*|пуск\w*|launch\w*|вихід\w*|выход\w*|"
+    r"відбій\w*|отбой\w*|all[ -]?clear|максимально\s+уважн\w*|maximum\s+alert)\b",
+    re.IGNORECASE,
+)
 # Ukrainian stems intentionally cover inflected forms used in terse updates.
 OPERATIONAL_LOCATION_STEMS = {
     "київ": "Kyiv",
@@ -85,7 +93,40 @@ OPERATIONAL_LOCATION_STEMS = {
     "рембаз": "Rembaza",
     "конча-засп": "Koncha-Zaspa",
 }
-CANONICAL_PLACE_SPELLINGS = ", ".join(dict.fromkeys(OPERATIONAL_LOCATION_STEMS.values()))
+# Launch-area fragments are tactical in the trusted real-time feed even when a
+# Kyiv trajectory has not yet been stated; cruise-missile courses can be updated later.
+LAUNCH_ORIGIN_LOCATION_STEMS = {
+    "брянськ": "Bryansk",
+    "брянск": "Bryansk",
+    "воронеж": "Voronezh",
+    "курськ": "Kursk",
+    "курск": "Kursk",
+    "бєлгород": "Belgorod",
+    "белгород": "Belgorod",
+    "ростов": "Rostov",
+    "краснодар": "Krasnodar",
+    "таганрог": "Taganrog",
+    "крим": "Crimea",
+    "крым": "Crimea",
+    "чорн море": "Black Sea",
+    "черн море": "Black Sea",
+    "касп": "Caspian Sea",
+    "енгельс": "Engels",
+    "оленья": "Olenya",
+    "шайковк": "Shaykovka",
+    "саваслейк": "Savasleyka",
+    "міллеров": "Millerovo",
+    "миллеров": "Millerovo",
+    "ахтубінськ": "Akhtubinsk",
+    "ахтубинск": "Akhtubinsk",
+    "приморсько-ахтарськ": "Primorsko-Akhtarsk",
+    "приморско-ахтарск": "Primorsko-Akhtarsk",
+    "єйськ": "Yeysk",
+    "ейск": "Yeysk",
+}
+CANONICAL_PLACE_SPELLINGS = ", ".join(dict.fromkeys(
+    (*OPERATIONAL_LOCATION_STEMS.values(), *LAUNCH_ORIGIN_LOCATION_STEMS.values())
+))
 ALERT_TACTICAL_KEYWORDS = SECURITY_KEYWORDS + [
     "ціль", "цілі", "рух", "рухається", "рухаються", "курс", "напрям", "летить",
     "летять", "чисто", "знищено", "знищена", "знищений", "збито", "увага",
@@ -108,6 +149,8 @@ COMMENTARY_PATTERNS = (
     r"\b(?:сподіва\w*|наде\w*|hoping|hopefully)\b.*\b(?:відбій|all clear)\b",
     r"\b(?:не здивую\w*|не удивлю\w*|wouldn['’]t be surprised)\b",
     r"\b(?:нарешті|наконец|finally)\b.*\b(?:петя|petya)\b.*\b(?:на повну|на полную|full capacity)\b",
+    r"\b(?:наче|схоже|кажется|похоже|seems|looks like|apparently)\b.*\b(?:пережил\w*|відбил\w*|surviv\w*|made it through)\b",
+    r"\b(?:ви як(?: там)?|як ви(?: там)?|how are you(?: doing)?|are you (?:all )?(?:okay|ok))\b",
     r"^\s*бандероль\s*[-—:=]\s*крилата ракета\s*[.!]?\s*$",
 )
 
@@ -240,9 +283,17 @@ def alert_feed_cursor_key(channel: str) -> str:
 
 
 def contains_operational_location(text: str) -> bool:
-    """Recognize Kyiv districts and immediate approaches across Ukrainian inflections."""
+    """Recognize Kyiv-area destinations and known launch-origin fragments."""
     lowered = text.casefold()
-    return any(stem in lowered for stem in OPERATIONAL_LOCATION_STEMS)
+    return any(
+        stem in lowered
+        for stem in (*OPERATIONAL_LOCATION_STEMS, *LAUNCH_ORIGIN_LOCATION_STEMS)
+    )
+
+
+def is_priority_alert_message(text: str) -> bool:
+    """Keep explicit threat, missile and maximum-alert updates regardless of origin."""
+    return bool(PRIORITY_ALERT_RE.search(text or ""))
 
 
 def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> str:
@@ -262,7 +313,13 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> st
         "A bare Kyiv district or immediate-approach place is always tactical, never vague. "
         "Immediate approaches include locations around Kyiv such as Brovary, Boryspil, Vyshhorod, "
         "Boyarka, Vyshneve and Hlevakha. Information confined to a distant region still requires an "
-        "explicit trajectory toward Kyiv or its immediate approaches.\n\n"
+        "explicit trajectory toward Kyiv or its immediate approaches, UNLESS the current message "
+        "explicitly reports a threat, missile/ballistic activity or weapon designation, a launch or "
+        "launch-origin fragment, an all-clear for such a threat, or instructs readers to remain on "
+        "maximum alert. A missile entering, crossing or approaching ANY Ukrainian region is tactical "
+        "and always PUBLISH; never require an already stated Kyiv trajectory. Those priority updates "
+        "always PUBLISH. Preserve separately the launch origin, transit region and stated destination, "
+        "including the source prepositions, and never invent a trajectory.\n\n"
         "For PUBLISH, translate the operational update into concise, natural English for civilians "
         "in Kyiv. Use context only to resolve an omitted subject or referent in the current message. "
         "Never add a weapon type, "
@@ -272,6 +329,7 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> st
         "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
         "Mandatory alert glossary:\n"
         "- ракета / ракети = missile(s), NEVER cruise missile(s) unless the source says крилата\n"
+        "- Х-101 / Х101 = Kh-101 missile(s), never X101\n"
         "- крилата ракета / крилаті / крилатих = cruise missile(s), never 'winged'\n"
         "- циркон / циркони = Zircon missile(s), never Circon or Circone\n"
         "- реактивний БпЛА / реактивні БпЛА / реактив = jet-powered UAV(s), never aircraft or reactor\n"
@@ -290,6 +348,9 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> st
         "- місто/область може підключитися means its air defence may become active, never that the place itself may join in\n"
         "- пуск / повторні пуски = launch / repeated launches\n"
         "- курсом на / в напрямку = heading toward\n"
+        "- Брянськ / Брянська / Брянську = Bryansk\n"
+        "- Воронеж / Воронежа = Voronezh\n"
+        "- Сумщина / Сумщину = Sumy region\n"
         "- Бандероль = Banderol; бандеролі = Banderols; бандеролям = Banderols. "
         "Preserve this codeword and NEVER infer a weapon type from it\n"
         "- подарунки / посилки can be alert-channel euphemisms for incoming threats; never translate "
@@ -403,6 +464,7 @@ def parse_alert_gate_output(raw: str, source_text: str = "") -> tuple[str, str, 
             block_category not in ALERT_BLOCK_CATEGORIES
             or not evidenced
             or contains_operational_location(source_text)
+            or is_priority_alert_message(source_text)
         ):
             return "PUBLISH", translation, f"override_unapproved_drop:{block_category or 'NONE'}"
         return decision, "", block_category
