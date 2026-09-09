@@ -50,7 +50,7 @@ Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e ge
 
 ### Segnali osservati
 
-- ultimo stato esplicito ricevuto da `@KyivCityOfficial`;
+- ultimo livello esplicito GREEN/YELLOW/RED ricevuto da `@KyivCityOfficial`;
 - tempo trascorso dall'ultimo aggiornamento riconoscibile;
 - corretta registrazione dell'handler Telegram.
 
@@ -58,6 +58,7 @@ Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e ge
 
 - Un messaggio esplicito di allarme per Kyiv attiva ALERT.
 - Un messaggio esplicito di cessato allarme per Kyiv attiva NORMAL.
+- Un passaggio YELLOW↔RED mantiene ALERT attivo e pubblica il nuovo livello.
 - Messaggi ambigui non modificano lo stato conosciuto.
 - Se il canale non è leggibile, viene inviato un avviso critico e viene conservato l'ultimo stato.
 - UkraineAlarm può operare soltanto come osservatore shadow opzionale: segnala a Ops

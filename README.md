@@ -56,7 +56,9 @@ signals from the preceding six hours.
 
 ### ALERT
 
-The explicit Kyiv alert templates from `@KyivCityOfficial` control the mode. While active,
+The explicit Kyiv alert templates from `@KyivCityOfficial` control the mode and its
+GREEN/YELLOW/RED level. YELLOW publishes a drone-threat notice, RED publishes the
+higher-threat notice, and every YELLOW↔RED change is shown publicly. While active,
 actionable new messages and edits from `@kyivnebomonitoring` enter the low-latency
 translation pipeline. NORMAL summaries are suspended, alert transitions are
 serialized, public delivery must be confirmed before the state is committed, and

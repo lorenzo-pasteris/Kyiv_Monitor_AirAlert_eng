@@ -65,6 +65,9 @@ allarme; gli altri messaggi del canale non modificano lo stato.
 
 - Un messaggio esplicito di allarme per Kyiv attiva immediatamente ALERT.
 - Un messaggio esplicito di cessato allarme per Kyiv riporta il sistema in NORMAL.
+- Il livello giallo pubblica `DRONE THREAT — KYIV`; il livello rosso pubblica
+  `AIR ALERT — KYIV`. Anche i passaggi giallo↔rosso vengono pubblicati senza
+  chiudere e riaprire l'allerta.
 - Messaggi ambigui o non riferiti a Kyiv non modificano lo stato conosciuto.
 - UkraineAlarm può essere interrogata in modalità shadow quando
   `UKRAINE_ALARM_API_KEY` è configurata. Le osservazioni vengono inviate a Ops e non

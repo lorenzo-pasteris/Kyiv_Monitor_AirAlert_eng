@@ -1,22 +1,22 @@
 import unittest
 
-from alert_rules import classify_kyiv_city_official_alert
+from alert_rules import classify_kyiv_city_official_level
 
 
 class KyivCityOfficialAlertTests(unittest.TestCase):
     def test_classifies_yellow_red_and_clear_templates(self):
-        self.assertTrue(classify_kyiv_city_official_alert(
+        self.assertEqual(classify_kyiv_city_official_level(
             "🟡 УВАГА! У Києві оголошена дронова небезпека!"
-        ))
-        self.assertTrue(classify_kyiv_city_official_alert(
+        ), "YELLOW")
+        self.assertEqual(classify_kyiv_city_official_level(
             "‼️УВАГА! У Києві оголошена повітряна тривога!"
-        ))
-        self.assertFalse(classify_kyiv_city_official_alert(
+        ), "RED")
+        self.assertEqual(classify_kyiv_city_official_level(
             "❕Відбій повітряної тривоги!"
-        ))
+        ), "GREEN")
 
     def test_ignores_other_official_news(self):
-        self.assertIsNone(classify_kyiv_city_official_alert(
+        self.assertIsNone(classify_kyiv_city_official_level(
             "У Києві відновили рух автобусів після ремонту."
         ))
 

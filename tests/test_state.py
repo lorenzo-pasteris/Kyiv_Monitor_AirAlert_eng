@@ -23,6 +23,8 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         monitor.alert_started_at = None
         monitor.alert_generation = 0
         monitor.telegram_alert_state = None
+        monitor.telegram_alert_level = None
+        monitor.alert_level = "GREEN"
         monitor.state_store.stats_db_ready = False
         monitor.production_client = None
         monitor.content_source_entities = {}
@@ -128,6 +130,43 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.alert_active)
         self.assertEqual(public_messages, [])
         self.assertIn("restored after restart", self.owner_messages[-1])
+
+    async def test_active_level_changes_publish_without_restarting_alert(self):
+        public_messages = []
+
+        async def alert_sender(text):
+            public_messages.append(text)
+            return {"message_id": len(public_messages)}
+
+        monitor.send_to_alert_channel = alert_sender
+        self.assertTrue(await monitor.apply_alert_state(True, "yellow", level="YELLOW"))
+        generation = monitor.alert_generation
+        self.assertTrue(await monitor.apply_alert_state(True, "red", level="RED"))
+        self.assertTrue(await monitor.apply_alert_state(True, "yellow-again", level="YELLOW"))
+
+        self.assertEqual(public_messages, [
+            monitor.ALERT_LEVEL_MESSAGES["YELLOW"],
+            monitor.ALERT_LEVEL_MESSAGES["RED"],
+            monitor.ALERT_LEVEL_MESSAGES["YELLOW"],
+        ])
+        self.assertTrue(monitor.alert_active)
+        self.assertEqual(monitor.alert_level, "YELLOW")
+        self.assertEqual(monitor.alert_generation, generation)
+
+    async def test_failed_level_change_does_not_commit_and_can_retry(self):
+        results = [None, {"message_id": 2}]
+
+        async def alert_sender(text):
+            return results.pop(0)
+
+        monitor.alert_active = True
+        monitor.alert_level = "YELLOW"
+        monitor.send_to_alert_channel = alert_sender
+
+        self.assertFalse(await monitor.apply_alert_state(True, "red", level="RED"))
+        self.assertEqual(monitor.alert_level, "YELLOW")
+        self.assertTrue(await monitor.apply_alert_state(True, "red", level="RED"))
+        self.assertEqual(monitor.alert_level, "RED")
 
     async def test_unknown_startup_state_is_rejected(self):
         self.assertFalse(await monitor.apply_alert_state(None, "startup-test", startup=True))

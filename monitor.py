@@ -23,7 +23,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.errors import AuthKeyDuplicatedError
 import state_store
-from alert_rules import classify_kyiv_city_official_alert
+from alert_rules import classify_kyiv_city_official_level
 from predeploy_check import validate_environment
 from text_processing import (
     CANONICAL_PLACE_SPELLINGS,
@@ -142,7 +142,16 @@ PREPARATION_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-ALERT_START_MESSAGE = "🚨 <b>AIR ALERT — KYIV</b>"
+ALERT_LEVEL_MESSAGES = {
+    "YELLOW": (
+        "🟡 <b>DRONE THREAT — KYIV</b>\n\n"
+        "Drone activity reported. Follow official safety guidance."
+    ),
+    "RED": (
+        "🔴 <b>AIR ALERT — KYIV</b>\n\n"
+        "Missile, combined, or large-scale drone threat reported. Proceed to shelter immediately."
+    ),
+}
 
 
 def build_all_clear_message():
@@ -247,6 +256,8 @@ buffers = {ch: [] for ch in ALL_CONTENT_CHANNELS}
 alert_active = False
 alert_started_at = None
 telegram_alert_state = None
+telegram_alert_level = None
+alert_level = "GREEN"
 last_send_time = 0
 last_message_time = time.time()
 production_client = None
@@ -394,7 +405,16 @@ def seconds_until_next_summary(now=None) -> float:
 
 async def reconcile_alert_state(source):
     """Apply the explicit trigger state and retry when public delivery fails."""
-    return await apply_alert_state(telegram_alert_state, source)
+    return await apply_alert_state(telegram_alert_state, source, level=telegram_alert_level)
+
+
+def record_telegram_alert_level(level, message):
+    """Store one authoritative Telegram level observation."""
+    global telegram_alert_level, telegram_alert_state
+    telegram_alert_level = level
+    telegram_alert_state = level != "GREEN"
+    state_store.persist_trigger_observation(telegram_alert_state, message.id, message.date)
+    state_store.persist_operational_state("telegram_alert_level", level)
 
 
 async def ukraine_alarm_shadow_loop():
@@ -480,20 +500,38 @@ async def drain_alert_delivery_tasks(timeout=5.0):
     print(f"[ALERT TASKS] completed={len(done)} cancelled={len(pending)}")
 
 
-async def apply_alert_state(desired, source, *, startup=False, public_message=None):
+async def apply_alert_state(desired, source, *, level=None, startup=False, public_message=None):
     """Serialize an alert transition and commit it only after delivery succeeds."""
-    global alert_transition_lock
+    global alert_level, alert_transition_lock
     if desired is None:
         print("⚠️ No valid Telegram alert state; preserving last known state")
         return False
+    desired_level = level or ("RED" if desired else "GREEN")
+    if desired_level not in {"GREEN", "YELLOW", "RED"} or desired != (desired_level != "GREEN"):
+        raise ValueError(f"Invalid alert state/level combination: {desired!r}/{desired_level!r}")
     if alert_transition_lock is None:
         alert_transition_lock = asyncio.Lock()
     async with alert_transition_lock:
         if desired == alert_active:
+            if not desired or desired_level == alert_level:
+                return True
+            if not await send_to_alert_channel(public_message or ALERT_LEVEL_MESSAGES[desired_level]):
+                await send_to_owner(
+                    "🚨 <b>Alert level delivery failed</b>\n"
+                    f"Requested level: {desired_level}; source: {html.escape(source)}. "
+                    "The level change was not committed and will be retried."
+                )
+                return False
+            previous_level = alert_level
+            alert_level = desired_level
+            state_store.persist_operational_state("alert_level", alert_level)
+            print(f"[ALERT LEVEL] {previous_level} -> {alert_level} source={source}")
             return True
 
         if startup:
             set_alert_state(desired, f"startup:{source}")
+            alert_level = desired_level
+            state_store.persist_operational_state("alert_level", alert_level)
             if desired:
                 recent_alert_messages.clear()
                 await send_to_owner(
@@ -504,7 +542,9 @@ async def apply_alert_state(desired, source, *, startup=False, public_message=No
 
         if not desired:
             await drain_alert_delivery_tasks()
-        message = public_message or (ALERT_START_MESSAGE if desired else build_all_clear_message())
+        message = public_message or (
+            ALERT_LEVEL_MESSAGES[desired_level] if desired else build_all_clear_message()
+        )
         delivered = await send_to_alert_channel(message)
         if not delivered:
             await send_to_owner(
@@ -515,6 +555,8 @@ async def apply_alert_state(desired, source, *, startup=False, public_message=No
             return False
 
         set_alert_state(desired, source)
+        alert_level = desired_level
+        state_store.persist_operational_state("alert_level", alert_level)
         if desired:
             recent_alert_messages.clear()
         print(f"[ALERT TRANSITION] committed={'ALERT' if desired else 'NORMAL'} source={source}")
@@ -802,16 +844,15 @@ async def alert_feed_poll_loop(client, source_entities):
     """Poll trigger and ALERT history so missed push updates cannot create a blind spot."""
     while True:
         try:
-            global telegram_alert_state
+            global telegram_alert_level
             latest_triggers = await client.get_messages(source_entities[ALERT_TRIGGER_CHANNEL], limit=20)
             for trigger in latest_triggers:
-                observed = classify_kyiv_city_official_alert(trigger.text or "")
-                if observed is not None and observed != telegram_alert_state:
-                    telegram_alert_state = observed
-                    state_store.persist_trigger_observation(observed, trigger.id, trigger.date)
-                    print(f"[TRIGGER POLL] {'ACTIVE' if observed else 'CLEAR'} id={trigger.id}")
-                    await reconcile_alert_state(f"poll:@{ALERT_TRIGGER_CHANNEL}")
+                observed = classify_kyiv_city_official_level(trigger.text or "")
+                if observed is not None and observed != telegram_alert_level:
+                    record_telegram_alert_level(observed, trigger)
+                    print(f"[TRIGGER POLL] level={observed} id={trigger.id}")
                 if observed is not None:
+                    await reconcile_alert_state(f"poll:@{ALERT_TRIGGER_CHANNEL}")
                     break
             if alert_active:
                 delivered = await backfill_alert_feed(client, source_entities)
@@ -860,7 +901,7 @@ async def sync_normal_history(client, source_entities):
                 if not raw_text or len(raw_text.strip()) < 5:
                     continue
                 clean = clean_text(raw_text)
-                if channel == ALERT_TRIGGER_CHANNEL and classify_kyiv_city_official_alert(clean) is not None:
+                if channel == ALERT_TRIGGER_CHANNEL and classify_kyiv_city_official_level(clean) is not None:
                     print(f"[HISTORY FILTERED ALERT STATE] @{channel}: id={message.id}")
                     continue
                 if is_pure_ad(clean):
@@ -1713,7 +1754,7 @@ async def publish_test_source(client, text):
 async def main():
     global http_client, send_lock, test_command_lock, translation_slots, summary_lock
     global alert_transition_lock
-    global telegram_alert_state, production_client, content_source_entities
+    global telegram_alert_level, telegram_alert_state, production_client, content_source_entities
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
         http2=False,
@@ -1868,11 +1909,10 @@ async def main():
         # Establish the Telegram trigger state immediately from its latest explicit event.
         recent_trigger_messages = await client.get_messages(source_entities[ALERT_TRIGGER_CHANNEL], limit=100)
         for recent in recent_trigger_messages:
-            state = classify_kyiv_city_official_alert(recent.text or "")
-            if state is not None:
-                telegram_alert_state = state
-                state_store.persist_trigger_observation(state, recent.id, recent.date)
-                print(f"✅ Telegram alert state loaded: {'ACTIVE' if state else 'CLEAR'}")
+            level = classify_kyiv_city_official_level(recent.text or "")
+            if level is not None:
+                record_telegram_alert_level(level, recent)
+                print(f"✅ Telegram alert state loaded: {level}")
                 break
 
         if telegram_alert_state is None:
@@ -1926,7 +1966,7 @@ async def main():
         @client.on(events.NewMessage(chats=list(source_entities.values())))
         @client.on(events.MessageEdited(chats=[source_entities[channel] for channel in ALERT_FEED_CHANNELS]))
         async def production_source_handler(event):
-            global alert_active, alert_started_at, last_message_time, telegram_alert_state
+            global alert_active, alert_started_at, last_message_time, telegram_alert_level
             last_message_time = time.time()
 
             raw_text = event.message.text or ""
@@ -1940,11 +1980,10 @@ async def main():
             clean = clean_alert_source_text(raw_text) if channel in ALERT_FEED_CHANNELS else clean_text(raw_text)
 
             if channel == ALERT_TRIGGER_CHANNEL:
-                state = classify_kyiv_city_official_alert(clean)
-                if state is not None:
-                    telegram_alert_state = state
-                    state_store.persist_trigger_observation(state, event.message.id, event.message.date)
-                    print(f"Telegram trigger update: {'ACTIVE' if state else 'CLEAR'}")
+                level = classify_kyiv_city_official_level(clean)
+                if level is not None:
+                    record_telegram_alert_level(level, event.message)
+                    print(f"Telegram trigger update: {level}")
                     await reconcile_alert_state(f"@{ALERT_TRIGGER_CHANNEL}")
                     return
 

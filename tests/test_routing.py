@@ -358,18 +358,21 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_alert_lifecycle_uses_minimal_public_copy(self):
         monitor.telegram_alert_state = True
+        monitor.telegram_alert_level = "RED"
         monitor.alert_active = False
+        monitor.alert_level = "GREEN"
         for channel in monitor.ALL_CONTENT_CHANNELS:
             monitor.buffers[channel].append({"time": "12:00", "text": "discard me"})
 
         await monitor.reconcile_alert_state("random-test")
-        self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🚨 <b>AIR ALERT — KYIV</b>"))
+        self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, monitor.ALERT_LEVEL_MESSAGES["RED"]))
         self.assertNotIn("REAL-TIME mode", self.sent[-1][1])
         self.assertTrue(all(len(items) == 1 for items in monitor.buffers.values()))
         for items in monitor.buffers.values():
             items.clear()
 
         monitor.telegram_alert_state = False
+        monitor.telegram_alert_level = "GREEN"
         await monitor.reconcile_alert_state("random-test")
         clear_text = self.sent[-1][1]
         self.assertEqual(self.sent[-1][0], ALERT_CHAT_ID)
