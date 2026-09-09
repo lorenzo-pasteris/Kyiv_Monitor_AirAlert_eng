@@ -412,6 +412,35 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 monitor.alert_active,
             ) = original
 
+    async def test_telegram_waits_for_initial_api_sync_when_key_is_configured(self):
+        original = (
+            monitor.UKRAINE_ALARM_API_KEY,
+            monitor.api_alert_level,
+            monitor.telegram_alert_level,
+            monitor.telegram_alert_state,
+            monitor.alert_level,
+            monitor.alert_active,
+        )
+        try:
+            monitor.UKRAINE_ALARM_API_KEY = "configured"
+            monitor.api_alert_level = None
+            monitor.telegram_alert_level = "YELLOW"
+            monitor.telegram_alert_state = True
+            monitor.alert_level = "RED"
+            monitor.alert_active = True
+            self.assertTrue(await monitor.reconcile_alert_state("startup-race-test"))
+            self.assertEqual(self.sent, [])
+            self.assertEqual(monitor.alert_level, "RED")
+        finally:
+            (
+                monitor.UKRAINE_ALARM_API_KEY,
+                monitor.api_alert_level,
+                monitor.telegram_alert_level,
+                monitor.telegram_alert_state,
+                monitor.alert_level,
+                monitor.alert_active,
+            ) = original
+
     async def test_realtime_messages_use_current_alert_level_colour(self):
         original = (
             monitor.alert_active,

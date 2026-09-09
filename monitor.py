@@ -411,6 +411,10 @@ async def reconcile_alert_state(source):
         return await apply_alert_state(
             api_alert_level != "GREEN", source, level=api_alert_level
         )
+    if UKRAINE_ALARM_API_KEY:
+        # Do not let the Telegram fallback briefly overwrite persisted state while
+        # the authoritative API performs its first poll after a deployment.
+        return True
     return await apply_alert_state(telegram_alert_state, source, level=telegram_alert_level)
 
 
