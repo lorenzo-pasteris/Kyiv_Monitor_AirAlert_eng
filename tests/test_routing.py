@@ -441,6 +441,20 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 monitor.alert_active,
             ) = original
 
+    def test_startup_restores_effective_api_level_without_inventing_state(self):
+        self.assertEqual(
+            monitor.choose_startup_alert_level("YELLOW", "RED", True),
+            "RED",
+        )
+        self.assertEqual(
+            monitor.choose_startup_alert_level("GREEN", "RED", True),
+            "GREEN",
+        )
+        self.assertEqual(
+            monitor.choose_startup_alert_level("YELLOW", "RED", False),
+            "YELLOW",
+        )
+
     async def test_realtime_messages_use_current_alert_level_colour(self):
         original = (
             monitor.alert_active,

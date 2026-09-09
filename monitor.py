@@ -427,6 +427,17 @@ def record_telegram_alert_level(level, message):
     state_store.persist_operational_state("telegram_alert_level", level)
 
 
+def choose_startup_alert_level(telegram_level, persisted_level, api_configured):
+    """Restore the last effective API level when it matches the active/clear state."""
+    if (
+        api_configured
+        and persisted_level in {"GREEN", "YELLOW", "RED"}
+        and (persisted_level != "GREEN") == (telegram_level != "GREEN")
+    ):
+        return persisted_level
+    return telegram_level
+
+
 async def ukraine_alarm_state_loop():
     """Make the official API level authoritative for the public alert state."""
     global api_alert_level
@@ -1917,7 +1928,17 @@ async def main():
             )
             raise RuntimeError("Cannot establish initial Kyiv alert state")
 
-        await apply_alert_state(telegram_alert_state, f"@{ALERT_TRIGGER_CHANNEL}", startup=True)
+        startup_level = choose_startup_alert_level(
+            telegram_alert_level,
+            state_store.load_operational_state("alert_level"),
+            bool(UKRAINE_ALARM_API_KEY),
+        )
+        await apply_alert_state(
+            telegram_alert_state,
+            f"@{ALERT_TRIGGER_CHANNEL}",
+            level=startup_level,
+            startup=True,
+        )
 
         if is_war_monitor_poll_window():
             await recover_war_monitor_report(client, source_entities)
