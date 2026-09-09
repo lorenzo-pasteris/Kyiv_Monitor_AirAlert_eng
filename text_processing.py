@@ -250,10 +250,17 @@ def normalize_alert_for_dedup(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
-def parse_ukraine_alarm_kyiv_state(regions: Any) -> bool:
-    """Return Kyiv City's AIR state; never confuse it with Kyiv Oblast."""
+def parse_ukraine_alarm_kyiv_level(regions: Any) -> str:
+    """Return Kyiv City's official GREEN/YELLOW/RED AIR level."""
     kyiv_names = {"київ", "м. київ", "kyiv", "kyiv city"}
-    for region in regions if isinstance(regions, list) else ():
+    candidates = (
+        regions
+        if isinstance(regions, list)
+        else [regions]
+        if isinstance(regions, dict)
+        else ()
+    )
+    for region in candidates:
         if not isinstance(region, dict):
             continue
         names = {
@@ -267,13 +274,31 @@ def parse_ukraine_alarm_kyiv_state(regions: Any) -> bool:
                 levels = region[field]
                 if not isinstance(levels, list):
                     raise ValueError(f"Kyiv City {field} is not an array")
-                return bool(levels)
+                if any(not isinstance(item, dict) for item in levels):
+                    raise ValueError(f"Kyiv City {field} contains a non-object")
+                names = {
+                    str(item.get("alertLevel", "")).strip().upper()
+                    for item in levels
+                }
+                invalid = names - {"YELLOW", "RED"}
+                if invalid:
+                    raise ValueError(f"Kyiv City {field} has invalid levels: {sorted(invalid)!r}")
+                if "RED" in names:
+                    return "RED"
+                if "YELLOW" in names:
+                    return "YELLOW"
+                return "GREEN"
         alerts = region.get("activeAlerts") or []
-        return any(
+        return "RED" if any(
             isinstance(alert, dict) and str(alert.get("type", "")).upper() == "AIR"
             for alert in alerts
-        )
+        ) else "GREEN"
     raise ValueError("Kyiv City is missing from UkraineAlarm response")
+
+
+def parse_ukraine_alarm_kyiv_state(regions: Any) -> bool:
+    """Backward-compatible boolean wrapper around the official level parser."""
+    return parse_ukraine_alarm_kyiv_level(regions) != "GREEN"
 
 
 def utc_iso(value: datetime | None = None) -> str:

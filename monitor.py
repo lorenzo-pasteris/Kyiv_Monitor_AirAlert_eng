@@ -41,6 +41,7 @@ from text_processing import (
     normalize_alert_for_dedup,
     parse_alert_gate_output,
     parse_first_json_object,
+    parse_ukraine_alarm_kyiv_level,
     parse_ukraine_alarm_kyiv_state,
     strip_mixed_alert_commentary,
     translate_known_terse_fragment,
@@ -257,6 +258,7 @@ alert_active = False
 alert_started_at = None
 telegram_alert_state = None
 telegram_alert_level = None
+api_alert_level = None
 alert_level = "GREEN"
 last_send_time = 0
 last_message_time = time.time()
@@ -404,7 +406,11 @@ def seconds_until_next_summary(now=None) -> float:
     raise RuntimeError("No summary slot configured")
 
 async def reconcile_alert_state(source):
-    """Apply the explicit trigger state and retry when public delivery fails."""
+    """Apply the official API level, using Telegram only until API data exists."""
+    if api_alert_level is not None:
+        return await apply_alert_state(
+            api_alert_level != "GREEN", source, level=api_alert_level
+        )
     return await apply_alert_state(telegram_alert_state, source, level=telegram_alert_level)
 
 
@@ -417,10 +423,10 @@ def record_telegram_alert_level(level, message):
     state_store.persist_operational_state("telegram_alert_level", level)
 
 
-async def ukraine_alarm_shadow_loop():
-    """Report official API observations to OPS without controlling public state."""
+async def ukraine_alarm_state_loop():
+    """Make the official API level authoritative for the public alert state."""
+    global api_alert_level
     previous = None
-    previous_mismatch = None
     error_streak = 0
     headers = {"Authorization": UKRAINE_ALARM_API_KEY, "Accept": "application/json"}
     while True:
@@ -430,42 +436,25 @@ async def ukraine_alarm_shadow_loop():
                 error_streak += 1
                 if error_streak in {1, 5, 20}:
                     await send_to_owner(
-                        "🛰️ <b>UkraineAlarm API test error</b>\n"
+                        "🚨 <b>UkraineAlarm API error</b>\n"
                         f"HTTP {response.status_code}; attempt {error_streak}. "
-                        "Telegram and the public alert state are unaffected."
+                        "The last confirmed alert level is being preserved."
                     )
                 await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
                 continue
             error_streak = 0
-            observed = parse_ukraine_alarm_kyiv_state(response.json())
+            observed = parse_ukraine_alarm_kyiv_level(response.json())
+            api_alert_level = observed
             if observed != previous:
-                print(f"[UKRAINEALARM SHADOW] Kyiv={'ACTIVE' if observed else 'CLEAR'}")
-                await send_to_owner(
-                    "🛰️ <b>UkraineAlarm API test</b>\n"
-                    f"Kyiv City: <b>{'ALERT' if observed else 'NORMAL'}</b>. "
-                    "Shadow mode: no public state change."
-                )
-                previous = observed
-            mismatch = telegram_alert_state is not None and observed != telegram_alert_state
-            if mismatch and mismatch != previous_mismatch:
-                print(
-                    "[UKRAINEALARM SHADOW MISMATCH] "
-                    f"api={'ACTIVE' if observed else 'CLEAR'} "
-                    f"telegram={'ACTIVE' if telegram_alert_state else 'CLEAR'}"
-                )
-                await send_to_owner(
-                    "⚠️ <b>UkraineAlarm shadow mismatch</b>\n"
-                    f"API: <b>{'ALERT' if observed else 'NORMAL'}</b>; "
-                    f"Telegram: <b>{'ALERT' if telegram_alert_state else 'NORMAL'}</b>. "
-                    "No public state change."
-                )
-            previous_mismatch = mismatch
+                print(f"[UKRAINEALARM] Kyiv level={observed}")
+                if await reconcile_alert_state("UkraineAlarm API"):
+                    previous = observed
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             error_streak += 1
             if error_streak in {1, 5, 20}:
-                print(f"[UKRAINEALARM SHADOW ERROR] {type(exc).__name__}: {exc}")
+                print(f"[UKRAINEALARM ERROR] {type(exc).__name__}: {exc}")
         await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
 
 
@@ -1666,7 +1655,8 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         # handled so the five-second recovery poll cannot bill it indefinitely.
         return True
 
-    return bool(await safe_send(f"🔴 {html.escape(translation)}"))
+    indicator = "🟡" if alert_level == "YELLOW" else "🔴"
+    return bool(await safe_send(f"{indicator} {html.escape(translation)}"))
 
 
 async def process_alert_feed_message(message, channel, *, edited=False):
@@ -2029,10 +2019,10 @@ async def main():
     if not TEST_MODE:
         asyncio.create_task(health_loop())
         if UKRAINE_ALARM_API_KEY:
-            asyncio.create_task(ukraine_alarm_shadow_loop())
-            print("✅ UkraineAlarm API enabled in shadow mode (cannot change public alert state)")
+            asyncio.create_task(ukraine_alarm_state_loop())
+            print("✅ UkraineAlarm API enabled as authoritative alert-level source")
         else:
-            print("ℹ️ UkraineAlarm API shadow mode disabled: UKRAINE_ALARM_API_KEY is not set")
+            print("⚠️ UkraineAlarm API unavailable: Telegram fallback controls alert state")
 
     try:
         await client.run_until_disconnected()

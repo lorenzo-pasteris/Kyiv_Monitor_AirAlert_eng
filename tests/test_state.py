@@ -24,6 +24,7 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         monitor.alert_generation = 0
         monitor.telegram_alert_state = None
         monitor.telegram_alert_level = None
+        monitor.api_alert_level = None
         monitor.alert_level = "GREEN"
         monitor.state_store.stats_db_ready = False
         monitor.production_client = None

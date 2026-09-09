@@ -323,9 +323,15 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             {"alertLevel": "Yellow", "reason": "UAV activity"}
         ]
         self.assertTrue(monitor.parse_ukraine_alarm_kyiv_state(response))
+        self.assertEqual(monitor.parse_ukraine_alarm_kyiv_level(response), "YELLOW")
+        response[1]["activeAlertLevels"].append(
+            {"alertLevel": "Red", "reason": "Missile threat"}
+        )
+        self.assertEqual(monitor.parse_ukraine_alarm_kyiv_level(response), "RED")
         response[1].pop("activeAlertLevels")
         response[1]["ActiveAlertLevels"] = []
         self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
+        self.assertEqual(monitor.parse_ukraine_alarm_kyiv_level(response[1]), "GREEN")
 
         with self.assertRaisesRegex(ValueError, "Kyiv City"):
             monitor.parse_ukraine_alarm_kyiv_state(response[:1])
@@ -379,6 +385,65 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("✅ <b>ALL CLEAR — KYIV</b>", clear_text)
         self.assertIn(f'<a href="{SUMMARY_CHAT_LINK}">Join Kyiv News →</a>', clear_text)
         self.assertNotIn("Back to NORMAL mode", clear_text)
+
+    async def test_official_api_level_overrides_stale_telegram_level(self):
+        original = (
+            monitor.api_alert_level,
+            monitor.telegram_alert_level,
+            monitor.telegram_alert_state,
+            monitor.alert_level,
+            monitor.alert_active,
+        )
+        try:
+            monitor.api_alert_level = "RED"
+            monitor.telegram_alert_level = "YELLOW"
+            monitor.telegram_alert_state = True
+            monitor.alert_level = "YELLOW"
+            monitor.alert_active = True
+            await monitor.reconcile_alert_state("api-test")
+            self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, monitor.ALERT_LEVEL_MESSAGES["RED"]))
+            self.assertEqual(monitor.alert_level, "RED")
+        finally:
+            (
+                monitor.api_alert_level,
+                monitor.telegram_alert_level,
+                monitor.telegram_alert_state,
+                monitor.alert_level,
+                monitor.alert_active,
+            ) = original
+
+    async def test_realtime_messages_use_current_alert_level_colour(self):
+        original = (
+            monitor.alert_active,
+            monitor.alert_level,
+            monitor.translate_message,
+            monitor.safe_send,
+        )
+
+        async def fake_translation(text, context=()):
+            return "Operational update"
+
+        async def fake_safe_send(text):
+            return await monitor.send_to_alert_channel(text)
+
+        try:
+            monitor.alert_active = True
+            monitor.alert_level = "YELLOW"
+            monitor.translate_message = fake_translation
+            monitor.safe_send = fake_safe_send
+            self.assertTrue(await monitor.handle_alert_message("Жуляни"))
+            self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🟡 Operational update"))
+
+            monitor.alert_level = "RED"
+            self.assertTrue(await monitor.handle_alert_message("Жуляни"))
+            self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🔴 Operational update"))
+        finally:
+            (
+                monitor.alert_active,
+                monitor.alert_level,
+                monitor.translate_message,
+                monitor.safe_send,
+            ) = original
 
     async def test_fundraising_and_engagement_posts_are_rejected(self):
         donation = (

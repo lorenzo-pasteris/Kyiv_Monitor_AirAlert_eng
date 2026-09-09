@@ -43,17 +43,6 @@ jobs:
       - name: Install Railway CLI
         run: npm install --global @railway/cli
 
-      - name: Synchronize UkraineAlarm API key without redeploying
-        env:
-          UKRAINE_ALARM_API_KEY: ${{ secrets.UKRAINE_ALARM_API_KEY }}
-        run: |
-          if [ -n "$UKRAINE_ALARM_API_KEY" ]; then
-            printf '%s' "$UKRAINE_ALARM_API_KEY" | railway variable set UKRAINE_ALARM_API_KEY --stdin --skip-deploys --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
-          else
-            printf 'disabled' | railway variable set UKRAINE_ALARM_API_KEY --stdin --skip-deploys --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
-            echo "UkraineAlarm credential removed from Railway; shadow mode disabled."
-          fi
-
       - name: Stamp the deployment archive
         run: "printf '\\n# Deployment run: %s\\n' \"$GITHUB_RUN_ID\" >> monitor.py"
 
