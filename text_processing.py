@@ -262,6 +262,12 @@ def parse_ukraine_alarm_kyiv_state(regions: Any) -> bool:
         }
         if names.isdisjoint(kyiv_names):
             continue
+        for field in ("activeAlertLevels", "ActiveAlertLevels"):
+            if field in region:
+                levels = region[field]
+                if not isinstance(levels, list):
+                    raise ValueError(f"Kyiv City {field} is not an array")
+                return bool(levels)
         alerts = region.get("activeAlerts") or []
         return any(
             isinstance(alert, dict) and str(alert.get("type", "")).upper() == "AIR"

@@ -7,7 +7,7 @@ Questo documento contiene soltanto lavoro futuro ancora utile. La descrizione de
 ## Baseline attuale
 
 - Un worker Railway legge Telegram con Telethon e pubblica tramite Telegram Bot API.
-- `@kyiv_airraid_alert` determina lo stato NORMAL/ALERT.
+- I modelli espliciti di `@KyivCityOfficial` determinano lo stato NORMAL/ALERT.
 - In ALERT, `@kyiv_alerts` alimenta traduzione e pubblicazione a bassa latenza.
 - In NORMAL, SQLite conserva messaggi e cursori prima del riepilogo Anthropic.
 - GitHub Actions esegue compilazione e suite `unittest`.

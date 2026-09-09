@@ -1,6 +1,6 @@
 """
  Kyiv Alert Monitor v6 — low-latency async pipeline
-- Production trigger: @kyiv_airraid_alert
+- Production trigger: explicit alert templates from @KyivCityOfficial
 - Normal mode: scheduled analysis of news channels published in the news group
 - Alert mode (24/7): only @kyivnebomonitoring in the alert-only channel
 - Daily situation report: only the strict #обстановка post from @war_monitor
@@ -23,7 +23,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.errors import AuthKeyDuplicatedError
 import state_store
-from alert_rules import classify_telegram_alert
+from alert_rules import classify_kyiv_city_official_alert
 from predeploy_check import validate_environment
 from text_processing import (
     CANONICAL_PLACE_SPELLINGS,
@@ -99,7 +99,7 @@ SUMMARY_EVENT_HISTORY_KEY = "summary_event_history_v1"
 SUMMARY_EVENT_HISTORY_HOURS = 24
 ALERT_FEED_CHANNEL = "kyivnebomonitoring"
 UKRAINE_NEWS_CHANNEL = "shv_ukr"
-BACKUP_TRIGGER_CHANNEL = "kyiv_airraid_alert"
+ALERT_TRIGGER_CHANNEL = KYIV_CITY_OFFICIAL_CHANNEL
 ALL_CONTENT_CHANNELS = [
     KYIV_INFO_CHANNEL,
     UKRAINE_NEWS_CHANNEL,
@@ -803,15 +803,16 @@ async def alert_feed_poll_loop(client, source_entities):
     while True:
         try:
             global telegram_alert_state
-            latest_trigger = await client.get_messages(source_entities[BACKUP_TRIGGER_CHANNEL], limit=1)
-            if latest_trigger:
-                trigger = latest_trigger[0]
-                observed = classify_telegram_alert(trigger.text or "")
+            latest_triggers = await client.get_messages(source_entities[ALERT_TRIGGER_CHANNEL], limit=20)
+            for trigger in latest_triggers:
+                observed = classify_kyiv_city_official_alert(trigger.text or "")
                 if observed is not None and observed != telegram_alert_state:
                     telegram_alert_state = observed
                     state_store.persist_trigger_observation(observed, trigger.id, trigger.date)
                     print(f"[TRIGGER POLL] {'ACTIVE' if observed else 'CLEAR'} id={trigger.id}")
-                    await reconcile_alert_state(f"poll:@{BACKUP_TRIGGER_CHANNEL}")
+                    await reconcile_alert_state(f"poll:@{ALERT_TRIGGER_CHANNEL}")
+                if observed is not None:
+                    break
             if alert_active:
                 delivered = await backfill_alert_feed(client, source_entities)
                 if delivered:
@@ -859,6 +860,9 @@ async def sync_normal_history(client, source_entities):
                 if not raw_text or len(raw_text.strip()) < 5:
                     continue
                 clean = clean_text(raw_text)
+                if channel == ALERT_TRIGGER_CHANNEL and classify_kyiv_city_official_alert(clean) is not None:
+                    print(f"[HISTORY FILTERED ALERT STATE] @{channel}: id={message.id}")
+                    continue
                 if is_pure_ad(clean):
                     print(f"[HISTORY FILTERED AD] @{channel}: {clean[:80]}")
                     continue
@@ -1849,7 +1853,7 @@ async def main():
         production_channels = list(dict.fromkeys(
             ALL_CONTENT_CHANNELS
             + ALERT_FEED_CHANNELS
-            + [BACKUP_TRIGGER_CHANNEL, WAR_MONITOR_CHANNEL]
+            + [ALERT_TRIGGER_CHANNEL, WAR_MONITOR_CHANNEL]
         ))
         for channel_name in production_channels:
             entity = await client.get_entity(channel_name)
@@ -1862,9 +1866,9 @@ async def main():
         await ensure_live_source_membership(client, source_entities)
 
         # Establish the Telegram trigger state immediately from its latest explicit event.
-        recent_trigger_messages = await client.get_messages(source_entities[BACKUP_TRIGGER_CHANNEL], limit=20)
+        recent_trigger_messages = await client.get_messages(source_entities[ALERT_TRIGGER_CHANNEL], limit=100)
         for recent in recent_trigger_messages:
-            state = classify_telegram_alert(recent.text or "")
+            state = classify_kyiv_city_official_alert(recent.text or "")
             if state is not None:
                 telegram_alert_state = state
                 state_store.persist_trigger_observation(state, recent.id, recent.date)
@@ -1874,18 +1878,18 @@ async def main():
         if telegram_alert_state is None:
             await send_to_owner(
                 "🚨 <b>Startup self-check failed</b>\n"
-                f"No explicit Kyiv state found in the latest @{BACKUP_TRIGGER_CHANNEL} messages. "
+                f"No explicit Kyiv state found in the latest @{ALERT_TRIGGER_CHANNEL} messages. "
                 "The worker stopped instead of assuming NORMAL."
             )
             raise RuntimeError("Cannot establish initial Kyiv alert state")
 
-        await apply_alert_state(telegram_alert_state, f"@{BACKUP_TRIGGER_CHANNEL}", startup=True)
+        await apply_alert_state(telegram_alert_state, f"@{ALERT_TRIGGER_CHANNEL}", startup=True)
 
         if is_war_monitor_poll_window():
             await recover_war_monitor_report(client, source_entities)
 
         print(
-            f"✅ Connected in production. Alert trigger: @{BACKUP_TRIGGER_CHANNEL}; "
+            f"✅ Connected in production. Alert trigger: @{ALERT_TRIGGER_CHANNEL}; "
             f"content sources: {ALL_CONTENT_CHANNELS}; alert feeds: {ALERT_FEED_CHANNELS}"
         )
         await send_to_owner(
@@ -1935,14 +1939,14 @@ async def main():
                 return
             clean = clean_alert_source_text(raw_text) if channel in ALERT_FEED_CHANNELS else clean_text(raw_text)
 
-            if channel == BACKUP_TRIGGER_CHANNEL:
-                state = classify_telegram_alert(clean)
+            if channel == ALERT_TRIGGER_CHANNEL:
+                state = classify_kyiv_city_official_alert(clean)
                 if state is not None:
                     telegram_alert_state = state
                     state_store.persist_trigger_observation(state, event.message.id, event.message.date)
                     print(f"Telegram trigger update: {'ACTIVE' if state else 'CLEAR'}")
-                    await reconcile_alert_state(f"@{BACKUP_TRIGGER_CHANNEL}")
-                return
+                    await reconcile_alert_state(f"@{ALERT_TRIGGER_CHANNEL}")
+                    return
 
             if channel == WAR_MONITOR_CHANNEL:
                 await process_war_monitor_report(event.message)

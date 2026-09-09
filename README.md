@@ -26,12 +26,11 @@ general news are never mixed blindly into the same pipeline.
 | Ukraine news | `@shv_ukr` | Political, economic, diplomatic and national developments |
 | Military monitoring | `@AMK_Mapping` | Relevant military and strategic developments |
 | Additional news | `@insiderukr` | Additional Ukrainian current-affairs reporting for scheduled analysis |
-| Kyiv official | `@KyivCityOfficial` | City decisions, emergencies, roads and public services |
+| Kyiv official and alert trigger | `@KyivCityOfficial` | Explicit alert/all-clear templates control state; other posts cover city decisions, emergencies, roads and public services |
 | Kyiv public media | `@suspilne_kyiv` | Reported developments and consequences across Kyiv and the region |
 | National electricity | `@ukrenergo` | Grid conditions, restrictions and emergency power cuts |
 | National railway | `@UkrzalInfo` | Train delays, cancellations, diversions and service restoration |
 | Night threat assessment | `@war_monitor` + preparation signals from configured news sources | Only today's post beginning `📡 Обстановка станом на HH:MM` and tagged `#обстановка@war_monitor` triggers one civilian-facing assessment in the News channel; every other post is ignored |
-| Alert-state trigger | `@kyiv_airraid_alert` | Explicit Kyiv alert/all-clear state only; never used as news content |
 | Live alert feed | `@kyivnebomonitoring` | Actionable real-time updates translated and published only while ALERT is active |
 
 The output destinations are configured through `TARGET_CHAT_ID` for **Kyiv Air Alert**
@@ -57,7 +56,7 @@ signals from the preceding six hours.
 
 ### ALERT
 
-The explicit Kyiv state from `@kyiv_airraid_alert` controls the mode. While active,
+The explicit Kyiv alert templates from `@KyivCityOfficial` control the mode. While active,
 actionable new messages and edits from `@kyivnebomonitoring` enter the low-latency
 translation pipeline. NORMAL summaries are suspended, alert transitions are
 serialized, public delivery must be confirmed before the state is committed, and
@@ -77,7 +76,7 @@ production authorization key. Interactive test commands require a separate
 ```text
 NORMAL sources ── Telethon ── SQLite queue ── Anthropic ── Kyiv Hourly News
                                    │
-@kyiv_airraid_alert ── state ──────┤
+@KyivCityOfficial ── state ────────┤
                                    │
 @kyivnebomonitoring ── filter ── translation ── Kyiv Air Alert
 ```
@@ -155,7 +154,7 @@ deployment for rollback.
 Only Telegram user IDs listed in `ADMIN_USER_IDS` may execute `/alert` or `/normal`;
 when the variable is omitted, the allowlist contains only `OWNER_CHAT_ID`. Rejected
 attempts are logged and reported to Ops. The canonical automatic state continues to
-come from `@kyiv_airraid_alert`.
+come from the explicit alert templates published by `@KyivCityOfficial`.
 
 ## Further documentation
 

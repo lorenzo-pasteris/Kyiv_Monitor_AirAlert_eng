@@ -41,7 +41,7 @@ Railway riavvia automaticamente il worker. Dopo l'avvio devono essere controllat
 
 - connessione Telegram;
 - registrazione delle sorgenti corrette;
-- stato del trigger `@kyiv_airraid_alert`;
+- stato del trigger ufficiale `@KyivCityOfficial`;
 - capacità di pubblicare le allerte nel canale `TARGET_CHAT_ID` e i riepiloghi nel gruppo `SUMMARY_CHAT_ID`.
 
 Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e generare un avviso, evitando un restart loop infinito.
@@ -50,7 +50,7 @@ Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e ge
 
 ### Segnali osservati
 
-- ultimo stato esplicito ricevuto da `@kyiv_airraid_alert`;
+- ultimo stato esplicito ricevuto da `@KyivCityOfficial`;
 - tempo trascorso dall'ultimo aggiornamento riconoscibile;
 - corretta registrazione dell'handler Telegram.
 

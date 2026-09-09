@@ -160,6 +160,21 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.state_store.load_pending_normal_messages(), [])
         self.assertEqual(monitor.state_store.get_source_cursor(channel), 901)
 
+    async def test_official_alert_templates_do_not_enter_summary_history(self):
+        now = datetime.now(timezone.utc)
+        channel = monitor.ALERT_TRIGGER_CHANNEL
+        entities = {name: name for name in monitor.ALL_CONTENT_CHANNELS}
+        client = FakeHistoryClient({name: [] for name in monitor.ALL_CONTENT_CHANNELS})
+        client.messages_by_channel[channel] = [
+            FakeTelegramMessage(910, "🟡 УВАГА! У Києві оголошена дронова небезпека!", now),
+            FakeTelegramMessage(911, "У Києві відновили рух автобусів.", now),
+        ]
+
+        self.assertTrue(await monitor.sync_normal_history(client, entities))
+        pending = monitor.state_store.load_pending_normal_messages()
+        self.assertEqual([row["message_id"] for row in pending], [911])
+        self.assertEqual(monitor.state_store.get_source_cursor(channel), 911)
+
     async def test_failed_delivery_retains_pending_and_success_marks_processed(self):
         channel = monitor.KYIV_INFO_CHANNEL
         message_id = 501
@@ -301,6 +316,16 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
         response[1]["activeAlerts"].append({"type": "AIR"})
         self.assertTrue(monitor.parse_ukraine_alarm_kyiv_state(response))
+
+        response[1]["activeAlertLevels"] = []
+        self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
+        response[1]["activeAlertLevels"] = [
+            {"alertLevel": "Yellow", "reason": "UAV activity"}
+        ]
+        self.assertTrue(monitor.parse_ukraine_alarm_kyiv_state(response))
+        response[1].pop("activeAlertLevels")
+        response[1]["ActiveAlertLevels"] = []
+        self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
 
         with self.assertRaisesRegex(ValueError, "Kyiv City"):
             monitor.parse_ukraine_alarm_kyiv_state(response[:1])
@@ -473,6 +498,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_selected_official_sources_are_content_and_war_monitor_is_special(self):
         self.assertNotIn("agentstvonews", monitor.ALL_CONTENT_CHANNELS)
+        self.assertEqual(monitor.ALERT_TRIGGER_CHANNEL, "KyivCityOfficial")
         for channel in ("KyivCityOfficial", "suspilne_kyiv", "ukrenergo", "UkrzalInfo"):
             self.assertIn(channel, monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("war_monitor", monitor.ALL_CONTENT_CHANNELS)

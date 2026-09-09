@@ -20,7 +20,7 @@ Il servizio è eseguito come worker Python su Railway e il codice è conservato 
 - **Railway**: esecuzione continua, configurazione tramite variabili d'ambiente e log.
 - **Telethon**: lettura dei canali e dei gruppi Telegram.
 - **Telegram Bot API**: pubblicazione delle allerte nel canale e dei riepiloghi nel gruppo separato.
-- **`@kyiv_airraid_alert`**: unica sorgente dello stato di allerta per Kyiv città.
+- **`@KyivCityOfficial`**: sorgente ufficiale dello stato di allerta per Kyiv città e fonte di notizie municipali.
 - **Anthropic API**: traduzione e produzione dei riepiloghi.
 - **GitHub**: versionamento e origine dei deployment Railway.
 
@@ -41,8 +41,9 @@ Le sorgenti di contenuto sono:
 - `@insiderukr`: ulteriore copertura dell'attualità ucraina per l'analisi oraria.
 
 La sola sorgente degli aggiornamenti real-time durante ALERT è
-`@kyivnebomonitoring`. Il trigger di stato resta separato in
-`@kyiv_airraid_alert` e non viene trattato come contenuto.
+`@kyivnebomonitoring`. Le sole notifiche esplicite di allarme e cessato allarme di
+`@KyivCityOfficial` controllano lo stato e non vengono trattate come notizie; gli altri
+messaggi dello stesso canale restano sorgenti di contenuto municipale.
 
 `@monitorwarr` è stato rimosso completamente e non deve essere registrato o letto.
 
@@ -56,7 +57,9 @@ Gli ID devono essere configurati in Railway e non inseriti nel codice. Il gruppo
 
 ### Trigger dell'allerta
 
-Lo stato di allerta proviene esclusivamente dal canale Telegram `@kyiv_airraid_alert`. Il canale non è una sorgente di contenuti: viene usato soltanto per determinare inizio e fine dell'allerta.
+Lo stato di allerta proviene dalle notifiche esplicite di `@KyivCityOfficial`. Il
+classificatore accetta soltanto i modelli ufficiali di allarme giallo/rosso e di cessato
+allarme; gli altri messaggi del canale non modificano lo stato.
 
 ## Regole del trigger
 
@@ -65,9 +68,9 @@ Lo stato di allerta proviene esclusivamente dal canale Telegram `@kyiv_airraid_a
 - Messaggi ambigui o non riferiti a Kyiv non modificano lo stato conosciuto.
 - UkraineAlarm può essere interrogata in modalità shadow quando
   `UKRAINE_ALARM_API_KEY` è configurata. Le osservazioni vengono inviate a Ops e non
-  controllano mai lo stato pubblico, che resta determinato da `@kyiv_airraid_alert`.
+  controllano mai lo stato pubblico, che resta determinato da `@KyivCityOfficial`.
 
-All'avvio il worker legge gli ultimi messaggi di `@kyiv_airraid_alert` per ricostruire lo stato senza dover aspettare il prossimo evento.
+All'avvio il worker legge gli ultimi messaggi di `@KyivCityOfficial` per ricostruire lo stato senza dover aspettare il prossimo evento.
 
 ## Modalità NORMAL
 
@@ -176,8 +179,8 @@ Il filtro commenti rileva opinioni, domande retoriche e supposizioni nel feed di
 
 ## Limiti noti
 
-- UkraineAlarm è soltanto un osservatore shadow opzionale: il trigger pubblico è
-  esclusivamente `@kyiv_airraid_alert`.
+- UkraineAlarm è soltanto un osservatore shadow opzionale: il trigger pubblico usa
+  esclusivamente i modelli espliciti di `@KyivCityOfficial`.
 - SQLite e il lock Telethon usano per impostazione predefinita `/data`; senza un
   volume Railway montato su quel percorso, i dati non sopravvivono alla sostituzione
   del container.
@@ -189,7 +192,7 @@ Il filtro commenti rileva opinioni, domande retoriche e supposizioni nel feed di
 1. Verificare che Railway mostri un solo deployment attivo.
 2. Verificare che il log indichi `TEST_MODE` o produzione in modo coerente.
 3. In produzione, controllare che le sorgenti dei riepiloghi siano `kievinfo_kyiv`, `shv_ukr`, `AMK_Mapping` e `insiderukr`, e che l'unico feed ALERT sia `kyivnebomonitoring`.
-4. Controllare che `@kyiv_airraid_alert` sia registrato come trigger e non come contenuto.
+4. Controllare che `@KyivCityOfficial` sia registrato e che i suoi modelli espliciti controllino il trigger senza entrare nei riepiloghi.
 5. Verificare che il messaggio tecnico di avvio arrivi soltanto a Ops.
 6. Verificare che le allerte vadano a `TARGET_CHAT_ID` e i riepiloghi a `SUMMARY_CHAT_ID`.
 7. Eseguire test funzionali esclusivamente nel gruppo di test.
