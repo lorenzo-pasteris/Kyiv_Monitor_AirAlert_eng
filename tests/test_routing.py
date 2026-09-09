@@ -31,7 +31,7 @@ def load_monitor():
         "ADMIN_USER_IDS": "392256147",
         "TEST_MODE": "false",
     })
-    os.environ.pop("UKRAINE_ALARM_API_KEY", None)
+    os.environ.pop("UKRAINE_ALARM_STATE_URL", None)
 
     httpx_stub = types.ModuleType("httpx")
     telethon_stub = types.ModuleType("telethon")
@@ -315,7 +315,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
         response[1]["activeAlerts"].append({"type": "AIR"})
-        self.assertTrue(monitor.parse_ukraine_alarm_kyiv_state(response))
+        with self.assertRaisesRegex(ValueError, "no threat level"):
+            monitor.parse_ukraine_alarm_kyiv_state(response)
 
         response[1]["activeAlertLevels"] = []
         self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
@@ -335,6 +336,15 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, "Kyiv City"):
             monitor.parse_ukraine_alarm_kyiv_state(response[:1])
+
+    def test_ukraine_alarm_webhook_state_requires_an_exact_level(self):
+        self.assertIsNone(monitor.parse_ukraine_alarm_state_level({"known": False}))
+        self.assertEqual(
+            monitor.parse_ukraine_alarm_state_level({"known": True, "level": "Yellow"}),
+            "YELLOW",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid level"):
+            monitor.parse_ukraine_alarm_state_level({"known": True, "level": "AIR"})
 
     async def asyncSetUp(self):
         self.sent = []
@@ -412,9 +422,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 monitor.alert_active,
             ) = original
 
-    async def test_telegram_waits_for_initial_api_sync_when_key_is_configured(self):
+    async def test_telegram_controls_state_until_first_webhook_snapshot(self):
         original = (
-            monitor.UKRAINE_ALARM_API_KEY,
             monitor.api_alert_level,
             monitor.telegram_alert_level,
             monitor.telegram_alert_state,
@@ -422,38 +431,22 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.alert_active,
         )
         try:
-            monitor.UKRAINE_ALARM_API_KEY = "configured"
             monitor.api_alert_level = None
             monitor.telegram_alert_level = "YELLOW"
             monitor.telegram_alert_state = True
             monitor.alert_level = "RED"
             monitor.alert_active = True
             self.assertTrue(await monitor.reconcile_alert_state("startup-race-test"))
-            self.assertEqual(self.sent, [])
-            self.assertEqual(monitor.alert_level, "RED")
+            self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, monitor.ALERT_LEVEL_MESSAGES["YELLOW"]))
+            self.assertEqual(monitor.alert_level, "YELLOW")
         finally:
             (
-                monitor.UKRAINE_ALARM_API_KEY,
                 monitor.api_alert_level,
                 monitor.telegram_alert_level,
                 monitor.telegram_alert_state,
                 monitor.alert_level,
                 monitor.alert_active,
             ) = original
-
-    def test_startup_restores_effective_api_level_without_inventing_state(self):
-        self.assertEqual(
-            monitor.choose_startup_alert_level("YELLOW", "RED", True),
-            "RED",
-        )
-        self.assertEqual(
-            monitor.choose_startup_alert_level("GREEN", "RED", True),
-            "GREEN",
-        )
-        self.assertEqual(
-            monitor.choose_startup_alert_level("YELLOW", "RED", False),
-            "YELLOW",
-        )
 
     async def test_realtime_messages_use_current_alert_level_colour(self):
         original = (

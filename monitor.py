@@ -41,8 +41,9 @@ from text_processing import (
     normalize_alert_for_dedup,
     parse_alert_gate_output,
     parse_first_json_object,
-    parse_ukraine_alarm_kyiv_level,
-    parse_ukraine_alarm_kyiv_state,
+    parse_ukraine_alarm_kyiv_level,  # noqa: F401 -- re-exported for routing regressions
+    parse_ukraine_alarm_kyiv_state,  # noqa: F401 -- re-exported for routing regressions
+    parse_ukraine_alarm_state_level,
     strip_mixed_alert_commentary,
     translate_known_terse_fragment,
     utc_iso,
@@ -54,9 +55,10 @@ TELEGRAM_API_HASH = os.environ["TELEGRAM_API_HASH"]
 TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
 TEST_TELEGRAM_SESSION = os.environ.get("TEST_TELEGRAM_SESSION")
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-UKRAINE_ALARM_API_KEY = os.environ.get("UKRAINE_ALARM_API_KEY", "").strip()
-if UKRAINE_ALARM_API_KEY == "disabled":
-    UKRAINE_ALARM_API_KEY = ""
+UKRAINE_ALARM_STATE_URL = os.environ.get(
+    "UKRAINE_ALARM_STATE_URL",
+    "http://ukrainealarm-api-probe.railway.internal:8080/state",
+).strip()
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USER_ID = int(BOT_TOKEN.split(":", 1)[0])
 TEST_MODE = os.environ.get("TEST_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -120,11 +122,7 @@ SILENCE_THRESHOLD = 4 * 3600  # 4 hours of total silence = warning
 ALERT_FEED_POLL_INTERVAL = float(os.environ.get("ALERT_FEED_POLL_INTERVAL", "5"))
 ALERT_RECOVERY_MAX_MESSAGES = int(os.environ.get("ALERT_RECOVERY_MAX_MESSAGES", "3"))
 TELETHON_HANDOFF_DELAY = float(os.environ.get("TELETHON_HANDOFF_DELAY", "15.0"))
-UKRAINE_ALARM_POLL_INTERVAL = float(os.environ.get("UKRAINE_ALARM_POLL_INTERVAL", "30"))
-UKRAINE_ALARM_REGION_ID = os.environ.get("UKRAINE_ALARM_REGION_ID", "31").strip()
-UKRAINE_ALARM_URL = (
-    f"https://api.ukrainealarm.com/api/v3/alerts/{UKRAINE_ALARM_REGION_ID}"
-)
+UKRAINE_ALARM_POLL_INTERVAL = float(os.environ.get("UKRAINE_ALARM_POLL_INTERVAL", "5"))
 
 # --- Timezone ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
@@ -406,15 +404,11 @@ def seconds_until_next_summary(now=None) -> float:
     raise RuntimeError("No summary slot configured")
 
 async def reconcile_alert_state(source):
-    """Apply the official API level, using Telegram only until API data exists."""
+    """Apply the webhook level, using Telegram until its first exact snapshot."""
     if api_alert_level is not None:
         return await apply_alert_state(
             api_alert_level != "GREEN", source, level=api_alert_level
         )
-    if UKRAINE_ALARM_API_KEY:
-        # Do not let the Telegram fallback briefly overwrite persisted state while
-        # the authoritative API performs its first poll after a deployment.
-        return True
     return await apply_alert_state(telegram_alert_state, source, level=telegram_alert_level)
 
 
@@ -427,42 +421,33 @@ def record_telegram_alert_level(level, message):
     state_store.persist_operational_state("telegram_alert_level", level)
 
 
-def choose_startup_alert_level(telegram_level, persisted_level, api_configured):
-    """Restore the last effective API level when it matches the active/clear state."""
-    if (
-        api_configured
-        and persisted_level in {"GREEN", "YELLOW", "RED"}
-        and (persisted_level != "GREEN") == (telegram_level != "GREEN")
-    ):
-        return persisted_level
-    return telegram_level
-
-
 async def ukraine_alarm_state_loop():
-    """Make the official API level authoritative for the public alert state."""
+    """Make the official webhook snapshot authoritative for the public level."""
     global api_alert_level
     previous = None
     error_streak = 0
-    headers = {"Authorization": UKRAINE_ALARM_API_KEY, "Accept": "application/json"}
     while True:
         try:
-            response = await http_client.get(UKRAINE_ALARM_URL, headers=headers, timeout=10.0)
+            response = await http_client.get(UKRAINE_ALARM_STATE_URL, timeout=10.0)
             if response.status_code != 200:
                 error_streak += 1
                 if error_streak in {1, 5, 20}:
                     await send_to_owner(
-                        "🚨 <b>UkraineAlarm API error</b>\n"
+                        "🚨 <b>UkraineAlarm webhook-state error</b>\n"
                         f"HTTP {response.status_code}; attempt {error_streak}. "
                         "The last confirmed alert level is being preserved."
                     )
                 await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
                 continue
             error_streak = 0
-            observed = parse_ukraine_alarm_kyiv_level(response.json())
+            observed = parse_ukraine_alarm_state_level(response.json())
+            if observed is None:
+                await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
+                continue
             api_alert_level = observed
             if observed != previous:
-                print(f"[UKRAINEALARM] Kyiv level={observed}")
-                if await reconcile_alert_state("UkraineAlarm API"):
+                print(f"[UKRAINEALARM WEBHOOK] Kyiv level={observed}")
+                if await reconcile_alert_state("UkraineAlarm webhook"):
                     previous = observed
         except asyncio.CancelledError:
             raise
@@ -1928,15 +1913,10 @@ async def main():
             )
             raise RuntimeError("Cannot establish initial Kyiv alert state")
 
-        startup_level = choose_startup_alert_level(
-            telegram_alert_level,
-            state_store.load_operational_state("alert_level"),
-            bool(UKRAINE_ALARM_API_KEY),
-        )
         await apply_alert_state(
             telegram_alert_state,
             f"@{ALERT_TRIGGER_CHANNEL}",
-            level=startup_level,
+            level=telegram_alert_level,
             startup=True,
         )
 
@@ -2043,11 +2023,11 @@ async def main():
     asyncio.create_task(summary_loop())
     if not TEST_MODE:
         asyncio.create_task(health_loop())
-        if UKRAINE_ALARM_API_KEY:
+        if UKRAINE_ALARM_STATE_URL:
             asyncio.create_task(ukraine_alarm_state_loop())
-            print("✅ UkraineAlarm API enabled as authoritative alert-level source")
+            print("✅ UkraineAlarm webhook enabled as authoritative alert-level source")
         else:
-            print("⚠️ UkraineAlarm API unavailable: Telegram fallback controls alert state")
+            print("⚠️ UkraineAlarm webhook unavailable: Telegram controls alert state")
 
     try:
         await client.run_until_disconnected()

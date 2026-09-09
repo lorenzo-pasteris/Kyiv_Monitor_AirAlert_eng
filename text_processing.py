@@ -289,11 +289,25 @@ def parse_ukraine_alarm_kyiv_level(regions: Any) -> str:
                     return "YELLOW"
                 return "GREEN"
         alerts = region.get("activeAlerts") or []
-        return "RED" if any(
+        if any(
             isinstance(alert, dict) and str(alert.get("type", "")).upper() == "AIR"
             for alert in alerts
-        ) else "GREEN"
+        ):
+            raise ValueError("Kyiv City active AIR alert has no threat level")
+        return "GREEN"
     raise ValueError("Kyiv City is missing from UkraineAlarm response")
+
+
+def parse_ukraine_alarm_state_level(payload: Any) -> str | None:
+    """Return the exact level exposed by the official webhook receiver."""
+    if not isinstance(payload, dict):
+        raise ValueError("UkraineAlarm webhook state is not an object")
+    if payload.get("known") is not True:
+        return None
+    level = str(payload.get("level", "")).strip().upper()
+    if level not in {"GREEN", "YELLOW", "RED"}:
+        raise ValueError(f"UkraineAlarm webhook state has invalid level: {level!r}")
+    return level
 
 
 def parse_ukraine_alarm_kyiv_state(regions: Any) -> bool:

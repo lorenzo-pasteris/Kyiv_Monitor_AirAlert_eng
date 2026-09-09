@@ -69,9 +69,9 @@ allarme; gli altri messaggi del canale non modificano lo stato.
   `AIR ALERT — KYIV`. Anche i passaggi giallo↔rosso vengono pubblicati senza
   chiudere e riaprire l'allerta.
 - Messaggi ambigui o non riferiti a Kyiv non modificano lo stato conosciuto.
-- UkraineAlarm può essere interrogata in modalità shadow quando
-  `UKRAINE_ALARM_API_KEY` è configurata. Le osservazioni vengono inviate a Ops e non
-  controllano mai lo stato pubblico, che resta determinato da `@KyivCityOfficial`.
+- Il receiver webhook UkraineAlarm fornisce il livello esatto e autorevole tramite
+  `UKRAINE_ALARM_STATE_URL`. Finché non esiste un primo snapshot completo, il sistema
+  usa `@KyivCityOfficial` senza dedurre il rosso dal generico stato `AIR`.
 
 All'avvio il worker legge gli ultimi messaggi di `@KyivCityOfficial` per ricostruire lo stato senza dover aspettare il prossimo evento.
 
@@ -160,14 +160,14 @@ ANTHROPIC_API_KEY
 ```
 
 `TEST_MODE`, `TEST_CHAT_ID`, `TEST_TELEGRAM_SESSION`, `OPS_CHAT_ID`,
-`ADMIN_USER_IDS` e `UKRAINE_ALARM_API_KEY` sono opzionali e dipendono dall'ambiente
+`ADMIN_USER_IDS` e `UKRAINE_ALARM_STATE_URL` sono opzionali e dipendono dall'ambiente
 o dalla funzione desiderata.
 
 `TARGET_CHAT_ID`, `SUMMARY_CHAT_ID` e `SUMMARY_CHAT_LINK` sono obbligatori in produzione; i due ID devono essere differenti e `SUMMARY_CHAT_LINK` deve puntare al gruppo, mai al canale `@kyivairalert`. `OPS_CHAT_ID` identifica il gruppo privato dedicato alle notifiche operative: errori dopo i retry, fallback AI, fallimenti di consegna, interventi del watchdog e silenzio anomalo delle sorgenti. Se non è configurato, viene usato `OWNER_CHAT_ID` per compatibilità. I dettagli diagnostici restano nei log Railway. Il canale e il gruppo pubblico non ricevono messaggi “No relevant updates”, mentre la chat Ops riceve l'heartbeat orario che conferma il corretto completamento di un ciclo vuoto.
 
 `ADMIN_USER_IDS` è facoltativa: se manca, `OWNER_CHAT_ID` è l'unico utente
-autorizzato agli override. `UKRAINE_ALARM_API_KEY` è facoltativa e abilita soltanto
-l'osservazione shadow dell'API ufficiale.
+autorizzato agli override. `UKRAINE_ALARM_STATE_URL` può sovrascrivere l'indirizzo
+interno predefinito del receiver webhook ufficiale.
 
 Il filtro commenti rileva opinioni, domande retoriche e supposizioni nel feed di allerta prima della traduzione. Questi messaggi non vengono pubblicati nel canale di allerta e sono inoltrati integralmente a `OPS_CHAT_ID` con etichetta `COMMENTO`. Se l'invio a OPS fallisce, il messaggio non viene marcato come completato e può essere ritentato.
 
