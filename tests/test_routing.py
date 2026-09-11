@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import os
 import random
 import sqlite3
@@ -528,6 +529,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         camera_speculation = "Ці просто кружляють над Києвом. Не здивуюсь, якщо на них камери"
         petya_commentary = "Нарешті у Києві вперше за 2 місяці Петя відпрацював на повну"
         survived_volley_commentary = "Наче другий залп пережили, ви як там?"
+        hostomel_encouragement = "Гостомель котики, тримайтесь, ми з вами💔"
         debris_warning = "ППО працює добре, але уламки ніхто не скасовував, тому на вулицю не виходимо"
 
         self.assertTrue(monitor.is_commentary_alert_message(commentary))
@@ -540,6 +542,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.is_commentary_alert_message(camera_speculation))
         self.assertTrue(monitor.is_commentary_alert_message(petya_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(survived_volley_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(hostomel_encouragement))
         self.assertTrue(monitor.is_commentary_alert_message("Seems we survived a second volley. How are you?"))
         self.assertFalse(monitor.is_commentary_alert_message(debris_warning))
         self.assertFalse(monitor.is_commentary_alert_message(operational))
@@ -794,8 +797,40 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("never 'minus'", prompt)
         self.assertIn("never translate them literally as gifts or parcels", prompt)
         self.assertIn("never good or friendly drones", prompt)
+        self.assertIn("черговий дрон = another drone, NEVER a red drone", prompt)
+        self.assertIn("вибух / вибухи = explosion(s), NEVER impact(s)", prompt)
+        self.assertIn("NEVER cats or kittens", prompt)
+        self.assertIn("the subject is omitted, so NEVER invent 'we' or 'they'", prompt)
         self.assertIn("air defence may become active", prompt)
         self.assertTrue(prompt.endswith(source))
+
+    async def test_known_semantic_translation_errors_are_corrected(self):
+        cases = (
+            (
+                "Черговий дрон повз Княжичі у бік ДВРЗ",
+                "Red drone passing Knyazhychi toward DVRZ.",
+                "Another drone passing Knyazhychi toward DVRZ.",
+            ),
+            (
+                "Вибух, але дрон наче вижив",
+                "An impact, but the drone appears to have survived.",
+                "An explosion, but the drone appears to have survived.",
+            ),
+            (
+                "Гостомель котики, тримайтесь",
+                "Hostomel cats, hang in there.",
+                "Hostomel folks, hang in there.",
+            ),
+        )
+        for source, bad_translation, expected in cases:
+            raw = json.dumps({
+                "decision": "PUBLISH",
+                "block_category": None,
+                "translation": bad_translation,
+                "evidence": "",
+                "reason": "operational",
+            })
+            self.assertEqual(monitor.parse_alert_gate_output(raw, source)[1], expected)
 
     async def test_known_terse_alert_fragments_never_need_model_context(self):
         self.assertEqual(monitor.translate_known_terse_fragment("Дарниця"), "Darnytsia")

@@ -151,6 +151,7 @@ COMMENTARY_PATTERNS = (
     r"\b(?:нарешті|наконец|finally)\b.*\b(?:петя|petya)\b.*\b(?:на повну|на полную|full capacity)\b",
     r"\b(?:наче|схоже|кажется|похоже|seems|looks like|apparently)\b.*\b(?:пережил\w*|відбил\w*|surviv\w*|made it through)\b",
     r"\b(?:ви як(?: там)?|як ви(?: там)?|how are you(?: doing)?|are you (?:all )?(?:okay|ok))\b",
+    r"\bкотик\w*\b.*\b(?:трим\w*|ми\s+з\s+вами)\b",
     r"^\s*бандероль\s*[-—:=]\s*крилата ракета\s*[.!]?\s*$",
 )
 
@@ -388,6 +389,12 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> st
         "- відвернула = turned away, never diverted or intercepted\n"
         "- без швидкісних = no high-speed targets, never no jet-powered UAVs\n"
         "- є влучання = an impact is reported; preserve singular and never add 'direct'\n"
+        "- вибух / вибухи = explosion(s), NEVER impact(s) unless the source explicitly says "
+        "влучання or приліт\n"
+        "- черговий дрон = another drone, NEVER a red drone; only червоний means red\n"
+        "- котики used affectionately for people = folks/dear ones, NEVER cats or kittens\n"
+        "- схоже другий раз вже не попали = it appears the second attempt also missed; "
+        "the subject is omitted, so NEVER invent 'we' or 'they'\n"
         "- ППО працює = air defence is engaging\n"
         "- добрі дрони is ironic alert-channel slang: translate as drones, never good or friendly drones\n"
         "- місто/область може підключитися means its air defence may become active, never that the place itself may join in\n"
@@ -469,6 +476,30 @@ def is_valid_alert_translation(text: str) -> bool:
     return not re.search(r"[А-Яа-яІіЇїЄєҐґ]", text or "") and not is_translation_meta_output(text)
 
 
+def correct_known_translation_errors(source_text: str, translation: str) -> str:
+    """Correct high-risk cases where model wording changes the reported event."""
+    source = source_text.casefold()
+    if "чергов" in source and "червон" not in source:
+        translation = re.sub(
+            r"\bred\b",
+            lambda match: "Another" if match.group(0)[0].isupper() else "another",
+            translation,
+            flags=re.IGNORECASE,
+        )
+    if "вибух" in source and not any(stem in source for stem in ("влуч", "приліт")):
+        translation = re.sub(
+            r"\bimpacts?\b",
+            lambda match: (
+                "Explosion" if match.group(0)[0].isupper() else "explosion"
+            ) + ("s" if match.group(0).casefold().endswith("s") else ""),
+            translation,
+            flags=re.IGNORECASE,
+        )
+    if "котик" in source:
+        translation = re.sub(r"\b(?:cats?|kittens?)\b", "folks", translation, flags=re.IGNORECASE)
+    return translation
+
+
 def parse_first_json_object(raw: str) -> dict[str, Any]:
     """Legacy fallback: decode the first JSON object and report trailing anomalies."""
     cleaned = raw.strip()
@@ -496,7 +527,9 @@ def parse_alert_gate_output(raw: str, source_text: str = "") -> tuple[str, str, 
         parsed = parse_first_json_object(raw)
     decision = str(parsed.get("decision", "")).strip().upper()
     block_category = str(parsed.get("block_category") or "").strip().upper()
-    translation = str(parsed.get("translation", "")).strip()
+    translation = correct_known_translation_errors(
+        source_text, str(parsed.get("translation", "")).strip()
+    )
     evidence = str(parsed.get("evidence") or "").strip()
     reason = str(parsed.get("reason", "")).strip()
     if decision not in {"PUBLISH", "DROP"}:
