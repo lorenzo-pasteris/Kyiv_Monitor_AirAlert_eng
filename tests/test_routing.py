@@ -530,6 +530,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         petya_commentary = "Нарешті у Києві вперше за 2 місяці Петя відпрацював на повну"
         survived_volley_commentary = "Наче другий залп пережили, ви як там?"
         hostomel_encouragement = "Гостомель котики, тримайтесь, ми з вами💔"
+        sarcastic_all_clear = "Ого, навіть відбій дали — щось новеньке"
         debris_warning = "ППО працює добре, але уламки ніхто не скасовував, тому на вулицю не виходимо"
 
         self.assertTrue(monitor.is_commentary_alert_message(commentary))
@@ -543,6 +544,10 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.is_commentary_alert_message(petya_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(survived_volley_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(hostomel_encouragement))
+        self.assertTrue(monitor.is_commentary_alert_message(sarcastic_all_clear))
+        self.assertTrue(monitor.is_commentary_alert_message(
+            "Wow, they even issued an all clear—that's something new"
+        ))
         self.assertTrue(monitor.is_commentary_alert_message("Seems we survived a second volley. How are you?"))
         self.assertFalse(monitor.is_commentary_alert_message(debris_warning))
         self.assertFalse(monitor.is_commentary_alert_message(operational))

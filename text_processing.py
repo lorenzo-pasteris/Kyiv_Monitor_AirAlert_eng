@@ -152,6 +152,7 @@ COMMENTARY_PATTERNS = (
     r"\b(?:наче|схоже|кажется|похоже|seems|looks like|apparently)\b.*\b(?:пережил\w*|відбил\w*|surviv\w*|made it through)\b",
     r"\b(?:ви як(?: там)?|як ви(?: там)?|how are you(?: doing)?|are you (?:all )?(?:okay|ok))\b",
     r"\bкотик\w*\b.*\b(?:трим\w*|ми\s+з\s+вами)\b",
+    r"\b(?:ого|вау|wow)\b.*\b(?:відбій|all\s+clear)\b.*\b(?:щось\s+новеньке|something\s+new)\b",
     r"^\s*бандероль\s*[-—:=]\s*крилата ракета\s*[.!]?\s*$",
 )
 
