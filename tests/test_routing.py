@@ -583,6 +583,12 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.clean_alert_source_text(raw),
             "🔴 Ballistic ballistics from the east",
         )
+        for promo in (
+            "Обов'язково сьогодні підпишіться на наш ракетний канал!!",
+            "Підписуйтесь на ракетний канал",
+            "Be sure to subscribe to our missile channel today!!",
+        ):
+            self.assertEqual(monitor.clean_alert_source_text(promo), "")
 
     async def test_alert_source_keeps_linked_tactical_text(self):
         raw = (
