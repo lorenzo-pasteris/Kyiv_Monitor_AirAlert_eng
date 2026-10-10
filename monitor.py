@@ -29,6 +29,7 @@ from text_processing import (
     CANONICAL_PLACE_SPELLINGS,
     build_alert_translation_prompt,
     clean_alert_source_text,
+    clean_alert_public_text,
     clean_text,
     contains_operational_location,  # noqa: F401 -- re-exported for routing regressions
     is_actionable_alert_message,
@@ -166,12 +167,8 @@ ALERT_LEVEL_MESSAGES = {
 
 
 def build_all_clear_message():
-    """Return the public all-clear message with a safe link to the news group."""
-    safe_link = html.escape(SUMMARY_CHAT_LINK or "", quote=True)
-    return (
-        "✅ <b>ALL CLEAR — KYIV</b>\n\n"
-        f'<a href="{safe_link}">Join Kyiv News →</a>'
-    )
+    """Return the official all-clear without promotional links."""
+    return "✅ <b>ALL CLEAR — KYIV</b>"
 
 # --- Cross-source categories (normal mode) ---
 # A source is only provenance. Every buffered message is evaluated against every category.
@@ -1842,6 +1839,11 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
             print(f"Ops notify failed: {ops_err}")
         # translate_message already exhausted its bounded attempts. Treat this as
         # handled so the five-second recovery poll cannot bill it indefinitely.
+        return True
+
+    translation = clean_alert_public_text(translation)
+    if not translation:
+        print(f"[ALERT EMPTY AFTER CLEANING] source=@{source}")
         return True
 
     global alert_publication_lock

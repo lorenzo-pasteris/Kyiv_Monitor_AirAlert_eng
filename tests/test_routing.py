@@ -409,7 +409,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         clear_text = self.sent[-1][1]
         self.assertEqual(self.sent[-1][0], ALERT_CHAT_ID)
         self.assertIn("✅ <b>ALL CLEAR — KYIV</b>", clear_text)
-        self.assertIn(f'<a href="{SUMMARY_CHAT_LINK}">Join Kyiv News →</a>', clear_text)
+        self.assertNotIn("href=", clear_text)
+        self.assertNotIn("Join Kyiv News", clear_text)
         self.assertNotIn("Back to NORMAL mode", clear_text)
 
     async def test_undated_api_level_cannot_override_official_telegram_level(self):
@@ -847,7 +848,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             (
                 "Гостомель котики, тримайтесь",
                 "Hostomel cats, hang in there.",
-                "Hostomel folks, hang in there.",
+                "",  # Social commentary stays blocked even if the model publishes it.
             ),
         )
         for source, bad_translation, expected in cases:

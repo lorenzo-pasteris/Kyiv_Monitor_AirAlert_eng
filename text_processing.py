@@ -138,6 +138,8 @@ ALERT_TERSE_FOLLOWUP_KEYWORDS = [
     "рембаз", "осещин", "тец-6", "березан", "українк",
 ]
 COMMENTARY_PATTERNS = (
+    r"\b(?:в теорії|у теорії|по ідеї|теоретично|in theory|theoretically)\b[^.!?\n]*\b(?:відбій|all[ -]clear)\b",
+    r"\b(?:відбій|all[ -]clear)\b[^.!?\n]*\b(?:мав би|має бути|should come|should happen|should be issued)\b",
     r"\b(?:не знаю|я думаю|мені здається|не розумію|чому|навіщо)\b",
     r"\b(?:не знаю|я думаю|мне кажется|не понимаю|почему|зачем)\b",
     r"\b(?:i don['’]t know|i think|in my opinion|why|what are they waiting for)\b",
@@ -178,6 +180,8 @@ def clean_alert_source_text(text: str) -> str:
     promo_line_patterns = (
         r"(?i)\b(?:надіслати новину|написати нам|підписат\w*|підпиш\w*|підписуй\w*)\b",
         r"(?i)\b(?:send news|report news|subscrib\w*|watch live|live stream|join us)\b",
+        r"(?i)\b(?:надсила\w*|присыла\w*)\s+(?:новин\w*|новост\w*)\b",
+        r"(?i)\b(?:детальн\w*|подробн\w*|detailed)\s+(?:радар\w*|radar)\b",
         r"(?i)^\s*(?:💙\s*)?dnipro alerts\s*•\s*(?:💛\s*)?kyiv alerts\s*$",
         r"(?i)^\s*(?:ℹ️\s*)?alerts live\s*•\s*(?:🤙\s*)?feedback\s*$",
         r"(?i)^\s*(?:👉\s*)?live\s*[:!—-]*\s*$",
@@ -196,9 +200,24 @@ def clean_alert_source_text(text: str) -> str:
             "",
             line,
         ).strip()
+        line = re.sub(r"(?<!\w)@[A-Za-z0-9_]+", "", line).strip()
         if line and not any(re.search(pattern, line) for pattern in promo_line_patterns):
             kept_lines.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
+
+
+def clean_alert_public_text(text: str) -> str:
+    """Strip source decorations and destinations before adding the one state indicator."""
+    text = clean_alert_source_text(text)
+    text = re.sub(
+        r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0E\uFE0F\u200D\u20E3"
+        r"\u00A9\u00AE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA"
+        r"\u231A\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u24C2"
+        r"\u25AA\u25AB\u25B6\u25C0\u25FB-\u25FE\u2934\u2935\u2B05-\u2B07"
+        r"\u2B1B\u2B1C\u2B50\u2B55\u3030\u303D\u3297\u3299\U000E0020-\U000E007F]",
+        "", text,
+    )
+    return "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()).strip()
 
 
 def is_non_operational_alert_message(text: str) -> bool:
@@ -263,8 +282,14 @@ def normalize_alert_revision(text: str) -> str:
 def is_general_siren_announcement(text: str) -> bool:
     """General siren notices belong to the official state path, not tactical feeds."""
     normalized = normalize_alert_for_dedup(text)
+    if re.fullmatch(
+        r"(?:\w+\s+){0,12}повітряна тривога (?:жовтий|червоний) рівень "
+        r"(?:дронова|ракетна) загроза(?: (?:жовтий|червоний) рівень)?",
+        normalized,
+    ):
+        return True
     return bool(re.fullmatch(
-        r"(?:(?:київ|київщина|у києві|kyiv)\s+)?(?:відбій (?:повітряної )?тривоги|отбой воздушной тревоги|повітряна тривога|"
+        r"(?:(?:київ|київщина|у києві|kyiv)\s+)?(?:відбій|отбой|відбій (?:повітряної )?тривоги|отбой воздушной тревоги|повітряна тривога|"
         r"оголошен\w* (?:повітрян\w* тривог\w*|дронов\w* (?:небезпек\w*|загроз\w*)|"
         r"ракетн\w* (?:небезпек\w*|загроз\w*))|(?:air siren )?all clear|air raid sirens)"
         r"(?:\s+(?:у києві|в києві|київ|kyiv|in kyiv))?",
@@ -477,6 +502,10 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "translated as a one-word fragment. Examples: 'Дарниця' = 'Darnytsia'; 'ТЕЦ-5' = "
         "'CHP-5'; 'Збили' = 'Shot down'. Keep terse fragments terse. Retain Ukrainian place "
         "names using standard transliteration. Remove promo, subscribe, and LIVE tags. "
+        "Never include emoji, links, usernames or promotional footers in the translation. "
+        "Speculation about when officials should issue an all-clear is EDITORIAL_COMMENTARY, "
+        "not a confirmed all-clear or an observed incoming threat. Never add 'says' or another "
+        "attribution unless explicitly present in the source. "
         f"Canonical place spellings: {CANONICAL_PLACE_SPELLINGS}. "
         "Стоянка is the settlement Stoianka; NEVER translate it as parking.\n\n"
         "Return exactly one JSON object and nothing else. Always provide a valid English translation, "
@@ -606,6 +635,8 @@ def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_sourc
         raise ValueError("AI decision must be PUBLISH or DROP")
     if not is_valid_alert_translation(translation):
         raise ValueError("Every decision requires a valid English translation")
+    if is_commentary_alert_message(source_text):
+        return "DROP", "", "EDITORIAL_COMMENTARY"
     if decision == "DROP":
         evidenced = bool(evidence) and evidence.casefold() in source_text.casefold()
         if mixed_news_source and block_category == "NON_OPERATIONAL_NEWS" and evidenced:

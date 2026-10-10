@@ -53,6 +53,17 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.safe_send.await_count, 1)
         self.assertEqual(monitor.translate_message.await_count, 1)
 
+    async def test_publication_adds_only_one_state_dot_after_final_cleanup(self):
+        monitor.translate_message.return_value = "🟡 Loud blasts 💥💥 — shot down. Kyiv is clear for now ✈️\nDetailed radar 👉🏽 @kievinform_ua1"
+        self.assertTrue(await monitor.handle_alert_message("Гучно є збиття", self.backup))
+        monitor.safe_send.assert_awaited_once_with("🟡 Loud blasts — shot down. Kyiv is clear for now")
+
+    async def test_all_clear_speculation_never_calls_model_or_public_sender(self):
+        text = "В теорії має бути відбій, але Міхалич по базі може ще 2 години чекати поки підлетять нові дрони"
+        self.assertTrue(await monitor.handle_alert_message(text, self.primary))
+        monitor.translate_message.assert_not_awaited()
+        monitor.safe_send.assert_not_awaited()
+
     async def test_backup_first_then_primary_duplicate(self):
         await monitor.handle_alert_message(self.text, self.backup)
         await monitor.handle_alert_message(self.text, self.primary)
