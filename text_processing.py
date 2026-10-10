@@ -320,16 +320,43 @@ def parse_ukraine_alarm_kyiv_level(regions: Any) -> str:
     raise ValueError("Kyiv City is missing from UkraineAlarm response")
 
 
-def parse_ukraine_alarm_state_level(payload: Any) -> str | None:
-    """Return the exact level exposed by the official webhook receiver."""
+def parse_utc_timestamp(value: Any) -> datetime | None:
+    """Parse a timezone-aware ISO timestamp; anything else is treated as undated."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = re.sub(r"(\.\d{6})\d+", r"\1", value.strip().replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_ukraine_alarm_state(payload: Any) -> dict[str, Any]:
+    """Return the receiver snapshot: level (or None), provider event time and liveness."""
     if not isinstance(payload, dict):
         raise ValueError("UkraineAlarm webhook state is not an object")
+    state = {
+        "level": None,
+        "event_at": None,
+        "last_webhook_at": parse_utc_timestamp(payload.get("last_webhook_at")),
+        "started_at": parse_utc_timestamp(payload.get("started_at")),
+    }
     if payload.get("known") is not True:
-        return None
+        return state
     level = str(payload.get("level", "")).strip().upper()
     if level not in {"GREEN", "YELLOW", "RED"}:
         raise ValueError(f"UkraineAlarm webhook state has invalid level: {level!r}")
-    return level
+    state["level"] = level
+    state["event_at"] = parse_utc_timestamp(payload.get("event_at"))
+    return state
+
+
+def parse_ukraine_alarm_state_level(payload: Any) -> str | None:
+    """Return the exact level exposed by the official webhook receiver."""
+    return parse_ukraine_alarm_state(payload)["level"]
 
 
 def parse_ukraine_alarm_kyiv_state(regions: Any) -> bool:

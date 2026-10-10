@@ -29,6 +29,10 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         monitor.telegram_alert_message_id = 0
         monitor.telegram_alert_message_at = None
         monitor.api_alert_level = None
+        monitor.api_alert_event_at = None
+        monitor.alert_source_mismatch_since = None
+        monitor.last_source_reconcile_request_at = None
+        monitor.webhook_silence_notified = False
         monitor.last_alert_source_mismatch = None
         monitor.last_alert_mismatch_notice_at = None
         monitor.alert_level = "GREEN"
@@ -267,6 +271,152 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
         self.assertTrue(await monitor.reconcile_alert_state("API only"))
         self.assertEqual(monitor.alert_level, "YELLOW")
+
+    async def test_newer_dated_webhook_escalates_before_telegram(self):
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        start = datetime(2026, 10, 7, 0, 0, tzinfo=timezone.utc)
+        self.assertTrue(monitor.record_telegram_alert_level("YELLOW", SimpleNamespace(id=1, date=start)))
+        await monitor.reconcile_alert_state("official yellow")
+        monitor.api_alert_level = "RED"
+        monitor.api_alert_event_at = start + timedelta(minutes=5)
+        await monitor.reconcile_alert_state("webhook red")
+        self.assertEqual(monitor.alert_level, "RED")
+        # The official RED that follows is the same level: no second publication.
+        red = SimpleNamespace(id=2, date=start + timedelta(minutes=5, seconds=10))
+        self.assertTrue(monitor.record_telegram_alert_level("RED", red))
+        await monitor.reconcile_alert_state("official red")
+        self.assertEqual(monitor.send_to_alert_channel.await_count, 2)
+
+    async def test_october_10_replay_with_dated_webhook(self):
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        monitor.api_alert_level = "GREEN"
+        monitor.api_alert_event_at = datetime.fromisoformat("2026-10-10T09:58:52+00:00")
+        for level, message_id, at in (
+            ("GREEN", 21566, "2026-10-10T09:59:02+00:00"),
+            ("RED", 21571, "2026-10-10T10:57:26+00:00"),
+        ):
+            message = SimpleNamespace(id=message_id, date=datetime.fromisoformat(at))
+            self.assertTrue(monitor.record_telegram_alert_level(level, message))
+            await monitor.reconcile_alert_state("incident replay")
+        self.assertEqual((monitor.alert_active, monitor.alert_level), (True, "RED"))
+        # The provider's later dated all-clear ends the alert even before Telegram.
+        monitor.api_alert_event_at = datetime.fromisoformat("2026-10-10T11:36:20+00:00")
+        await monitor.reconcile_alert_state("webhook all clear")
+        self.assertEqual((monitor.alert_active, monitor.alert_level), (False, "GREEN"))
+        # An older webhook event cannot reopen it.
+        monitor.api_alert_level = "RED"
+        monitor.api_alert_event_at = datetime.fromisoformat("2026-10-10T10:57:05+00:00")
+        clear = SimpleNamespace(id=21575, date=datetime.fromisoformat("2026-10-10T11:36:22+00:00"))
+        self.assertTrue(monitor.record_telegram_alert_level("GREEN", clear))
+        await monitor.reconcile_alert_state("late older webhook")
+        self.assertFalse(monitor.alert_active)
+
+    async def test_telegram_wins_ties_and_undated_snapshots(self):
+        at = datetime(2026, 10, 10, 10, 57, tzinfo=timezone.utc)
+        self.assertTrue(monitor.record_telegram_alert_level("RED", SimpleNamespace(id=5, date=at)))
+        monitor.api_alert_level = "GREEN"
+        self.assertEqual(monitor.select_alert_source(), "telegram")
+        monitor.api_alert_event_at = at
+        self.assertEqual(monitor.select_alert_source(), "telegram")
+        monitor.api_alert_event_at = at + timedelta(seconds=1)
+        self.assertEqual(monitor.select_alert_source(), "webhook")
+
+    async def test_unknown_receiver_state_clears_stale_webhook_level(self):
+        monitor.api_alert_level = "GREEN"
+        monitor.api_alert_event_at = datetime.now(timezone.utc)
+        response = SimpleNamespace(status_code=200, json=lambda: {"known": False})
+        client = SimpleNamespace(get=AsyncMock(return_value=response))
+        with patch.object(monitor, "http_client", client), \
+             patch.object(monitor.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await monitor.ukraine_alarm_state_loop()
+        self.assertIsNone(monitor.api_alert_level)
+        self.assertIsNone(monitor.api_alert_event_at)
+
+    async def test_state_loop_reads_dated_receiver_level(self):
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        payload = {
+            "known": True, "level": "YELLOW", "event_at": "2026-10-10T12:42:52.252324+00:00",
+            "last_webhook_at": datetime.now(timezone.utc).isoformat(),
+        }
+        response = SimpleNamespace(status_code=200, json=lambda: payload)
+        client = SimpleNamespace(get=AsyncMock(return_value=response))
+        with patch.object(monitor, "http_client", client), \
+             patch.object(monitor.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await monitor.ukraine_alarm_state_loop()
+        self.assertEqual(monitor.api_alert_event_at, datetime(2026, 10, 10, 12, 42, 52, 252324, tzinfo=timezone.utc))
+        self.assertEqual(monitor.alert_level, "YELLOW")
+
+    async def test_persistent_disagreement_requests_throttled_rest_repair(self):
+        monitor.telegram_alert_level = "RED"
+        monitor.api_alert_level = "GREEN"
+        response = SimpleNamespace(status_code=200, json=lambda: {"decision": "applied"})
+        client = SimpleNamespace(post=AsyncMock(return_value=response))
+        with patch.object(monitor, "http_client", client), \
+             patch.object(monitor, "UKRAINE_ALARM_RECONCILE_URL", "http://receiver/reconcile"):
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=100))
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=130))
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=146))
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=180))
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=207))
+            monitor.api_alert_level = "RED"
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=400))
+        self.assertEqual(client.post.await_count, 2)
+        self.assertIsNone(monitor.alert_source_mismatch_since)
+
+    async def test_webhook_silence_is_reported_once_and_recovery_once(self):
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+        quiet = {
+            "last_webhook_at": now - timedelta(seconds=monitor.WEBHOOK_SILENCE_ALERT_SECONDS + 60),
+            "started_at": now - timedelta(days=1),
+        }
+        self.assertTrue(await monitor.check_webhook_liveness(quiet, now=now))
+        self.assertTrue(await monitor.check_webhook_liveness(quiet, now=now))
+        self.assertEqual(len(self.owner_messages), 1)
+        self.assertIn("webhook silent", self.owner_messages[0])
+        alive = {"last_webhook_at": now, "started_at": now - timedelta(days=1)}
+        self.assertFalse(await monitor.check_webhook_liveness(alive, now=now))
+        self.assertFalse(await monitor.check_webhook_liveness(alive, now=now))
+        self.assertEqual(len(self.owner_messages), 2)
+        # Old receivers expose no liveness fields: no false alarm.
+        self.assertFalse(await monitor.check_webhook_liveness({"last_webhook_at": None, "started_at": None}, now=now))
+
+    async def test_unknown_receiver_retries_bootstrap_after_delay(self):
+        monitor.api_alert_level = None
+        monitor.telegram_alert_level = None
+        response = SimpleNamespace(status_code=200, json=lambda: {"decision": "error"})
+        client = SimpleNamespace(post=AsyncMock(return_value=response))
+        with patch.object(monitor, "http_client", client), \
+             patch.object(monitor, "UKRAINE_ALARM_RECONCILE_URL", "http://receiver/reconcile"):
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=100))
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=146))
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=160))
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=207))
+        self.assertEqual(client.post.await_count, 2)
+
+    async def test_unknown_receiver_reapplies_telegram_before_private_liveness_notice(self):
+        monitor.telegram_alert_state = True
+        monitor.telegram_alert_level = "RED"
+        monitor.api_alert_level = "GREEN"
+        response = SimpleNamespace(status_code=200, json=lambda: {"known": False})
+        events = []
+
+        async def reconcile(source):
+            events.append("public")
+            return True
+
+        async def liveness(state):
+            events.append("private")
+
+        with patch.object(monitor, "http_client", SimpleNamespace(get=AsyncMock(return_value=response))), \
+             patch.object(monitor, "reconcile_alert_state", side_effect=reconcile), \
+             patch.object(monitor, "check_webhook_liveness", side_effect=liveness), \
+             patch.object(monitor, "request_source_reconcile_if_needed", new=AsyncMock()), \
+             patch.object(monitor.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await monitor.ukraine_alarm_state_loop()
+        self.assertEqual(events, ["public", "private"])
 
     async def test_stale_alert_delivery_is_discarded(self):
         sent = []
