@@ -252,6 +252,26 @@ def normalize_alert_for_dedup(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def normalize_alert_revision(text: str) -> str:
+    """Canonicalize proven linguistic equivalents, not tactical information."""
+    normalized = normalize_alert_for_dedup(text)
+    if normalized in {"не спостережень", "не спостерігається"}:
+        return "не спостерігається"
+    return normalized
+
+
+def is_general_siren_announcement(text: str) -> bool:
+    """General siren notices belong to the official state path, not tactical feeds."""
+    normalized = normalize_alert_for_dedup(text)
+    return bool(re.fullmatch(
+        r"(?:(?:київ|київщина|у києві|kyiv)\s+)?(?:відбій (?:повітряної )?тривоги|отбой воздушной тревоги|повітряна тривога|"
+        r"оголошен\w* (?:повітрян\w* тривог\w*|дронов\w* (?:небезпек\w*|загроз\w*)|"
+        r"ракетн\w* (?:небезпек\w*|загроз\w*))|(?:air siren )?all clear|air raid sirens)"
+        r"(?:\s+(?:у києві|в києві|київ|kyiv|in kyiv))?",
+        normalized,
+    ))
+
+
 def parse_ukraine_alarm_kyiv_level(regions: Any) -> str:
     """Return Kyiv City's official GREEN/YELLOW/RED AIR level."""
     kyiv_names = {"київ", "м. київ", "kyiv", "kyiv city"}
@@ -370,9 +390,22 @@ def is_priority_alert_message(text: str) -> bool:
     return bool(PRIORITY_ALERT_RE.search(text or ""))
 
 
-def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> str:
+def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mixed_news_source=False) -> str:
     """Build an asymmetric gate: only a closed set of exclusions may block publication."""
-    return (
+    source_rules = (
+        "SOURCE-SPECIFIC RULE: this is a mixed local NEWS channel, not a dedicated tactical feed. "
+        "One additional DROP category is permitted: NON_OPERATIONAL_NEWS. Use it for ordinary politics, "
+        "budgets, winter preparations, services, historical footage or retrospective news without a "
+        "current operational update. Mentioning Kyiv or quoting someone about missiles does not make "
+        "ordinary news tactical. Provide a verbatim evidence excerpt. Never use this category for "
+        "live threats, launches, transit, trajectories, explosions, impacts, interceptions or brief "
+        "operational follow-ups. Mixed news with a current operational warning must PUBLISH only the "
+        "operational part. Ignore ordinary news in the preceding context when resolving tactical fragments. "
+        "Ambiguous operational reports must PUBLISH. General siren start/end notices "
+        "are handled separately by the official state path. These source-specific rules take precedence.\n\n"
+        if mixed_news_source else ""
+    )
+    return source_rules + (
         "You translate a trusted operational feed for a real-time Kyiv air-alert channel. "
         "The default decision is PUBLISH. DROP is permitted only for exactly one of these closed "
         "categories: ADVERTISEMENT, FUNDRAISING, ENGAGEMENT, EDITORIAL_COMMENTARY, "
@@ -409,7 +442,9 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = ()) -> st
         "- реактивний БпЛА / реактивні БпЛА / реактив = jet-powered UAV(s), never aircraft or reactor\n"
         "- БпЛА / шахед / мопед = UAV / Shahed drone as context permits\n"
         "- мінус = intercepted or neutralized threat, never 'minus'\n"
-        "- чисто / не спостерігається = clear / no threats currently observed\n"
+        "- чисто = clear only for the area or threat explicitly described, NEVER official all clear\n"
+        "- не спостерігається / не спостережень = no longer observed; refers only to the tracked "
+        "object, NEVER 'no threats currently observed', never all clear, never shot down\n"
         "- відбій = all clear\n"
         "- відбій по балістиці = ballistic threat all clear, not all clear on ballistic missiles\n"
         "- локаційно втрачено = no longer tracked, never location lost\n"
@@ -469,6 +504,9 @@ def translate_known_terse_fragment(text: str) -> str | None:
         "тец 5": "CHP-5",
         "збили": "Shot down",
         "збито": "Shot down",
+        "не спостерігається": "No longer observed.",
+        "не спостерігаються": "No longer observed.",
+        "не спостережень": "No longer observed.",
         "балістика на київ": "Ballistic threat to Kyiv!",
         "відбій по балістиці": "The ballistic threat has been lifted.",
     }.get(normalized)
@@ -507,6 +545,10 @@ def is_valid_alert_translation(text: str) -> bool:
 def correct_known_translation_errors(source_text: str, translation: str) -> str:
     """Correct high-risk cases where model wording changes the reported event."""
     source = source_text.casefold()
+    if re.search(r"не спостеріга(?:ється|ються)|не спостережень", source):
+        translation = re.sub(
+            r"\bno threats(?: currently)? observed\b", "No longer observed", translation, flags=re.I
+        )
     if "чергов" in source and "червон" not in source:
         translation = re.sub(
             r"\bred\b",
@@ -547,7 +589,7 @@ def parse_first_json_object(raw: str) -> dict[str, Any]:
     return parsed
 
 
-def parse_alert_gate_output(raw: str, source_text: str = "") -> tuple[str, str, str]:
+def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_source=False) -> tuple[str, str, str]:
     """Accept only evidenced closed-category drops; every other valid result publishes."""
     try:
         parsed = json.loads(raw)
@@ -566,6 +608,16 @@ def parse_alert_gate_output(raw: str, source_text: str = "") -> tuple[str, str, 
         raise ValueError("Every decision requires a valid English translation")
     if decision == "DROP":
         evidenced = bool(evidence) and evidence.casefold() in source_text.casefold()
+        if mixed_news_source and block_category == "NON_OPERATIONAL_NEWS" and evidenced:
+            # Short tactical fragments must not disappear behind a new news category.
+            if len(source_text) <= 100 and (
+                (contains_operational_location(source_text) and len(source_text.split()) <= 2)
+                or is_actionable_alert_message(source_text)
+                or is_priority_alert_message(source_text)
+                or translate_known_terse_fragment(source_text)
+            ):
+                return "PUBLISH", translation, "override_unapproved_drop:NON_OPERATIONAL_NEWS"
+            return "DROP", "", block_category
         if (
             block_category not in ALERT_BLOCK_CATEGORIES
             or not evidenced

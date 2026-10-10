@@ -32,6 +32,7 @@ general news are never mixed blindly into the same pipeline.
 | National railway | `@UkrzalInfo` | Train delays, cancellations, diversions and service restoration |
 | Night threat assessment | `@war_monitor` + preparation signals from configured news sources | Only today's post beginning `📡 Обстановка станом на HH:MM` and tagged `#обстановка@war_monitor` triggers one civilian-facing assessment in the News channel; every other post is ignored |
 | Live alert feed | `@kyivnebomonitoring` | Actionable real-time updates translated and published only while ALERT is active |
+| Backup live alert feed | `@kievinfo_kyiv` | Same alert filters; fills gaps without repeating confirmed recent publications. Remains a News source. |
 
 The output destinations are configured through `TARGET_CHAT_ID` for **Kyiv Air Alert**
 and `SUMMARY_CHAT_ID` for **Kyiv Hourly News 🇺🇦**. Their Telegram IDs and private
@@ -59,10 +60,33 @@ signals from the preceding six hours.
 The explicit Kyiv alert templates from `@KyivCityOfficial` control the mode and its
 GREEN/YELLOW/RED level. YELLOW publishes a drone-threat notice, RED publishes the
 higher-threat notice, and every YELLOW↔RED change is shown publicly. While active,
-actionable new messages and edits from `@kyivnebomonitoring` enter the low-latency
+actionable new messages and edits from `@kyivnebomonitoring` and backup `@kievinfo_kyiv` enter the low-latency
 translation pipeline. NORMAL summaries are suspended, alert transitions are
 serialized, public delivery must be confirmed before the state is committed, and
 stale translations are discarded after the alert ends.
+
+The primary never waits for a backup report or a silence timer. Both feeds use the
+same text, image and translation filters. A shared three-minute history contains
+only confirmed public deliveries and is persisted across restarts. Obvious repeats
+are checked before translation and again atomically before sending, including when
+the backup published first. The final send is serialized; translations are not.
+Duplicate comparison ignores formatting and leading urgency labels, but retains
+word order, places, quantities, directions, negation and uncertainty. Cross-source
+short/contextual fragments, reports without a recognized operational location and
+uncertain paraphrases are allowed, not guessed away.
+There is no additional model call for deduplication. This deliberately permits some
+duplicates rather than suppressing a potentially new warning. A Telegram timeout
+after server acceptance still has the existing ambiguous-delivery limitation.
+Kyiv Info continues into the News queue whether or not its tactical post is sent.
+Neither tactical source can change the official siren state.
+Standalone general siren start/end templates are excluded from both tactical feeds;
+specific ballistic-threat updates still pass. Kyiv Info's existing translation call
+also classifies ordinary non-operational news, which stays in the News pipeline.
+Evidenced news exclusions are enabled only for this mixed source; short operational
+fragments have a conservative publication override. Ambiguous edits still pass:
+only formatting and explicitly recognized equivalent corrections share a durable
+message-version key. Loss of observation is translated as "No longer observed",
+never as a general absence of threats or an official all clear.
 
 ### TEST
 
@@ -81,6 +105,7 @@ NORMAL sources ── Telethon ── SQLite queue ── Anthropic ── Kyiv 
 @KyivCityOfficial ── state ────────┤
                                    │
 @kyivnebomonitoring ── filter ── translation ── Kyiv Air Alert
+@kievinfo_kyiv ─────── same filters ── confirmed-publication dedup ──┘
 ```
 
 - `monitor.py`: orchestration, pipelines and integrations.

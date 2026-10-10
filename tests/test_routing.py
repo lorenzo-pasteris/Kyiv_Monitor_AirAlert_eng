@@ -364,6 +364,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.sent = []
         monitor.recent_alert_messages.clear()
+        monitor.alert_publication_lock = asyncio.Lock()
 
         async def fake_send_message(chat_id, text):
             self.sent.append((chat_id, text))
@@ -486,7 +487,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🟡 Operational update"))
 
             monitor.alert_level = "RED"
-            self.assertTrue(await monitor.handle_alert_message("Жуляни"))
+            self.assertTrue(await monitor.handle_alert_message("Нивки"))
             self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🔴 Operational update"))
         finally:
             (
@@ -614,8 +615,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Вишгород жовтогарячий 🟧, дорозвідка.\nТроєщина та Бровари червоний 🟥.",
         )
 
-    async def test_kyiv_nebo_monitoring_is_the_only_alert_feed(self):
-        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring"])
+    async def test_kyiv_info_is_backup_and_remains_a_news_source(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring", "kievinfo_kyiv"])
+        self.assertIn("kievinfo_kyiv", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("kyivnebomonitoring", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("KyivDeZagrozaCHAT", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
@@ -645,11 +647,12 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         entities = {
             monitor.ALERT_FEED_CHANNEL: "alert-entity",
+            monitor.KYIV_INFO_CHANNEL: "backup-entity",
             monitor.WAR_MONITOR_CHANNEL: "war-monitor-entity",
         }
         await monitor.ensure_live_source_membership(FakeClient(), entities)
 
-        self.assertEqual(joined, ["alert-entity", "war-monitor-entity"])
+        self.assertEqual(joined, ["alert-entity", "backup-entity", "war-monitor-entity"])
 
     async def test_war_monitor_accepts_only_todays_tagged_daily_report(self):
         today = datetime(2026, 8, 31).date()
@@ -1234,7 +1237,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_alert_poller_recovers_messages_after_cursor(self):
         now = datetime.now(timezone.utc)
         channel = monitor.ALERT_FEED_CHANNEL
-        entities = {channel: channel}
+        entities = {name: name for name in monitor.ALERT_FEED_CHANNELS}
         client = FakeHistoryClient({channel: [
             FakeTelegramMessage(125071, "Залісся – уважно по БпЛА", now - timedelta(minutes=2)),
             FakeTelegramMessage(125072, "1 на Троєщину! 1 на Бровари", now - timedelta(minutes=1)),
@@ -1348,12 +1351,14 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         update = "⚠️ 3 шахеди рухаються через Васильків у напрямку Києва"
 
         self.assertTrue(monitor.should_publish_alert(first, "kyiv_alerts", now=100.0))
+        monitor.remember_published_alert(first, "kyiv_alerts", now=100.0)
         self.assertFalse(monitor.should_publish_alert(duplicate, "kyiv_alerts", now=130.0))
         self.assertTrue(monitor.should_publish_alert(update, "kyiv_alerts", now=140.0))
 
     async def test_duplicate_window_expires(self):
         message = "Балістична ціль рухається у напрямку Києва"
         self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=100.0))
+        monitor.remember_published_alert(message, "kyiv_alerts", now=100.0)
         self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=281.0))
 
 

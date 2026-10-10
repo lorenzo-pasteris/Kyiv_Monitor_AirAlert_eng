@@ -2,7 +2,7 @@
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: explicit alert templates from @KyivCityOfficial
 - Normal mode: scheduled analysis of news channels published in the news group
-- Alert mode (24/7): only @kyivnebomonitoring in the alert-only channel
+- Alert mode: primary @kyivnebomonitoring plus filtered @kievinfo_kyiv backup
 - Daily situation report: only the strict #обстановка post from @war_monitor
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -36,9 +36,11 @@ from text_processing import (
     is_non_operational_alert_message,
     is_priority_alert_message,  # noqa: F401 -- re-exported for routing regressions
     is_pure_ad,
+    is_general_siren_announcement,
     is_translation_meta_output,  # noqa: F401 -- re-exported for tests/test_routing.py
     is_valid_alert_translation,  # noqa: F401 -- re-exported for tests/test_routing.py
-    normalize_alert_for_dedup,
+    normalize_alert_for_dedup,  # noqa: F401 -- re-exported for persistence/routing tests
+    normalize_alert_revision,
     parse_alert_gate_output,
     parse_first_json_object,
     parse_ukraine_alarm_kyiv_level,  # noqa: F401 -- re-exported for routing regressions
@@ -114,7 +116,7 @@ ALL_CONTENT_CHANNELS = [
     UKRENERGO_CHANNEL,
     UKRZALINFO_CHANNEL,
 ]
-ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL]
+ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL, KYIV_INFO_CHANNEL]
 
 SUMMARY_HOURS = (1, 7, 9, 11, 13, 15, 17, 19, 21, 23)
 SUMMARY_INTERVAL = 180 if TEST_MODE else 2 * 3600
@@ -292,6 +294,8 @@ alert_transition_lock = None
 bot_output_message_ids = set()
 simulator_processed_message_ids = set()
 recent_alert_messages = deque()
+alert_publication_lock = None
+ALERT_PUBLICATION_HISTORY_KEY = "alert_publications_v1"
 recent_alert_source_context = deque(maxlen=12)
 alert_delivery_tasks = set()
 alert_generation = 0
@@ -360,42 +364,56 @@ async def is_blocked_alert_image(message):
         return False
 
 def should_publish_alert(text, source, now=None):
-    """First arrival wins; suppress only near-identical reports seen in the last three minutes."""
-    timestamp = time.monotonic() if now is None else now
-    normalized = normalize_alert_for_dedup(text)
+    """Read only confirmed deliveries; uncertainty must never suppress an update."""
+    timestamp = time.time() if now is None else now
+    normalized = alert_duplicate_key(text)
     if not normalized:
         return False
 
     while recent_alert_messages and timestamp - recent_alert_messages[0][0] > ALERT_DEDUP_WINDOW:
         recent_alert_messages.popleft()
 
-    tokens = set(normalized.split())
-    for _, previous_source, previous_text, previous_tokens in recent_alert_messages:
+    for _, previous_source, previous_text in recent_alert_messages:
+        # A bare district or contextual fragment can describe another target.
+        if source != previous_source:
+            if min(len(normalized.split()), len(previous_text.split())) < 4 or not contains_operational_location(text):
+                continue
+            if re.search(r"\b(?:ще|чергов\w*|знов\w*|цей|ця|він|вона|вони|туди|там|далі)\b", normalized):
+                continue
         if normalized == previous_text:
             print(f"[ALERT DUPLICATE] @{source} matches @{previous_source}: {normalized[:100]}")
             return False
-        union = tokens | previous_tokens
-        jaccard = len(tokens & previous_tokens) / len(union) if union else 0.0
-        similarity = SequenceMatcher(None, normalized, previous_text).ratio()
-        enough_context = min(len(tokens), len(previous_tokens)) >= 4
-        if enough_context and ((similarity >= 0.86 and jaccard >= 0.62) or jaccard >= 0.82):
-            print(
-                f"[ALERT DUPLICATE] @{source} near @{previous_source} "
-                f"similarity={similarity:.2f} jaccard={jaccard:.2f}: {normalized[:100]}"
-            )
-            return False
-
-    recent_alert_messages.append((timestamp, source, normalized, tokens))
     return True
 
 
-def forget_failed_alert(text, source):
-    """Allow a failed delivery to be retried instead of deduplicated."""
-    normalized = normalize_alert_for_dedup(text)
-    for item in reversed(recent_alert_messages):
-        if item[1] == source and item[2] == normalized:
-            recent_alert_messages.remove(item)
-            break
+def alert_duplicate_key(text):
+    normalized = normalize_alert_revision(strip_mixed_alert_commentary(text))
+    # Ignore only presentation noise, never word order, numbers or negations.
+    return re.sub(r"^(?:(?:увага|терміново|внимание|срочно)\s+)+", "", normalized)
+
+
+def remember_published_alert(text, source, now=None):
+    timestamp = time.time() if now is None else now
+    while recent_alert_messages and timestamp - recent_alert_messages[0][0] > ALERT_DEDUP_WINDOW:
+        recent_alert_messages.popleft()
+    recent_alert_messages.append((timestamp, source, alert_duplicate_key(text)))
+    state_store.persist_operational_state(ALERT_PUBLICATION_HISTORY_KEY, json.dumps(list(recent_alert_messages)))
+
+
+def restore_published_alerts():
+    recent_alert_messages.clear()
+    raw = state_store.load_operational_state(ALERT_PUBLICATION_HISTORY_KEY)
+    try:
+        entries = json.loads(raw) if raw else []
+        now = time.time()
+        valid = [
+            (at, source, text) for at, source, text in entries
+            if isinstance(at, (int, float)) and 0 <= now - at <= ALERT_DEDUP_WINDOW
+            and isinstance(source, str) and isinstance(text, str)
+        ]
+        recent_alert_messages.extend(sorted(valid))
+    except (ValueError, TypeError):
+        print("[ALERT HISTORY] invalid stored history; allowing messages")
 
 
 def remember_alert_source_message(source, message_id, text, message_at=None):
@@ -674,7 +692,6 @@ async def apply_alert_state(desired, source, *, level=None, startup=False, publi
             alert_level = desired_level
             state_store.persist_operational_state("alert_level", alert_level)
             if desired:
-                recent_alert_messages.clear()
                 await send_to_owner(
                     "⚠️ <b>ALERT state restored after restart</b>\n"
                     "The worker entered ALERT without duplicating the public start message."
@@ -700,11 +717,12 @@ async def apply_alert_state(desired, source, *, level=None, startup=False, publi
         state_store.persist_operational_state("alert_level", alert_level)
         if desired:
             recent_alert_messages.clear()
+            state_store.persist_operational_state(ALERT_PUBLICATION_HISTORY_KEY, "[]")
         print(f"[ALERT TRANSITION] committed={'ALERT' if desired else 'NORMAL'} source={source}")
         return True
 
 
-async def translate_message(text, context=()):
+async def translate_message(text, context=(), *, mixed_news_source=False):
     known_fragment = translate_known_terse_fragment(text)
     if known_fragment:
         return known_fragment
@@ -716,13 +734,13 @@ async def translate_message(text, context=()):
                     headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                     json={"model": MODEL, "max_tokens": 200,
                           "thinking": {"type": "disabled"}, "output_config": {"effort": "low"}, "messages": [{
-                        "role": "user", "content": build_alert_translation_prompt(text, context)
+                        "role": "user", "content": build_alert_translation_prompt(text, context, mixed_news_source=mixed_news_source)
                     }]},
                     timeout=httpx.Timeout(15.0, connect=5.0),
                 )
             r.raise_for_status()
             result = r.json()["content"][0]["text"].strip()
-            decision, translation, reason = parse_alert_gate_output(result, text)
+            decision, translation, reason = parse_alert_gate_output(result, text, mixed_news_source=mixed_news_source)
             if decision == "DROP":
                 print(f"[ALERT SEMANTIC DROP] reason={reason!r} input={text[:120]!r}")
                 return False
@@ -960,7 +978,11 @@ async def backfill_alert_feed(client, source_entities):
     delivered = 0
     for channel in ALERT_FEED_CHANNELS:
         cursor = state_store.get_alert_feed_cursor(channel)
-        messages = await client.get_messages(source_entities[channel], limit=50)
+        try:
+            messages = await client.get_messages(source_entities[channel], limit=50)
+        except Exception as exc:
+            print(f"[ALERT SOURCE READ ERROR] @{channel}: {type(exc).__name__}")
+            continue
         pending = [message for message in reversed(messages) if message.id > cursor]
         if len(pending) > ALERT_RECOVERY_MAX_MESSAGES:
             skipped = pending[:-ALERT_RECOVERY_MAX_MESSAGES]
@@ -1752,7 +1774,6 @@ async def process_alert_image_message(message, channel, clean, edited, context=(
             print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
         else:
             state_store.release_alert_feed_delivery(channel, message.id, clean)
-            forget_failed_alert(clean, channel)
         return delivered
     except asyncio.CancelledError:
         state_store.release_alert_feed_delivery(channel, message.id, clean)
@@ -1765,6 +1786,10 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
     if generation != alert_generation or not alert_active:
         print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
         return False
+
+    if is_general_siren_announcement(clean):
+        print(f"[ALERT OFFICIAL-ONLY NOTICE] source=@{source}")
+        return True
 
     original = clean
     clean = strip_mixed_alert_commentary(clean)
@@ -1784,9 +1809,15 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
             f"Original: {html.escape(clean[:1000])}"
         ))
 
+    if not should_publish_alert(clean, source):
+        return True
+
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     try:
-        translation = await translate_message(clean[:1500], context=context)
+        if source == KYIV_INFO_CHANNEL:
+            translation = await translate_message(clean[:1500], context=context, mixed_news_source=True)
+        else:
+            translation = await translate_message(clean[:1500], context=context)
     except asyncio.CancelledError:
         print(f"[ALERT CANCELLED] translation interrupted source=@{source} generation={generation}")
         raise
@@ -1811,8 +1842,20 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         # handled so the five-second recovery poll cannot bill it indefinitely.
         return True
 
-    indicator = "🟡" if alert_level == "YELLOW" else "🔴"
-    return bool(await safe_send(f"{indicator} {html.escape(translation)}"))
+    global alert_publication_lock
+    if alert_publication_lock is None:
+        alert_publication_lock = asyncio.Lock()
+    # Translations remain concurrent; only the final check/send/record is atomic.
+    async with alert_publication_lock:
+        if generation != alert_generation or not alert_active:
+            return False
+        if not should_publish_alert(clean, source):
+            return True
+        indicator = "🟡" if alert_level == "YELLOW" else "🔴"
+        delivered = bool(await safe_send(f"{indicator} {html.escape(translation)}"))
+        if delivered:
+            remember_published_alert(clean, source)
+        return delivered
 
 
 async def process_alert_feed_message(message, channel, *, edited=False):
@@ -1829,6 +1872,7 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         len(clean) < 5
         or is_non_operational_alert_message(clean)
         or is_pure_ad(clean)
+        or is_general_siren_announcement(clean)
     ):
         state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT FILTERED] @{channel} id={message.id}")
@@ -1836,10 +1880,6 @@ async def process_alert_feed_message(message, channel, *, edited=False):
     if not state_store.claim_alert_feed_delivery(channel, message.id, clean):
         print(f"[ALERT SKIPPED DELIVERED] @{channel} id={message.id} edited={edited}")
         return False
-    if not should_publish_alert(clean, channel):
-        state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
-        return False
-
     context = remember_alert_source_message(
         channel,
         message.id,
@@ -1858,7 +1898,6 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
     else:
         state_store.release_alert_feed_delivery(channel, message.id, clean)
-        forget_failed_alert(clean, channel)
     return delivered
 
 
@@ -1899,7 +1938,7 @@ async def publish_test_source(client, text):
 
 async def main():
     global http_client, send_lock, test_command_lock, translation_slots, summary_lock
-    global alert_transition_lock
+    global alert_transition_lock, alert_publication_lock
     global telegram_alert_level, telegram_alert_state, production_client, content_source_entities
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
@@ -1910,7 +1949,9 @@ async def main():
     translation_slots = asyncio.Semaphore(8)
     summary_lock = asyncio.Lock()
     alert_transition_lock = asyncio.Lock()
+    alert_publication_lock = asyncio.Lock()
     state_store.stats_db_ready = state_store.initialize_stats_db()
+    restore_published_alerts()
 
     client = None
     session_lock = None
@@ -2149,7 +2190,10 @@ async def main():
                         channel,
                         edited=bool(getattr(event.message, "edit_date", None)),
                     )
-                return
+                if channel not in ALL_CONTENT_CHANNELS:
+                    return
+                # Kyiv Info remains a news source, including outside ALERT mode.
+                clean = clean_text(raw_text)
 
             if is_pure_ad(clean):
                 print(f"[FILTERED AD] @{channel}: {clean[:80]}")
