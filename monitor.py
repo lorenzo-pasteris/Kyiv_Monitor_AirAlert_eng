@@ -43,7 +43,8 @@ from text_processing import (
     parse_first_json_object,
     parse_ukraine_alarm_kyiv_level,  # noqa: F401 -- re-exported for routing regressions
     parse_ukraine_alarm_kyiv_state,  # noqa: F401 -- re-exported for routing regressions
-    parse_ukraine_alarm_state_level,
+    parse_ukraine_alarm_state,
+    parse_ukraine_alarm_state_level,  # noqa: F401 -- re-exported for routing regressions
     strip_mixed_alert_commentary,
     translate_known_terse_fragment,
     utc_iso,
@@ -123,6 +124,15 @@ ALERT_FEED_POLL_INTERVAL = float(os.environ.get("ALERT_FEED_POLL_INTERVAL", "5")
 ALERT_RECOVERY_MAX_MESSAGES = int(os.environ.get("ALERT_RECOVERY_MAX_MESSAGES", "3"))
 TELETHON_HANDOFF_DELAY = float(os.environ.get("TELETHON_HANDOFF_DELAY", "15.0"))
 UKRAINE_ALARM_POLL_INTERVAL = float(os.environ.get("UKRAINE_ALARM_POLL_INTERVAL", "5"))
+UKRAINE_ALARM_RECONCILE_URL = os.environ.get(
+    "UKRAINE_ALARM_RECONCILE_URL",
+    UKRAINE_ALARM_STATE_URL.rsplit("/", 1)[0] + "/reconcile" if UKRAINE_ALARM_STATE_URL else "",
+).strip()
+# Ask the receiver to repair itself from REST when the two sources keep disagreeing.
+ALERT_SOURCE_RECONCILE_AFTER = float(os.environ.get("ALERT_SOURCE_RECONCILE_AFTER", "45"))
+ALERT_SOURCE_RECONCILE_INTERVAL = float(os.environ.get("ALERT_SOURCE_RECONCILE_INTERVAL", "60"))
+# No webhook from any region for this long means delivery or registration is broken.
+WEBHOOK_SILENCE_ALERT_SECONDS = float(os.environ.get("WEBHOOK_SILENCE_ALERT_SECONDS", "5400"))
 
 # --- Timezone ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
@@ -259,6 +269,10 @@ telegram_alert_level = None
 telegram_alert_message_id = 0
 telegram_alert_message_at = None
 api_alert_level = None
+api_alert_event_at = None
+alert_source_mismatch_since = None
+last_source_reconcile_request_at = None
+webhook_silence_notified = False
 last_alert_source_mismatch = None
 last_alert_mismatch_notice_at = None
 alert_level = "GREEN"
@@ -409,22 +423,40 @@ def seconds_until_next_summary(now=None) -> float:
                 return max(0.1, (candidate - now).total_seconds())
     raise RuntimeError("No summary slot configured")
 
+def select_alert_source():
+    """Return the source that controls the public level: the newest dated observation.
+
+    An undated webhook snapshot (old receiver, missing createdAt) never overrides an
+    official Telegram message; Telegram wins ties.
+    """
+    if telegram_alert_state is None:
+        return "webhook" if api_alert_level is not None else None
+    if api_alert_level is None or api_alert_event_at is None or telegram_alert_message_at is None:
+        return "telegram"
+    return "webhook" if api_alert_event_at > telegram_alert_message_at else "telegram"
+
+
+def format_optional_time(value):
+    return utc_iso(value) if value is not None else None
+
+
 async def reconcile_alert_state(source):
-    """An undated webhook snapshot cannot override an official Telegram event."""
-    if telegram_alert_state is not None:
+    """Apply the newest dated level from official Telegram or the webhook receiver."""
+    selected = select_alert_source()
+    if selected == "telegram":
         result = await apply_alert_state(telegram_alert_state, source, level=telegram_alert_level)
-    elif api_alert_level is not None:
+    elif selected == "webhook":
         result = await apply_alert_state(
-            api_alert_level != "GREEN", source, level=api_alert_level
+            api_alert_level != "GREEN", f"{source} (selected: webhook)", level=api_alert_level
         )
     else:
         return False
     # Publish the alert before doing any private discrepancy notification.
-    await report_alert_source_mismatch()
+    await report_alert_source_mismatch(selected)
     return result
 
 
-async def report_alert_source_mismatch():
+async def report_alert_source_mismatch(selected="telegram"):
     global last_alert_source_mismatch, last_alert_mismatch_notice_at
     mismatch = (telegram_alert_level, api_alert_level)
     if None in mismatch or telegram_alert_level == api_alert_level:
@@ -433,21 +465,83 @@ async def report_alert_source_mismatch():
     if mismatch == last_alert_source_mismatch:
         return
     last_alert_source_mismatch = mismatch
+    webhook_at = format_optional_time(api_alert_event_at)
+    reason = "webhook_undated" if webhook_at is None else "newer_event"
     print(
         f"[ALERT SOURCE MISMATCH] telegram={telegram_alert_level} webhook={api_alert_level} "
         f"telegram_id={telegram_alert_message_id} telegram_at={telegram_alert_message_at} "
-        "selected=Telegram reason=webhook_has_no_event_timestamp"
+        f"webhook_at={webhook_at} selected={selected} reason={reason}"
     )
     now = time.monotonic()
     if last_alert_mismatch_notice_at is None or now - last_alert_mismatch_notice_at >= 900:
         last_alert_mismatch_notice_at = now
+        controlling = "official Telegram" if selected == "telegram" else "UkraineAlarm webhook"
         await send_to_owner(
             "⚠️ <b>Alert sources disagree</b>\n"
-            f"Official Telegram: {telegram_alert_level}; webhook snapshot: {api_alert_level}.\n"
-            "The latest explicit @KyivCityOfficial message controls the public state. "
-            "The webhook has no event timestamp and cannot override it.\n"
+            f"Official Telegram: {telegram_alert_level} (at {format_optional_time(telegram_alert_message_at)}); "
+            f"webhook: {api_alert_level} (event at {webhook_at or 'unknown'}).\n"
+            f"The newest dated event controls the public state: {controlling}. "
+            "The receiver will repair itself from the UkraineAlarm REST API if this persists.\n"
             f"Source message: https://t.me/{ALERT_TRIGGER_CHANNEL}/{telegram_alert_message_id}"
         )
+
+
+async def request_source_reconcile_if_needed(now=None):
+    """Ask the receiver for a REST repair when Telegram and webhook keep disagreeing."""
+    global alert_source_mismatch_since, last_source_reconcile_request_at
+    now = time.monotonic() if now is None else now
+    if None in (telegram_alert_level, api_alert_level) or telegram_alert_level == api_alert_level:
+        alert_source_mismatch_since = None
+        return False
+    if alert_source_mismatch_since is None:
+        alert_source_mismatch_since = now
+    if not UKRAINE_ALARM_RECONCILE_URL or now - alert_source_mismatch_since < ALERT_SOURCE_RECONCILE_AFTER:
+        return False
+    if (
+        last_source_reconcile_request_at is not None
+        and now - last_source_reconcile_request_at < ALERT_SOURCE_RECONCILE_INTERVAL
+    ):
+        return False
+    last_source_reconcile_request_at = now
+    try:
+        response = await http_client.post(UKRAINE_ALARM_RECONCILE_URL, timeout=15.0)
+        if response.status_code == 200:
+            decision = response.json().get("decision")
+        else:
+            decision = f"HTTP {response.status_code}"
+    except Exception as exc:
+        decision = f"{type(exc).__name__}: {exc}"
+    print(
+        f"[ALERT SOURCE RECONCILE] telegram={telegram_alert_level} "
+        f"webhook={api_alert_level} decision={decision}"
+    )
+    return True
+
+
+async def check_webhook_liveness(state, now=None):
+    """Warn OPS once when no webhook from any region arrives for too long."""
+    global webhook_silence_notified
+    reference = state.get("last_webhook_at") or state.get("started_at")
+    if reference is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    silent_for = (now - reference).total_seconds()
+    if silent_for < WEBHOOK_SILENCE_ALERT_SECONDS:
+        if webhook_silence_notified:
+            webhook_silence_notified = False
+            print("[UKRAINEALARM WEBHOOK] deliveries resumed")
+            await send_to_owner("✅ <b>UkraineAlarm webhook deliveries resumed</b>")
+        return False
+    if not webhook_silence_notified:
+        webhook_silence_notified = True
+        minutes = int(silent_for // 60)
+        print(f"[UKRAINEALARM WEBHOOK SILENT] no webhook from any region for {minutes} min")
+        await send_to_owner(
+            "⚠️ <b>UkraineAlarm webhook silent</b>\n"
+            f"No webhook from any region for {minutes} minutes. Official Telegram still "
+            "controls the alert state. Check the receiver and its callback registration."
+        )
+    return True
 
 
 def record_telegram_alert_level(level, message):
@@ -473,8 +567,8 @@ def record_telegram_alert_level(level, message):
 
 
 async def ukraine_alarm_state_loop():
-    """Observe the webhook as a cross-check, never as a veto on official Telegram."""
-    global api_alert_level
+    """Read the receiver's dated level; the newest dated source controls the public state."""
+    global api_alert_level, api_alert_event_at
     previous = None
     error_streak = 0
     while True:
@@ -491,15 +585,22 @@ async def ukraine_alarm_state_loop():
                 await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
                 continue
             error_streak = 0
-            observed = parse_ukraine_alarm_state_level(response.json())
-            if observed is None:
-                await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
-                continue
-            api_alert_level = observed
-            if observed != previous:
-                print(f"[UKRAINEALARM WEBHOOK] Kyiv level={observed}")
+            state = parse_ukraine_alarm_state(response.json())
+            # An unknown receiver state must not leave an old level in memory.
+            api_alert_level = state["level"]
+            api_alert_event_at = state["event_at"] if api_alert_level is not None else None
+            await check_webhook_liveness(state)
+            observed = (api_alert_level, api_alert_event_at)
+            if api_alert_level is None:
+                previous = None
+            elif observed != previous:
+                print(
+                    f"[UKRAINEALARM WEBHOOK] Kyiv level={api_alert_level} "
+                    f"event_at={format_optional_time(api_alert_event_at)}"
+                )
                 if await reconcile_alert_state("UkraineAlarm webhook"):
                     previous = observed
+            await request_source_reconcile_if_needed()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2080,7 +2181,7 @@ async def main():
         asyncio.create_task(health_loop())
         if UKRAINE_ALARM_STATE_URL:
             asyncio.create_task(ukraine_alarm_state_loop())
-            print("✅ Alert authority: @KyivCityOfficial; UkraineAlarm webhook is a discrepancy cross-check")
+            print("✅ Alert authority: newest dated event from @KyivCityOfficial or UkraineAlarm webhook")
         else:
             print("⚠️ UkraineAlarm webhook unavailable: Telegram controls alert state")
 
