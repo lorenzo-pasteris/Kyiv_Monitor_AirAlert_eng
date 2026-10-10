@@ -69,9 +69,17 @@ allarme; gli altri messaggi del canale non modificano lo stato.
   `AIR ALERT — KYIV`. Anche i passaggi giallo↔rosso vengono pubblicati senza
   chiudere e riaprire l'allerta.
 - Messaggi ambigui o non riferiti a Kyiv non modificano lo stato conosciuto.
-- Il receiver webhook UkraineAlarm fornisce il livello esatto e autorevole tramite
-  `UKRAINE_ALARM_STATE_URL`. Finché non esiste un primo snapshot completo, il sistema
-  usa `@KyivCityOfficial` senza dedurre il rosso dal generico stato `AIR`.
+- Il receiver webhook UkraineAlarm fornisce il livello esatto e l'ora dell'evento del
+  fornitore (`event_at`) tramite `UKRAINE_ALARM_STATE_URL`. Vince l'evento datato più
+  recente tra il messaggio ufficiale `@KyivCityOfficial` e il webhook; in caso di parità,
+  o se il webhook non ha data, vince Telegram. Uno stato sconosciuto del receiver azzera
+  il livello webhook in memoria.
+- Se le due fonti restano in disaccordo per `ALERT_SOURCE_RECONCILE_AFTER` secondi
+  (default 45), il worker chiede al receiver `POST /reconcile`: il receiver legge lo stato
+  REST UkraineAlarm (al massimo una volta ogni 30 secondi) e ripara un webhook perso.
+- Se nessun webhook di alcuna regione arriva per `WEBHOOK_SILENCE_ALERT_SECONDS`
+  (default 5400: nella settimana 3–10 ottobre il silenzio più lungo è stato di 135 minuti,
+  poi 76 e 38), OPS riceve un avviso; un secondo avviso conferma la ripresa.
 
 All'avvio il worker legge gli ultimi messaggi di `@KyivCityOfficial` per ricostruire lo stato senza dover aspettare il prossimo evento.
 
@@ -182,8 +190,8 @@ Il filtro commenti rileva opinioni, domande retoriche e supposizioni nel feed di
 
 ## Limiti noti
 
-- UkraineAlarm è soltanto un osservatore shadow opzionale: il trigger pubblico usa
-  esclusivamente i modelli espliciti di `@KyivCityOfficial`.
+- Il confronto tra fonti usa gli orari dei server del fornitore e di Telegram: uno
+  scarto di orologio di pochi secondi può anticipare o ritardare il passaggio di livello.
 - SQLite e il lock Telethon usano per impostazione predefinita `/data`; senza un
   volume Railway montato su quel percorso, i dati non sopravvivono alla sostituzione
   del container.
