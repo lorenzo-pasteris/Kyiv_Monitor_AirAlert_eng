@@ -338,6 +338,20 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Kyiv City"):
             monitor.parse_ukraine_alarm_kyiv_state(response[:1])
 
+    def test_ukraine_alarm_state_exposes_provider_time(self):
+        state = monitor.parse_ukraine_alarm_state({
+            "known": True, "level": "red", "event_at": "2026-10-10T10:57:05.1234567Z",
+            "last_webhook_at": "2026-10-10T10:58:00+00:00", "started_at": "bad",
+        })
+        self.assertEqual(state["level"], "RED")
+        self.assertEqual(state["event_at"].isoformat(), "2026-10-10T10:57:05.123456+00:00")
+        self.assertEqual(state["last_webhook_at"].isoformat(), "2026-10-10T10:58:00+00:00")
+        self.assertIsNone(state["started_at"])
+        undated = monitor.parse_ukraine_alarm_state({"known": True, "level": "GREEN", "event_at": "2026-10-10T10:57:05"})
+        self.assertIsNone(undated["event_at"])
+        unknown = monitor.parse_ukraine_alarm_state({"known": False, "event_at": "2026-10-10T10:57:05Z"})
+        self.assertEqual((unknown["level"], unknown["event_at"]), (None, None))
+
     def test_ukraine_alarm_webhook_state_requires_an_exact_level(self):
         self.assertIsNone(monitor.parse_ukraine_alarm_state_level({"known": False}))
         self.assertEqual(
