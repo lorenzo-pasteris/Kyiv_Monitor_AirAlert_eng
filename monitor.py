@@ -508,7 +508,7 @@ async def request_source_reconcile_if_needed(now=None):
     """Ask the receiver for a REST repair when Telegram and webhook keep disagreeing."""
     global alert_source_mismatch_since, last_source_reconcile_request_at
     now = time.monotonic() if now is None else now
-    if None in (telegram_alert_level, api_alert_level) or telegram_alert_level == api_alert_level:
+    if api_alert_level is not None and telegram_alert_level == api_alert_level:
         alert_source_mismatch_since = None
         return False
     if alert_source_mismatch_since is None:
@@ -556,8 +556,8 @@ async def check_webhook_liveness(state, now=None):
         print(f"[UKRAINEALARM WEBHOOK SILENT] no webhook from any region for {minutes} min")
         await send_to_owner(
             "⚠️ <b>UkraineAlarm webhook silent</b>\n"
-            f"No webhook from any region for {minutes} minutes. Official Telegram still "
-            "controls the alert state. Check the receiver and its callback registration."
+            f"No webhook from any region for {minutes} minutes. This alone does not prove a failure. "
+            "The newest dated source controls the alert state. Check the receiver and its callback registration."
         )
     return True
 
@@ -607,9 +607,10 @@ async def ukraine_alarm_state_loop():
             # An unknown receiver state must not leave an old level in memory.
             api_alert_level = state["level"]
             api_alert_event_at = state["event_at"] if api_alert_level is not None else None
-            await check_webhook_liveness(state)
             observed = (api_alert_level, api_alert_event_at)
             if api_alert_level is None:
+                if telegram_alert_state is not None:
+                    await reconcile_alert_state("UkraineAlarm receiver unknown")
                 previous = None
             elif observed != previous:
                 print(
@@ -619,6 +620,7 @@ async def ukraine_alarm_state_loop():
                 if await reconcile_alert_state("UkraineAlarm webhook"):
                     previous = observed
             await request_source_reconcile_if_needed()
+            await check_webhook_liveness(state)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

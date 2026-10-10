@@ -382,6 +382,42 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         # Old receivers expose no liveness fields: no false alarm.
         self.assertFalse(await monitor.check_webhook_liveness({"last_webhook_at": None, "started_at": None}, now=now))
 
+    async def test_unknown_receiver_retries_bootstrap_after_delay(self):
+        monitor.api_alert_level = None
+        monitor.telegram_alert_level = None
+        response = SimpleNamespace(status_code=200, json=lambda: {"decision": "error"})
+        client = SimpleNamespace(post=AsyncMock(return_value=response))
+        with patch.object(monitor, "http_client", client), \
+             patch.object(monitor, "UKRAINE_ALARM_RECONCILE_URL", "http://receiver/reconcile"):
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=100))
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=146))
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=160))
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=207))
+        self.assertEqual(client.post.await_count, 2)
+
+    async def test_unknown_receiver_reapplies_telegram_before_private_liveness_notice(self):
+        monitor.telegram_alert_state = True
+        monitor.telegram_alert_level = "RED"
+        monitor.api_alert_level = "GREEN"
+        response = SimpleNamespace(status_code=200, json=lambda: {"known": False})
+        events = []
+
+        async def reconcile(source):
+            events.append("public")
+            return True
+
+        async def liveness(state):
+            events.append("private")
+
+        with patch.object(monitor, "http_client", SimpleNamespace(get=AsyncMock(return_value=response))), \
+             patch.object(monitor, "reconcile_alert_state", side_effect=reconcile), \
+             patch.object(monitor, "check_webhook_liveness", side_effect=liveness), \
+             patch.object(monitor, "request_source_reconcile_if_needed", new=AsyncMock()), \
+             patch.object(monitor.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await monitor.ukraine_alarm_state_loop()
+        self.assertEqual(events, ["public", "private"])
+
     async def test_stale_alert_delivery_is_discarded(self):
         sent = []
 
