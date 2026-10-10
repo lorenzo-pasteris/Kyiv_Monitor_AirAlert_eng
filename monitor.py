@@ -127,7 +127,7 @@ UKRAINE_ALARM_POLL_INTERVAL = float(os.environ.get("UKRAINE_ALARM_POLL_INTERVAL"
 # --- Timezone ---
 TZ = ZoneInfo("Europe/Kyiv")  # EET/EEST auto
 
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-5-5"
 TRANSLATION_MAX_ATTEMPTS = 2
 
 PREPARATION_SIGNAL_RE = re.compile(
@@ -309,6 +309,8 @@ async def is_blocked_alert_image(message):
             json={
                 "model": MODEL,
                 "max_tokens": 10,
+                "thinking": {"type": "disabled"},
+                "output_config": {"effort": "low"},
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -562,7 +564,8 @@ async def translate_message(text, context=()):
                 r = await http_client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json={"model": MODEL, "max_tokens": 200, "temperature": 0, "messages": [{
+                    json={"model": MODEL, "max_tokens": 200,
+                          "thinking": {"type": "disabled"}, "output_config": {"effort": "low"}, "messages": [{
                         "role": "user", "content": build_alert_translation_prompt(text, context)
                     }]},
                     timeout=httpx.Timeout(15.0, connect=5.0),
@@ -663,7 +666,8 @@ async def translate_war_monitor_report(text, signals=None):
                 json={
                     "model": MODEL,
                     "max_tokens": 700,
-                    "temperature": 0,
+                    "thinking": {"type": "disabled"},
+                    "output_config": {"effort": "low"},
                     "messages": [{
                         "role": "user",
                         "content": (
@@ -1164,8 +1168,10 @@ async def analyze_hourly_matrix(messages, published_history=None, published_sour
                     json={
                         "model": MODEL,
                         "max_tokens": max_tokens,
+                        "thinking": {"type": "disabled"},
                         "messages": [{"role": "user", "content": prompt}],
                         "output_config": {
+                            "effort": "low",
                             "format": {
                                 "type": "json_schema",
                                 "schema": CATEGORY_RESULT_SCHEMA,
@@ -1358,6 +1364,7 @@ async def startup_self_check():
         await send_to_owner(message)
         return False
     print("[STARTUP CHECK] storage and Bot API destinations are ready")
+    print(f"[AI CONFIG] model={MODEL} thinking=disabled effort=low")
     return True
 
 
