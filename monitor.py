@@ -36,9 +36,11 @@ from text_processing import (
     is_non_operational_alert_message,
     is_priority_alert_message,  # noqa: F401 -- re-exported for routing regressions
     is_pure_ad,
+    is_general_siren_announcement,
     is_translation_meta_output,  # noqa: F401 -- re-exported for tests/test_routing.py
     is_valid_alert_translation,  # noqa: F401 -- re-exported for tests/test_routing.py
-    normalize_alert_for_dedup,
+    normalize_alert_for_dedup,  # noqa: F401 -- re-exported for persistence/routing tests
+    normalize_alert_revision,
     parse_alert_gate_output,
     parse_first_json_object,
     parse_ukraine_alarm_kyiv_level,  # noqa: F401 -- re-exported for routing regressions
@@ -371,7 +373,7 @@ def should_publish_alert(text, source, now=None):
 
 
 def alert_duplicate_key(text):
-    normalized = normalize_alert_for_dedup(strip_mixed_alert_commentary(text))
+    normalized = normalize_alert_revision(strip_mixed_alert_commentary(text))
     # Ignore only presentation noise, never word order, numbers or negations.
     return re.sub(r"^(?:(?:увага|терміново|внимание|срочно)\s+)+", "", normalized)
 
@@ -619,7 +621,7 @@ async def apply_alert_state(desired, source, *, level=None, startup=False, publi
         return True
 
 
-async def translate_message(text, context=()):
+async def translate_message(text, context=(), *, mixed_news_source=False):
     known_fragment = translate_known_terse_fragment(text)
     if known_fragment:
         return known_fragment
@@ -631,13 +633,13 @@ async def translate_message(text, context=()):
                     headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                     json={"model": MODEL, "max_tokens": 200,
                           "thinking": {"type": "disabled"}, "output_config": {"effort": "low"}, "messages": [{
-                        "role": "user", "content": build_alert_translation_prompt(text, context)
+                        "role": "user", "content": build_alert_translation_prompt(text, context, mixed_news_source=mixed_news_source)
                     }]},
                     timeout=httpx.Timeout(15.0, connect=5.0),
                 )
             r.raise_for_status()
             result = r.json()["content"][0]["text"].strip()
-            decision, translation, reason = parse_alert_gate_output(result, text)
+            decision, translation, reason = parse_alert_gate_output(result, text, mixed_news_source=mixed_news_source)
             if decision == "DROP":
                 print(f"[ALERT SEMANTIC DROP] reason={reason!r} input={text[:120]!r}")
                 return False
@@ -1684,6 +1686,10 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
         return False
 
+    if is_general_siren_announcement(clean):
+        print(f"[ALERT OFFICIAL-ONLY NOTICE] source=@{source}")
+        return True
+
     original = clean
     clean = strip_mixed_alert_commentary(clean)
     if clean != original:
@@ -1707,7 +1713,10 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
 
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     try:
-        translation = await translate_message(clean[:1500], context=context)
+        if source == KYIV_INFO_CHANNEL:
+            translation = await translate_message(clean[:1500], context=context, mixed_news_source=True)
+        else:
+            translation = await translate_message(clean[:1500], context=context)
     except asyncio.CancelledError:
         print(f"[ALERT CANCELLED] translation interrupted source=@{source} generation={generation}")
         raise
@@ -1762,6 +1771,7 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         len(clean) < 5
         or is_non_operational_alert_message(clean)
         or is_pure_ad(clean)
+        or is_general_siren_announcement(clean)
     ):
         state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT FILTERED] @{channel} id={message.id}")

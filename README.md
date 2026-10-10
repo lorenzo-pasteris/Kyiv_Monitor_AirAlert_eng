@@ -79,6 +79,14 @@ duplicates rather than suppressing a potentially new warning. A Telegram timeout
 after server acceptance still has the existing ambiguous-delivery limitation.
 Kyiv Info continues into the News queue whether or not its tactical post is sent.
 Neither tactical source can change the official siren state.
+Standalone general siren start/end templates are excluded from both tactical feeds;
+specific ballistic-threat updates still pass. Kyiv Info's existing translation call
+also classifies ordinary non-operational news, which stays in the News pipeline.
+Evidenced news exclusions are enabled only for this mixed source; short operational
+fragments have a conservative publication override. Ambiguous edits still pass:
+only formatting and explicitly recognized equivalent corrections share a durable
+message-version key. Loss of observation is translated as "No longer observed",
+never as a general absence of threats or an official all clear.
 
 ### TEST
 

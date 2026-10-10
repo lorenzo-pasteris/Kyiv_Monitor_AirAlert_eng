@@ -12,6 +12,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from test_routing import FakeTelegramMessage, monitor
+from text_processing import (
+    build_alert_translation_prompt, correct_known_translation_errors,
+    is_general_siren_announcement, normalize_alert_revision, parse_alert_gate_output,
+    translate_known_terse_fragment,
+)
 
 
 class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
@@ -102,7 +107,7 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.safe_send.await_count, 1)
 
     async def test_concurrent_sources_publish_once(self):
-        async def translate(text, context=()):
+        async def translate(text, context=(), **kwargs):
             await asyncio.sleep(0)
             return "Drones heading towards Kyiv"
 
@@ -121,7 +126,7 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_backup_classification_does_not_delay_primary(self):
         gate = asyncio.Event()
 
-        async def translate(text, context=()):
+        async def translate(text, context=(), **kwargs):
             if text.startswith("3"):
                 await gate.wait()
             return text
@@ -200,6 +205,80 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         with sqlite3.connect(monitor.state_store.CATEGORY_STATS_DB_PATH) as connection:
             rows = connection.execute("SELECT channel, message_id FROM normal_messages ORDER BY message_id").fetchall()
         self.assertEqual(rows, [(self.backup, 100), (self.backup, 101)])
+
+    async def test_no_longer_observed_is_not_general_all_clear(self):
+        for text in ("Не спостерігається", "Не спостережень", "Не спостерігаються"):
+            self.assertEqual(translate_known_terse_fragment(text), "No longer observed.")
+        self.assertEqual(
+            correct_known_translation_errors("Не спостерігається біля Чабанів", "No threats currently observed near Chabany."),
+            "No longer observed near Chabany.",
+        )
+        self.assertIn("NEVER 'no threats currently observed'", build_alert_translation_prompt("Не спостерігається"))
+
+    async def test_equivalent_edit_has_one_durable_claim_even_after_restart(self):
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery(self.primary, 21234, "Не спостережень"))
+        monitor.recent_alert_messages.clear()
+        self.assertFalse(monitor.state_store.claim_alert_feed_delivery(self.primary, 21234, "Не спостерігається!"))
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery(self.primary, 21234, "Знову спостерігається"))
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery(self.primary, 21235, "Не спостерігається"))
+
+    async def test_equivalent_edit_can_retry_after_failed_delivery(self):
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery(self.primary, 1, "Не спостережень"))
+        monitor.state_store.release_alert_feed_delivery(self.primary, 1, "Не спостерігається")
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery(self.primary, 1, "Не спостерігається"))
+
+    async def test_equivalent_edit_publishes_once_but_operational_edit_passes(self):
+        for text in ("Не спостережень", "Не спостерігається", "Знову спостерігається біля Чабанів"):
+            msg = FakeTelegramMessage(21234, text, datetime.now(timezone.utc))
+            await monitor.process_alert_feed_message(msg, self.primary, edited=True)
+        self.assertEqual(monitor.safe_send.await_count, 2)
+
+    async def test_revision_key_preserves_tactical_changes(self):
+        pairs = [
+            ("2 дрони на Бровари", "3 дрони на Бровари"),
+            ("Дрон на Бровари", "Дрон від Броварів"),
+            ("Збили", "Не збили"),
+            ("Не спостерігається", "Не спостерігаються"),
+            ("Не спостерігається", "Схоже не спостерігається"),
+        ]
+        for before, after in pairs:
+            self.assertNotEqual(normalize_alert_revision(before), normalize_alert_revision(after))
+
+    async def test_general_siren_notices_are_official_only(self):
+        for source in (self.primary, self.backup):
+            for index, text in enumerate(("✅ВІДБІЙ ПОВІТРЯНОЇ ТРИВОГИ ✅", "Київ: повітряна тривога!", "У Києві оголошена ракетна загроза!"), 1):
+                self.assertTrue(is_general_siren_announcement(text))
+                msg = FakeTelegramMessage(index, text, datetime.now(timezone.utc))
+                await monitor.process_alert_feed_message(msg, source)
+        monitor.safe_send.assert_not_awaited()
+        monitor.translate_message.assert_not_awaited()
+
+    async def test_tactical_threat_all_clear_and_mixed_warning_are_not_blocked(self):
+        for text in ("Відбій по балістиці", "Без загроз по бандеролям", "Повітряна тривога! Дрон на Бровари", "Загроза з Брянська!!", "Перші ракети Х101 залітають на Сумщину"):
+            self.assertFalse(is_general_siren_announcement(text))
+            await monitor.handle_alert_message(text, self.backup)
+        self.assertEqual(monitor.safe_send.await_count, 5)
+
+    async def test_backup_gets_news_rules_without_changing_primary_prompt(self):
+        await monitor.handle_alert_message(self.text, self.backup)
+        monitor.translate_message.assert_awaited_once_with(self.text, context=(), mixed_news_source=True)
+        primary = build_alert_translation_prompt(self.text)
+        backup = build_alert_translation_prompt(self.text, mixed_news_source=True)
+        self.assertNotIn("NON_OPERATIONAL_NEWS", primary)
+        self.assertIn("NON_OPERATIONAL_NEWS", backup)
+
+    async def test_evidenced_ordinary_news_drop_is_scoped_to_backup(self):
+        text = "Київ витратив 16 млрд грн на підготовку до зими, — директор Центру досліджень енергетики Харченко"
+        raw = json.dumps(dict(decision="DROP", block_category="NON_OPERATIONAL_NEWS",
+                              evidence="витратив 16 млрд грн", translation="Kyiv spent UAH 16 billion on winter preparations."))
+        self.assertEqual(parse_alert_gate_output(raw, text, mixed_news_source=True)[0], "DROP")
+        self.assertEqual(parse_alert_gate_output(raw, text)[0], "PUBLISH")
+        self.assertEqual(parse_alert_gate_output(raw, "Новий дрон на Бровари", mixed_news_source=True)[0], "PUBLISH")
+
+    async def test_news_drop_cannot_remove_terse_operational_updates(self):
+        for text in ("Нивки", "Жуляни", "2 дрони на Чабани", "Збили", "Перші ракети Х101 залітають на Сумщину"):
+            raw = json.dumps(dict(decision="DROP", block_category="NON_OPERATIONAL_NEWS", evidence=text, translation="Operational update"))
+            self.assertEqual(parse_alert_gate_output(raw, text, mixed_news_source=True)[0], "PUBLISH", text)
 
 
 if __name__ == "__main__":
