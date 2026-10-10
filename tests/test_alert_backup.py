@@ -284,12 +284,42 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
                               evidence="витратив 16 млрд грн", translation="Kyiv spent UAH 16 billion on winter preparations."))
         self.assertEqual(parse_alert_gate_output(raw, text, mixed_news_source=True)[0], "DROP")
         self.assertEqual(parse_alert_gate_output(raw, text)[0], "PUBLISH")
-        self.assertEqual(parse_alert_gate_output(raw, "Новий дрон на Бровари", mixed_news_source=True)[0], "PUBLISH")
+        with self.assertRaises(ValueError):
+            parse_alert_gate_output(raw, "Новий дрон на Бровари", mixed_news_source=True)
 
     async def test_news_drop_cannot_remove_terse_operational_updates(self):
         for text in ("Нивки", "Жуляни", "2 дрони на Чабани", "Збили", "Перші ракети Х101 залітають на Сумщину"):
-            raw = json.dumps(dict(decision="DROP", block_category="NON_OPERATIONAL_NEWS", evidence=text, translation="Operational update"))
+            raw = json.dumps(dict(decision="DROP", block_category="NON_OPERATIONAL_NEWS", evidence=text, translation="Operational update",
+                                  operational_updates=[dict(source=text, translation="Operational update")]))
             self.assertEqual(parse_alert_gate_output(raw, text, mixed_news_source=True)[0], "PUBLISH", text)
+
+    async def test_mixed_district_notice_is_removed_before_translation(self):
+        text = "🟡 Вишгородський район — повітряна тривога, жовтий рівень: Дронова загроза (жовтий рівень)\n3х рБпЛА з Чернігівщини\n✈️ радар 👉🏽 @kievinform_ua1"
+        await monitor.handle_alert_message(text, self.backup)
+        monitor.translate_message.assert_awaited_once_with(
+            "3х рБпЛА з Чернігівщини", context=(), mixed_news_source=True)
+
+    async def test_altitude_equivalents_merge_but_new_facts_and_intervening_events_do_not(self):
+        first = "З 4к скинув висоту до 2, і продовжує поступово знижуватись"
+        second = "Скинув висоту з 4 км до 2 км і продовжує поступово знижуватись"
+        await monitor.handle_alert_message(first, self.primary)
+        await monitor.handle_alert_message(second, self.primary)
+        self.assertEqual(monitor.safe_send.await_count, 1)
+        for changed in (second.replace("до 2", "до 1"), "Схоже " + second,
+                        "Не " + second, second + " на Бровари", "Ще один дрон на Київ", second):
+            await monitor.handle_alert_message(changed, self.backup)
+        self.assertEqual(monitor.safe_send.await_count, 7)
+
+    async def test_altitude_cosmetic_edit_has_one_durable_claim(self):
+        before = "З 4к скинув висоту до 2, і продовжує поступово знижуватись"
+        self.assertTrue(monitor.state_store.claim_alert_feed_delivery(self.primary, 21263, before))
+        self.assertFalse(monitor.state_store.claim_alert_feed_delivery(self.primary, 21263, before.replace("4к", "4км")))
+
+    async def test_generic_and_old_clear_notices_never_reach_model(self):
+        for text in ("🔴 ТРИВОГА В КИЄВІ та області", "Відбій, відпочивайте"):
+            await monitor.handle_alert_message(text, self.backup)
+        monitor.translate_message.assert_not_awaited()
+        monitor.safe_send.assert_not_awaited()
 
 
 if __name__ == "__main__":

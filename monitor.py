@@ -27,6 +27,7 @@ from alert_rules import classify_kyiv_city_official_level
 from predeploy_check import validate_environment
 from text_processing import (
     CANONICAL_PLACE_SPELLINGS,
+    altitude_update_key,
     build_alert_translation_prompt,
     clean_alert_source_text,
     clean_alert_public_text,
@@ -49,6 +50,7 @@ from text_processing import (
     parse_ukraine_alarm_state,
     parse_ukraine_alarm_state_level,  # noqa: F401 -- re-exported for routing regressions
     strip_mixed_alert_commentary,
+    strip_general_siren_notices,
     translate_known_terse_fragment,
     utc_iso,
 )
@@ -370,6 +372,9 @@ def should_publish_alert(text, source, now=None):
     while recent_alert_messages and timestamp - recent_alert_messages[0][0] > ALERT_DEDUP_WINDOW:
         recent_alert_messages.popleft()
 
+    if normalized.startswith("altitude-descent:") and recent_alert_messages:
+        # No location: another source or intervening update may concern a different target.
+        return recent_alert_messages[-1][1:] != (source, normalized)
     for _, previous_source, previous_text in recent_alert_messages:
         # A bare district or contextual fragment can describe another target.
         if source != previous_source:
@@ -384,6 +389,9 @@ def should_publish_alert(text, source, now=None):
 
 
 def alert_duplicate_key(text):
+    altitude = altitude_update_key(text)
+    if altitude:
+        return altitude
     normalized = normalize_alert_revision(strip_mixed_alert_commentary(text))
     # Ignore only presentation noise, never word order, numbers or negations.
     return re.sub(r"^(?:(?:увага|терміново|внимание|срочно)\s+)+", "", normalized)
@@ -731,7 +739,7 @@ async def translate_message(text, context=(), *, mixed_news_source=False):
                 r = await http_client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json={"model": MODEL, "max_tokens": 200,
+                    json={"model": MODEL, "max_tokens": 450 if mixed_news_source else 200,
                           "thinking": {"type": "disabled"}, "output_config": {"effort": "low"}, "messages": [{
                         "role": "user", "content": build_alert_translation_prompt(text, context, mixed_news_source=mixed_news_source)
                     }]},
@@ -1786,7 +1794,8 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
         return False
 
-    if is_general_siren_announcement(clean):
+    clean = strip_general_siren_notices(clean_alert_source_text(clean))
+    if not clean:
         print(f"[ALERT OFFICIAL-ONLY NOTICE] source=@{source}")
         return True
 
@@ -1870,7 +1879,7 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         print(f"[ALERT SKIPPED STALE] @{channel} id={message.id}")
         return False
 
-    clean = clean_alert_source_text(message.text or "")
+    clean = strip_general_siren_notices(clean_alert_source_text(message.text or ""))
     cursor = state_store.get_alert_feed_cursor(channel)
     if (
         len(clean) < 5

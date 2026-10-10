@@ -4,10 +4,39 @@ import unittest
 from text_processing import (
     clean_alert_public_text, clean_alert_source_text, is_commentary_alert_message,
     is_general_siren_announcement, parse_alert_gate_output,
+    strip_general_siren_notices,
 )
 
 
 class PublicAlertHygieneTests(unittest.TestCase):
+    def test_mixed_trump_post_loses_siren_and_radar_and_news_drop_stays_drop(self):
+        text = "Тим часом Трамп…\nЯ можу говорити найтупіші речі, — Трамп\n00:05 🟡 Білоцерківський район — повітряна тривога, жовтий рівень: Дронова загроза (жовтий рівень)\n✈️ радар 👉🏽 @kievinform_ua1"
+        clean = strip_general_siren_notices(clean_alert_source_text(text))
+        self.assertNotIn("тривога", clean)
+        self.assertNotIn("радар", clean)
+        raw = json.dumps(dict(decision="DROP", block_category="NON_OPERATIONAL_NEWS",
+                              evidence="Трамп", translation="Meanwhile Trump"))
+        self.assertEqual(parse_alert_gate_output(raw, clean, mixed_news_source=True)[0], "DROP")
+
+    def test_only_extracted_tactical_translation_is_published(self):
+        source = "Політичні новини. 3х рБпЛА з Чернігівщини"
+        result = dict(decision="PUBLISH", translation="Politics. Three UAVs.",
+                      operational_updates=[dict(source="3х рБпЛА з Чернігівщини",
+                                                translation="3 jet-powered UAVs from Chernihiv region.")])
+        self.assertEqual(parse_alert_gate_output(json.dumps(result), source, mixed_news_source=True)[1],
+                         "3 jet-powered UAVs from Chernihiv region.")
+        for updates in (None, [], [dict(source="Дрон на Київ", translation="Drone towards Kyiv")]):
+            result["operational_updates"] = updates
+            with self.assertRaises(ValueError):
+                parse_alert_gate_output(json.dumps(result), source, mixed_news_source=True)
+
+    def test_siren_excerpt_cannot_be_used_as_operational_evidence(self):
+        source = "ТРИВОГА В КИЄВІ та області"
+        raw = json.dumps(dict(decision="PUBLISH", translation="Alert in Kyiv",
+                              operational_updates=[dict(source=source, translation="Alert in Kyiv")]))
+        with self.assertRaises(ValueError):
+            parse_alert_gate_output(raw, source, mixed_news_source=True)
+
     def test_real_edited_blast_report_has_no_decorations_or_promo(self):
         text = "🟡 Loud blasts 💥💥 — shot down. Kyiv is clear for now ✈️"
         self.assertEqual(clean_alert_public_text(text),

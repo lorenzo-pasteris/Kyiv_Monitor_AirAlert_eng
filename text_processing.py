@@ -201,6 +201,8 @@ def clean_alert_source_text(text: str) -> str:
             line,
         ).strip()
         line = re.sub(r"(?<!\w)@[A-Za-z0-9_]+", "", line).strip()
+        if normalize_alert_for_dedup(line) in {"радар", "radar"}:
+            continue
         if line and not any(re.search(pattern, line) for pattern in promo_line_patterns):
             kept_lines.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
@@ -273,6 +275,7 @@ def normalize_alert_for_dedup(text: str) -> str:
 
 def normalize_alert_revision(text: str) -> str:
     """Canonicalize proven linguistic equivalents, not tactical information."""
+    text = re.sub(r"(?i)\b(\d+)\s*к(?:м)?\b", r"\1 км", text)
     normalized = normalize_alert_for_dedup(text)
     if normalized in {"не спостережень", "не спостерігається"}:
         return "не спостерігається"
@@ -282,6 +285,12 @@ def normalize_alert_revision(text: str) -> str:
 def is_general_siren_announcement(text: str) -> bool:
     """General siren notices belong to the official state path, not tactical feeds."""
     normalized = normalize_alert_for_dedup(text)
+    normalized = re.sub(r"^\d{1,2} \d{2} ", "", normalized)
+    if re.fullmatch(
+        r"(?:тривога|повітряна тривога) (?:в|у) києві(?: (?:та|і) області)?"
+        r"|відбій(?: повітряної тривоги)? (?:відпочивайте|можна відпочивати)", normalized,
+    ):
+        return True
     if re.fullmatch(
         r"(?:\w+\s+){0,12}повітряна тривога (?:жовтий|червоний) рівень "
         r"(?:дронова|ракетна) загроза(?: (?:жовтий|червоний) рівень)?",
@@ -295,6 +304,27 @@ def is_general_siren_announcement(text: str) -> bool:
         r"(?:\s+(?:у києві|в києві|київ|kyiv|in kyiv))?",
         normalized,
     ))
+
+
+def strip_general_siren_notices(text: str) -> str:
+    """Remove complete siren clauses, not tactical threat-specific all-clears."""
+    parts = re.split(r"\n+|(?<=[.!;])\s+", text)
+    kept = [part for part in parts if not is_general_siren_announcement(part)]
+    return text.strip() if len(kept) == len(parts) else "\n".join(kept).strip()
+
+
+def altitude_update_key(text: str) -> str | None:
+    """Recognize complete, equivalent descent reports without discarding extra facts."""
+    normalized = normalize_alert_revision(text)
+    match = re.fullmatch(
+        r"(?:з (\d+) км (?:скинув|знизив) висоту до (\d+)(?: км)?"
+        r"|(?:скинув|знизив) висоту з (\d+) км до (\d+)(?: км)?)"
+        r"(?: і| та)? продовжує поступово знижуватись", normalized,
+    )
+    if match:
+        start, end = match.groups()[:2] if match.group(1) else match.groups()[2:]
+        return f"altitude-descent:{start}:{end}:continuing"
+    return None
 
 
 def parse_ukraine_alarm_kyiv_level(regions: Any) -> str:
@@ -428,6 +458,15 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "operational part. Ignore ordinary news in the preceding context when resolving tactical fragments. "
         "Ambiguous operational reports must PUBLISH. General siren start/end notices "
         "are handled separately by the official state path. These source-specific rules take precedence.\n\n"
+        "For every PUBLISH, also return operational_updates: an array of objects with source "
+        "(an exact contiguous excerpt of the CURRENT message) and translation (only that excerpt in English). "
+        "Select ONLY current tactical facts; exclude politics, quotations unrelated to threats, "
+        "social commentary, promotional radar footers and generic city/district siren announcements. "
+        "A quoted district siren does NOT turn a political post into an operational report. "
+        "If nothing remains, DROP as NON_OPERATIONAL_NEWS with verbatim evidence. "
+        "For mixed posts, never include the excluded content in operational_updates. "
+        "Do not use preceding context as an excerpt. For PUBLISH omit the top-level translation "
+        "field: the operational_updates translations replace it; do not translate the full mixed post.\n\n"
         if mixed_news_source else ""
     )
     return source_rules + (
@@ -509,7 +548,8 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         f"Canonical place spellings: {CANONICAL_PLACE_SPELLINGS}. "
         "Стоянка is the settlement Stoianka; NEVER translate it as parking.\n\n"
         "Return exactly one JSON object and nothing else. Always provide a valid English translation, "
-        "including when proposing DROP. For DROP, evidence must be an exact non-empty excerpt from the "
+        "including when proposing DROP. For mixed-news PUBLISH use operational_updates instead of "
+        "the top-level translation in the generic example below. For DROP, evidence must be an exact non-empty excerpt from the "
         "current source message that proves the selected closed category. Use null block_category and "
         "empty evidence for PUBLISH; use one closed category and the exact excerpt for DROP:\n"
         '{"decision":"PUBLISH","block_category":null,"translation":"English translation",'
@@ -633,10 +673,33 @@ def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_sourc
     reason = str(parsed.get("reason", "")).strip()
     if decision not in {"PUBLISH", "DROP"}:
         raise ValueError("AI decision must be PUBLISH or DROP")
-    if not is_valid_alert_translation(translation):
+    if not (mixed_news_source and decision == "PUBLISH") and not is_valid_alert_translation(translation):
         raise ValueError("Every decision requires a valid English translation")
     if is_commentary_alert_message(source_text):
         return "DROP", "", "EDITORIAL_COMMENTARY"
+
+    def publish(reason):
+        if not mixed_news_source:
+            return "PUBLISH", translation, reason
+        updates = parsed.get("operational_updates")
+        if not isinstance(updates, list) or not updates:
+            raise ValueError("Mixed news publication requires operational excerpts")
+        translations = []
+        for update in updates:
+            if not isinstance(update, dict):
+                raise ValueError("Invalid operational excerpt")
+            excerpt = update.get("source")
+            output = update.get("translation")
+            if (not isinstance(excerpt, str) or not excerpt.strip()
+                    or excerpt not in source_text or not isinstance(output, str)
+                    or not is_valid_alert_translation(output)):
+                raise ValueError("Operational excerpt must be grounded in the current source")
+            if (strip_general_siren_notices(excerpt) != excerpt.strip()
+                    or is_commentary_alert_message(excerpt) or is_pure_ad(excerpt)):
+                raise ValueError("Excluded content in operational excerpt")
+            translations.append(correct_known_translation_errors(excerpt, output.strip()))
+        return "PUBLISH", "\n".join(translations), reason
+
     if decision == "DROP":
         evidenced = bool(evidence) and evidence.casefold() in source_text.casefold()
         if mixed_news_source and block_category == "NON_OPERATIONAL_NEWS" and evidenced:
@@ -647,7 +710,7 @@ def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_sourc
                 or is_priority_alert_message(source_text)
                 or translate_known_terse_fragment(source_text)
             ):
-                return "PUBLISH", translation, "override_unapproved_drop:NON_OPERATIONAL_NEWS"
+                return publish("override_unapproved_drop:NON_OPERATIONAL_NEWS")
             return "DROP", "", block_category
         if (
             block_category not in ALERT_BLOCK_CATEGORIES
@@ -655,6 +718,6 @@ def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_sourc
             or contains_operational_location(source_text)
             or is_priority_alert_message(source_text)
         ):
-            return "PUBLISH", translation, f"override_unapproved_drop:{block_category or 'NONE'}"
+            return publish(f"override_unapproved_drop:{block_category or 'NONE'}")
         return decision, "", block_category
-    return decision, translation, reason
+    return publish(reason)
