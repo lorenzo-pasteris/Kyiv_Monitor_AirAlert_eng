@@ -6,13 +6,18 @@ def classify_kyiv_city_official_level(text: str) -> str | None:
     lowered = text.lower()
     if "відбій повітряної тривоги" in lowered or "air siren all clear" in lowered:
         return "GREEN"
-    if "у києві оголошена дронова небезпека" in lowered or "drone threat in kyiv" in lowered:
+    if any(phrase in lowered for phrase in (
+        "у києві оголошена дронова небезпека",
+        "у києві оголошена дронова загроза",
+        "drone threat in kyiv",
+    )):
         return "YELLOW"
     if any(
         phrase in lowered
         for phrase in (
             "у києві оголошена повітряна тривога",
             "у києві оголошена ракетна небезпека",
+            "у києві оголошена ракетна загроза",
             "air raid sirens in kyiv",
             "missile threat in kyiv",
         )

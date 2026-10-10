@@ -20,6 +20,14 @@ class KyivCityOfficialAlertTests(unittest.TestCase):
             "У Києві відновили рух автобусів після ремонту."
         ))
 
+    def test_october_10_ukrainian_threat_templates_do_not_need_english_translation(self):
+        self.assertEqual(classify_kyiv_city_official_level(
+            "🔴 УВАГА! У Києві оголошена ракетна загроза!"
+        ), "RED")
+        self.assertEqual(classify_kyiv_city_official_level(
+            "🟡 УВАГА! У Києві оголошена дронова загроза!"
+        ), "YELLOW")
+
 
 if __name__ == "__main__":
     unittest.main()

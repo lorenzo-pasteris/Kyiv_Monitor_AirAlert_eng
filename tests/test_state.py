@@ -7,6 +7,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from test_routing import monitor
 
@@ -24,7 +26,11 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         monitor.alert_generation = 0
         monitor.telegram_alert_state = None
         monitor.telegram_alert_level = None
+        monitor.telegram_alert_message_id = 0
+        monitor.telegram_alert_message_at = None
         monitor.api_alert_level = None
+        monitor.last_alert_source_mismatch = None
+        monitor.last_alert_mismatch_notice_at = None
         monitor.alert_level = "GREEN"
         monitor.state_store.stats_db_ready = False
         monitor.production_client = None
@@ -172,6 +178,95 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_startup_state_is_rejected(self):
         self.assertFalse(await monitor.apply_alert_state(None, "startup-test", startup=True))
         self.assertFalse(monitor.alert_active)
+
+    async def test_october_10_incident_and_delayed_events(self):
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        monitor.api_alert_level = "GREEN"
+        for level, message_id, at in (
+            ("GREEN", 21566, "2026-10-10T09:59:02+00:00"),
+            ("RED", 21571, "2026-10-10T10:57:26+00:00"),
+        ):
+            message = SimpleNamespace(id=message_id, date=datetime.fromisoformat(at))
+            self.assertTrue(monitor.record_telegram_alert_level(level, message))
+            await monitor.reconcile_alert_state("incident replay")
+        self.assertEqual(monitor.alert_level, "RED")
+        self.assertTrue(monitor.alert_active)
+        await monitor.reconcile_alert_state("unchanged stale API green")
+        self.assertEqual(monitor.send_to_alert_channel.await_count, 1)
+
+        clear = SimpleNamespace(id=21575, date=datetime.fromisoformat("2026-10-10T11:36:22+00:00"))
+        self.assertTrue(monitor.record_telegram_alert_level("GREEN", clear))
+        await monitor.reconcile_alert_state("official all clear")
+        self.assertFalse(monitor.record_telegram_alert_level("RED", message))
+        monitor.api_alert_level = "RED"
+        await monitor.reconcile_alert_state("late undated webhook RED")
+        self.assertFalse(monitor.alert_active)
+        self.assertEqual(monitor.alert_level, "GREEN")
+        self.assertEqual(
+            [call.args[0] for call in monitor.send_to_alert_channel.await_args_list],
+            [monitor.ALERT_LEVEL_MESSAGES["RED"], monitor.build_all_clear_message()],
+        )
+
+    async def test_yellow_red_yellow_clear_with_disagreeing_webhook(self):
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        monitor.api_alert_level = "RED"
+        now = datetime.now(timezone.utc)
+        for index, level in enumerate(("YELLOW", "RED", "YELLOW", "GREEN"), 1):
+            message = SimpleNamespace(id=index, date=now + timedelta(seconds=index))
+            self.assertTrue(monitor.record_telegram_alert_level(level, message))
+            await monitor.reconcile_alert_state("cycle replay")
+            self.assertEqual(monitor.alert_level, level)
+        self.assertEqual(monitor.send_to_alert_channel.await_count, 4)
+        self.assertEqual(len(self.owner_messages), 1)
+
+    async def test_public_alert_precedes_discrepancy_notice(self):
+        monitor.telegram_alert_state = True
+        monitor.telegram_alert_level = "RED"
+        monitor.api_alert_level = "GREEN"
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+
+        async def owner_sender(text):
+            self.assertEqual(monitor.send_to_alert_channel.await_count, 1)
+            self.assertTrue(monitor.alert_active)
+            self.owner_messages.append(text)
+
+        monitor.send_to_owner = owner_sender
+        for _ in range(3):
+            await monitor.reconcile_alert_state("retry")
+        self.assertEqual(len(self.owner_messages), 1)
+
+    def test_same_level_new_message_advances_cursor_and_rejects_older_clear(self):
+        now = datetime.now(timezone.utc)
+        self.assertTrue(monitor.record_telegram_alert_level("RED", SimpleNamespace(id=10, date=now)))
+        later = now + timedelta(seconds=20)
+        self.assertTrue(monitor.record_telegram_alert_level("RED", SimpleNamespace(id=12, date=later)))
+        self.assertFalse(monitor.record_telegram_alert_level("GREEN", SimpleNamespace(id=11, date=now)))
+        self.assertFalse(monitor.record_telegram_alert_level("GREEN", SimpleNamespace(id=13, date=now)))
+        self.assertEqual(monitor.telegram_alert_message_id, 12)
+        self.assertEqual(monitor.telegram_alert_message_at, later)
+
+    async def test_poll_recovers_red_despite_green_api(self):
+        monitor.api_alert_level = "GREEN"
+        monitor.telegram_alert_state = False
+        monitor.telegram_alert_level = "GREEN"
+        message = SimpleNamespace(
+            id=21571, date=datetime.now(timezone.utc),
+            text="🔴 УВАГА! У Києві оголошена ракетна загроза!",
+        )
+        client = SimpleNamespace(get_messages=AsyncMock(return_value=[message]))
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        with patch.object(monitor, "backfill_alert_feed", new=AsyncMock(return_value=0)), \
+             patch.object(monitor.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await monitor.alert_feed_poll_loop(client, {monitor.ALERT_TRIGGER_CHANNEL: "trigger"})
+        self.assertTrue(monitor.alert_active)
+        self.assertEqual(monitor.alert_level, "RED")
+
+    async def test_api_remains_fallback_without_telegram_observation(self):
+        monitor.api_alert_level = "YELLOW"
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        self.assertTrue(await monitor.reconcile_alert_state("API only"))
+        self.assertEqual(monitor.alert_level, "YELLOW")
 
     async def test_stale_alert_delivery_is_discarded(self):
         sent = []

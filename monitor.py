@@ -256,7 +256,11 @@ alert_active = False
 alert_started_at = None
 telegram_alert_state = None
 telegram_alert_level = None
+telegram_alert_message_id = 0
+telegram_alert_message_at = None
 api_alert_level = None
+last_alert_source_mismatch = None
+last_alert_mismatch_notice_at = None
 alert_level = "GREEN"
 last_send_time = 0
 last_message_time = time.time()
@@ -406,25 +410,70 @@ def seconds_until_next_summary(now=None) -> float:
     raise RuntimeError("No summary slot configured")
 
 async def reconcile_alert_state(source):
-    """Apply the webhook level, using Telegram until its first exact snapshot."""
-    if api_alert_level is not None:
-        return await apply_alert_state(
+    """An undated webhook snapshot cannot override an official Telegram event."""
+    if telegram_alert_state is not None:
+        result = await apply_alert_state(telegram_alert_state, source, level=telegram_alert_level)
+    elif api_alert_level is not None:
+        result = await apply_alert_state(
             api_alert_level != "GREEN", source, level=api_alert_level
         )
-    return await apply_alert_state(telegram_alert_state, source, level=telegram_alert_level)
+    else:
+        return False
+    # Publish the alert before doing any private discrepancy notification.
+    await report_alert_source_mismatch()
+    return result
+
+
+async def report_alert_source_mismatch():
+    global last_alert_source_mismatch, last_alert_mismatch_notice_at
+    mismatch = (telegram_alert_level, api_alert_level)
+    if None in mismatch or telegram_alert_level == api_alert_level:
+        last_alert_source_mismatch = None
+        return
+    if mismatch == last_alert_source_mismatch:
+        return
+    last_alert_source_mismatch = mismatch
+    print(
+        f"[ALERT SOURCE MISMATCH] telegram={telegram_alert_level} webhook={api_alert_level} "
+        f"telegram_id={telegram_alert_message_id} telegram_at={telegram_alert_message_at} "
+        "selected=Telegram reason=webhook_has_no_event_timestamp"
+    )
+    now = time.monotonic()
+    if last_alert_mismatch_notice_at is None or now - last_alert_mismatch_notice_at >= 900:
+        last_alert_mismatch_notice_at = now
+        await send_to_owner(
+            "⚠️ <b>Alert sources disagree</b>\n"
+            f"Official Telegram: {telegram_alert_level}; webhook snapshot: {api_alert_level}.\n"
+            "The latest explicit @KyivCityOfficial message controls the public state. "
+            "The webhook has no event timestamp and cannot override it.\n"
+            f"Source message: https://t.me/{ALERT_TRIGGER_CHANNEL}/{telegram_alert_message_id}"
+        )
 
 
 def record_telegram_alert_level(level, message):
-    """Store one authoritative Telegram level observation."""
+    """Store only a newer official message, including repeated same-level notices."""
     global telegram_alert_level, telegram_alert_state
+    global telegram_alert_message_id, telegram_alert_message_at
+    if level not in {"GREEN", "YELLOW", "RED"}:
+        raise ValueError(f"Invalid Telegram alert level: {level!r}")
+    if not isinstance(message.date, datetime) or message.date.tzinfo is None:
+        raise ValueError("Official Telegram alert is missing a timezone-aware timestamp")
+    if message.id <= telegram_alert_message_id or (
+        telegram_alert_message_at is not None and message.date < telegram_alert_message_at
+    ):
+        return False
     telegram_alert_level = level
     telegram_alert_state = level != "GREEN"
+    telegram_alert_message_id = message.id
+    telegram_alert_message_at = message.date
     state_store.persist_trigger_observation(telegram_alert_state, message.id, message.date)
     state_store.persist_operational_state("telegram_alert_level", level)
+    print(f"[TELEGRAM ALERT EVENT] id={message.id} at={utc_iso(message.date)} level={level}")
+    return True
 
 
 async def ukraine_alarm_state_loop():
-    """Make the official webhook snapshot authoritative for the public level."""
+    """Observe the webhook as a cross-check, never as a veto on official Telegram."""
     global api_alert_level
     previous = None
     error_streak = 0
@@ -841,8 +890,7 @@ async def alert_feed_poll_loop(client, source_entities):
             latest_triggers = await client.get_messages(source_entities[ALERT_TRIGGER_CHANNEL], limit=20)
             for trigger in latest_triggers:
                 observed = classify_kyiv_city_official_level(trigger.text or "")
-                if observed is not None and observed != telegram_alert_level:
-                    record_telegram_alert_level(observed, trigger)
+                if observed is not None and record_telegram_alert_level(observed, trigger):
                     print(f"[TRIGGER POLL] level={observed} id={trigger.id}")
                 if observed is not None:
                     await reconcile_alert_state(f"poll:@{ALERT_TRIGGER_CHANNEL}")
@@ -1984,8 +2032,8 @@ async def main():
             if channel == ALERT_TRIGGER_CHANNEL:
                 level = classify_kyiv_city_official_level(clean)
                 if level is not None:
-                    record_telegram_alert_level(level, event.message)
-                    print(f"Telegram trigger update: {level}")
+                    if record_telegram_alert_level(level, event.message):
+                        print(f"Telegram trigger update: {level}")
                     await reconcile_alert_state(f"@{ALERT_TRIGGER_CHANNEL}")
                     return
 
@@ -2032,7 +2080,7 @@ async def main():
         asyncio.create_task(health_loop())
         if UKRAINE_ALARM_STATE_URL:
             asyncio.create_task(ukraine_alarm_state_loop())
-            print("✅ UkraineAlarm webhook enabled as authoritative alert-level source")
+            print("✅ Alert authority: @KyivCityOfficial; UkraineAlarm webhook is a discrepancy cross-check")
         else:
             print("⚠️ UkraineAlarm webhook unavailable: Telegram controls alert state")
 

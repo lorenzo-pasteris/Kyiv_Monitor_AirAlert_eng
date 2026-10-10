@@ -397,7 +397,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f'<a href="{SUMMARY_CHAT_LINK}">Join Kyiv News →</a>', clear_text)
         self.assertNotIn("Back to NORMAL mode", clear_text)
 
-    async def test_official_api_level_overrides_stale_telegram_level(self):
+    async def test_undated_api_level_cannot_override_official_telegram_level(self):
         original = (
             monitor.api_alert_level,
             monitor.telegram_alert_level,
@@ -412,8 +412,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.alert_level = "YELLOW"
             monitor.alert_active = True
             await monitor.reconcile_alert_state("api-test")
-            self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, monitor.ALERT_LEVEL_MESSAGES["RED"]))
-            self.assertEqual(monitor.alert_level, "RED")
+            self.assertFalse(any(chat == ALERT_CHAT_ID for chat, _ in self.sent))
+            self.assertEqual(monitor.alert_level, "YELLOW")
         finally:
             (
                 monitor.api_alert_level,
