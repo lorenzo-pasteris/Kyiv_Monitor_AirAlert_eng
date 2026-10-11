@@ -44,6 +44,7 @@ from text_processing import (
     normalize_alert_for_dedup,  # noqa: F401 -- re-exported for persistence/routing tests
     normalize_alert_revision,
     parse_alert_gate_output,
+    parse_backup_novelty,
     parse_first_json_object,
     parse_ukraine_alarm_kyiv_level,  # noqa: F401 -- re-exported for routing regressions
     parse_ukraine_alarm_kyiv_state,  # noqa: F401 -- re-exported for routing regressions
@@ -407,6 +408,57 @@ def remember_published_alert(text, source, now=None):
     state_store.persist_operational_state(ALERT_PUBLICATION_HISTORY_KEY, json.dumps(list(recent_alert_messages)))
 
 
+def backup_publication_context(now=None):
+    """Bound shadow context to confirmed deliveries in this episode and last ten minutes."""
+    now = time.time() if now is None else now
+    try:
+        episode = state_store.load_operational_state("alert_episode_started_at") or ""
+        saved = json.loads(state_store.load_operational_state("backup_confirmed_v1") or "{}")
+        if saved.get("episode") != episode:
+            return []
+        entries = saved.get("entries", [])
+        valid = [item for item in entries if isinstance(item, dict)
+                 and isinstance(item.get("at"), (float, int)) and 0 <= now - item["at"] <= 600
+                 and all(isinstance(item.get(key), str) for key in ("id", "source", "text"))]
+        selected, characters = [], 0
+        for item in reversed(valid[-12:]):
+            if characters + len(item["text"]) > 2400:
+                break
+            selected.append(item)
+            characters += len(item["text"])
+        return list(reversed(selected))
+    except Exception as exc:
+        print(f"[BACKUP HISTORY UNAVAILABLE] {type(exc).__name__}")
+        return []
+
+
+def remember_confirmed_translation(translation, source):
+    entries = backup_publication_context()
+    entries.append({"id": f"p{time.time_ns()}", "at": time.time(), "source": source, "text": translation})
+    state_store.persist_operational_state("backup_confirmed_v1", json.dumps({
+        "episode": state_store.load_operational_state("alert_episode_started_at") or "",
+        "entries": entries[-12:],
+    }, ensure_ascii=False))
+
+
+def record_backup_shadow(text, raw, publications):
+    report = {"at": utc_iso(), "mode": "shadow", "source": text,
+              "evaluation": parse_backup_novelty(raw, text, publications), "compared_with": publications}
+    if not report["evaluation"]:
+        report["evaluation"] = [{"status": "UNCERTAIN", "reason": "no_valid_novelty_evaluation"}]
+    try:
+        history = json.loads(state_store.load_operational_state("backup_shadow_reports_v1") or "[]")
+        if not isinstance(history, list):
+            history = []
+    except Exception:
+        history = []
+    try:
+        state_store.persist_operational_state("backup_shadow_reports_v1", json.dumps((history + [report])[-100:], ensure_ascii=False))
+    except Exception as exc:
+        print(f"[BACKUP SHADOW STORAGE ERROR] {type(exc).__name__}")
+    print("[BACKUP SHADOW] " + json.dumps(report, ensure_ascii=False))
+
+
 def restore_published_alerts():
     recent_alert_messages.clear()
     raw = state_store.load_operational_state(ALERT_PUBLICATION_HISTORY_KEY)
@@ -747,22 +799,28 @@ async def apply_alert_state(desired, source, *, level=None, startup=False, publi
 async def translate_message(text, context=(), *, mixed_news_source=False):
     known_fragment = translate_known_terse_fragment(text)
     if known_fragment:
+        if mixed_news_source:
+            record_backup_shadow(text, "{}", backup_publication_context())
         return known_fragment
+    publications = backup_publication_context() if mixed_news_source else []
     for attempt in range(1, TRANSLATION_MAX_ATTEMPTS + 1):
         try:
             async with translation_slots:
                 r = await http_client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json={"model": MODEL, "max_tokens": 450 if mixed_news_source else 200,
+                    json={"model": MODEL, "max_tokens": 650 if mixed_news_source else 200,
                           "thinking": {"type": "disabled"}, "output_config": {"effort": "low"}, "messages": [{
-                        "role": "user", "content": build_alert_translation_prompt(text, context, mixed_news_source=mixed_news_source)
+                        "role": "user", "content": build_alert_translation_prompt(
+                            text, context, mixed_news_source=mixed_news_source, published_context=publications)
                     }]},
                     timeout=httpx.Timeout(15.0, connect=5.0),
                 )
             r.raise_for_status()
             result = r.json()["content"][0]["text"].strip()
             decision, translation, reason = parse_alert_gate_output(result, text, mixed_news_source=mixed_news_source)
+            if mixed_news_source:
+                record_backup_shadow(text, result, publications)
             if decision == "DROP":
                 print(f"[ALERT SEMANTIC DROP] reason={reason!r} input={text[:120]!r}")
                 return False
@@ -1875,6 +1933,10 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         delivered = bool(await safe_send(f"{indicator} {html.escape(translation)}"))
         if delivered:
             remember_published_alert(clean, source)
+            try:
+                remember_confirmed_translation(translation, source)
+            except Exception as exc:
+                print(f"[BACKUP HISTORY STORAGE ERROR] {type(exc).__name__}")
         return delivered
 
 

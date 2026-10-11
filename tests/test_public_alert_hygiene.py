@@ -6,10 +6,37 @@ from text_processing import (
     is_general_siren_announcement, parse_alert_gate_output,
     strip_general_siren_notices,
     strip_non_operational_news, translate_known_terse_fragment, build_alert_translation_prompt,
+    parse_backup_novelty,
 )
 
 
 class PublicAlertHygieneTests(unittest.TestCase):
+    def test_shadow_duplicate_annotation_never_suppresses_translation(self):
+        source = "Два реактивних на Козин"
+        publications = [{"id": "p1", "text": "2 jet-powered UAVs towards Kozyn"}]
+        payload = dict(decision="PUBLISH", operational_updates=[dict(
+            source=source, translation="Two jet-powered UAVs towards Kozyn",
+            novelty=dict(status="DUPLICATE", duplicate_of=["p1"], reason="same event"))])
+        raw = json.dumps(payload)
+        self.assertEqual(parse_backup_novelty(raw, source, publications)[0]["status"], "DUPLICATE")
+        self.assertEqual(parse_alert_gate_output(raw, source, mixed_news_source=True)[0], "PUBLISH")
+        for refs in (["invented"], [], None, [{}]):
+            payload["operational_updates"][0]["novelty"]["duplicate_of"] = refs
+            self.assertEqual(parse_backup_novelty(json.dumps(payload), source, publications)[0]["status"], "UNCERTAIN")
+            self.assertEqual(parse_alert_gate_output(json.dumps(payload), source, mixed_news_source=True)[0], "PUBLISH")
+
+    def test_shadow_prompt_is_backup_only_and_protects_new_threats(self):
+        publications = [{"id": "p1", "text": "2 drones towards Kozyn"}]
+        primary = build_alert_translation_prompt("Козин", published_context=publications)
+        backup = build_alert_translation_prompt("Козин", mixed_news_source=True, published_context=publications)
+        self.assertNotIn("OBSERVATION ONLY", primary)
+        self.assertNotIn('"p1"', primary)
+        self.assertIn("OBSERVATION ONLY", backup)
+        self.assertIn("A new missile launch", backup)
+        self.assertIn("negation or uncertainty", backup)
+        self.assertIn('"p1"', backup)
+        self.assertEqual(parse_backup_novelty("broken", "Козин", publications), [])
+
     def test_ballistic_warning_keeps_threat_and_shelter_not_sharing_requests(self):
         text = "🔴 Ballistic threat due to OTRK activity by the enemy\nTake shelter!\nWarn your loved ones!\nShare with friends, many people don't know where to find threat information!"
         self.assertEqual(clean_alert_public_text(text),

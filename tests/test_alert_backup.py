@@ -20,6 +20,37 @@ from text_processing import (
 
 
 class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shadow_context_uses_only_confirmed_translations_and_both_sources(self):
+        monitor.safe_send.side_effect = [False, True, True]
+        await monitor.handle_alert_message(self.text, self.primary)
+        self.assertEqual(monitor.backup_publication_context(), [])
+        await monitor.handle_alert_message(self.text, self.primary)
+        await monitor.handle_alert_message("Ракети з Курська", self.backup)
+        history = monitor.backup_publication_context()
+        self.assertEqual([item["source"] for item in history], [self.primary, self.backup])
+        self.assertTrue(all(item["text"] == "A drone is heading towards Kyiv" for item in history))
+        # Durable storage is independent from the short exact-duplicate deque.
+        monitor.recent_alert_messages.clear()
+        self.assertEqual(monitor.backup_publication_context(), history)
+        self.assertEqual(monitor.backup_publication_context(now=time.time() + 601), [])
+        monitor.state_store.persist_operational_state("alert_episode_started_at", "new episode")
+        self.assertEqual(monitor.backup_publication_context(), [])
+
+    async def test_shadow_context_and_report_storage_are_bounded(self):
+        for index in range(20):
+            monitor.remember_confirmed_translation(str(index) + "x" * 250, self.primary)
+        history = monitor.backup_publication_context()
+        self.assertLessEqual(len(history), 12)
+        self.assertLessEqual(sum(len(item["text"]) for item in history), 2400)
+        self.assertEqual(history[-1]["text"], "19" + "x" * 250)
+        monitor.record_backup_shadow(self.text, "{}", history)
+        reports = json.loads(monitor.state_store.load_operational_state("backup_shadow_reports_v1"))
+        self.assertEqual(reports[-1]["mode"], "shadow")
+        self.assertEqual(reports[-1]["evaluation"][0]["status"], "UNCERTAIN")
+        for bad in ("null", "invalid", '{"episode":"","entries":[null]}'):
+            monitor.state_store.persist_operational_state("backup_confirmed_v1", bad)
+            self.assertEqual(monitor.backup_publication_context(), [])
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
