@@ -49,6 +49,8 @@ from text_processing import (
     parse_ukraine_alarm_kyiv_state,  # noqa: F401 -- re-exported for routing regressions
     parse_ukraine_alarm_state,
     parse_ukraine_alarm_state_level,  # noqa: F401 -- re-exported for routing regressions
+    parse_utc_timestamp,
+    strip_non_operational_news,
     strip_mixed_alert_commentary,
     strip_general_siren_notices,
     translate_known_terse_fragment,
@@ -467,10 +469,14 @@ async def reconcile_alert_state(source):
     """Apply the newest dated level from official Telegram or the webhook receiver."""
     selected = select_alert_source()
     if selected == "telegram":
-        result = await apply_alert_state(telegram_alert_state, source, level=telegram_alert_level)
+        result = await apply_alert_state(
+            telegram_alert_state, source, level=telegram_alert_level,
+            event_at=telegram_alert_message_at,
+        )
     elif selected == "webhook":
         result = await apply_alert_state(
-            api_alert_level != "GREEN", f"{source} (selected: webhook)", level=api_alert_level
+            api_alert_level != "GREEN", f"{source} (selected: webhook)", level=api_alert_level,
+            event_at=api_alert_event_at,
         )
     else:
         return False
@@ -635,7 +641,7 @@ async def ukraine_alarm_state_loop():
         await asyncio.sleep(UKRAINE_ALARM_POLL_INTERVAL)
 
 
-def set_alert_state(new_state, reason):
+def set_alert_state(new_state, reason, *, event_at=None):
     """The only function allowed to mutate the effective alert state."""
     global alert_active, alert_started_at, alert_generation
     if new_state == alert_active:
@@ -645,6 +651,9 @@ def set_alert_state(new_state, reason):
     alert_started_at = time.monotonic() if new_state else None
     alert_generation += 1
     recent_alert_source_context.clear()
+    state_store.persist_operational_state(
+        "alert_episode_started_at", utc_iso(event_at or datetime.now(timezone.utc)) if new_state else ""
+    )
     state_store.persist_operational_state("alert_active", "1" if new_state else "0")
     print(
         f"[ALERT STATE] {previous} -> {new_state} reason={reason} "
@@ -666,7 +675,7 @@ async def drain_alert_delivery_tasks(timeout=5.0):
     print(f"[ALERT TASKS] completed={len(done)} cancelled={len(pending)}")
 
 
-async def apply_alert_state(desired, source, *, level=None, startup=False, public_message=None):
+async def apply_alert_state(desired, source, *, level=None, startup=False, public_message=None, event_at=None):
     """Serialize an alert transition and commit it only after delivery succeeds."""
     global alert_level, alert_transition_lock
     if desired is None:
@@ -675,6 +684,8 @@ async def apply_alert_state(desired, source, *, level=None, startup=False, publi
     desired_level = level or ("RED" if desired else "GREEN")
     if desired_level not in {"GREEN", "YELLOW", "RED"} or desired != (desired_level != "GREEN"):
         raise ValueError(f"Invalid alert state/level combination: {desired!r}/{desired_level!r}")
+    if event_at is not None and (not isinstance(event_at, datetime) or event_at.tzinfo is None):
+        raise ValueError("Alert event time must include a timezone")
     if alert_transition_lock is None:
         alert_transition_lock = asyncio.Lock()
     async with alert_transition_lock:
@@ -695,7 +706,11 @@ async def apply_alert_state(desired, source, *, level=None, startup=False, publi
             return True
 
         if startup:
-            set_alert_state(desired, f"startup:{source}")
+            # A stale Telegram snapshot must not reopen history before the saved API episode.
+            saved_episode = parse_utc_timestamp(state_store.load_operational_state("alert_episode_started_at"))
+            if desired and saved_episode and event_at:
+                event_at = max(event_at, saved_episode)
+            set_alert_state(desired, f"startup:{source}", event_at=event_at)
             alert_level = desired_level
             state_store.persist_operational_state("alert_level", alert_level)
             if desired:
@@ -719,7 +734,7 @@ async def apply_alert_state(desired, source, *, level=None, startup=False, publi
             )
             return False
 
-        set_alert_state(desired, source)
+        set_alert_state(desired, source, event_at=event_at)
         alert_level = desired_level
         state_store.persist_operational_state("alert_level", alert_level)
         if desired:
@@ -974,14 +989,6 @@ async def backfill_alert_feed(client, source_entities):
     """Recover tactical posts emitted after the trigger but before listener readiness."""
     if not alert_active:
         return 0
-    trigger_at_raw = state_store.load_operational_state("telegram_alert_message_at")
-    trigger_at = None
-    if trigger_at_raw:
-        try:
-            trigger_at = datetime.fromisoformat(trigger_at_raw)
-        except ValueError:
-            print(f"[ALERT BACKFILL] invalid trigger timestamp={trigger_at_raw!r}")
-
     delivered = 0
     for channel in ALERT_FEED_CHANNELS:
         cursor = state_store.get_alert_feed_cursor(channel)
@@ -1003,8 +1010,6 @@ async def backfill_alert_feed(client, source_entities):
             if not alert_active:
                 print(f"[ALERT BACKFILL STOPPED] @{channel} reason=clear")
                 return delivered
-            if trigger_at and message.date and message.date < trigger_at:
-                continue
             if await process_alert_feed_message(message, channel):
                 delivered += 1
     if delivered:
@@ -1795,8 +1800,10 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         return False
 
     clean = strip_general_siren_notices(clean_alert_source_text(clean))
+    if source == KYIV_INFO_CHANNEL:
+        clean = strip_non_operational_news(clean)
     if not clean:
-        print(f"[ALERT OFFICIAL-ONLY NOTICE] source=@{source}")
+        print(f"[ALERT FILTERED CONTENT] source=@{source} reason=no_tactical_content")
         return True
 
     original = clean
@@ -1875,11 +1882,20 @@ async def process_alert_feed_message(message, channel, *, edited=False):
     """Filter, deliver and checkpoint one ALERT-feed message."""
     if not alert_active:
         return False
+    episode_at = parse_utc_timestamp(state_store.load_operational_state("alert_episode_started_at"))
+    message_at = getattr(message, "date", None)
+    if episode_at and (not isinstance(message_at, datetime) or message_at.tzinfo is None
+                       or message_at < episode_at):
+        state_store.set_alert_feed_cursor(channel, max(state_store.get_alert_feed_cursor(channel), message.id))
+        print(f"[ALERT OUTSIDE EPISODE] @{channel} id={message.id} edited={edited}")
+        return False
     if not edited and state_store.is_stale_alert_feed_message(channel, message.id):
         print(f"[ALERT SKIPPED STALE] @{channel} id={message.id}")
         return False
 
     clean = strip_general_siren_notices(clean_alert_source_text(message.text or ""))
+    if channel == KYIV_INFO_CHANNEL:
+        clean = strip_non_operational_news(clean)
     cursor = state_store.get_alert_feed_cursor(channel)
     if (
         len(clean) < 5
@@ -2128,6 +2144,7 @@ async def main():
             f"@{ALERT_TRIGGER_CHANNEL}",
             level=telegram_alert_level,
             startup=True,
+            event_at=telegram_alert_message_at,
         )
 
         if is_war_monitor_poll_window():

@@ -5,10 +5,33 @@ from text_processing import (
     clean_alert_public_text, clean_alert_source_text, is_commentary_alert_message,
     is_general_siren_announcement, parse_alert_gate_output,
     strip_general_siren_notices,
+    strip_non_operational_news, translate_known_terse_fragment, build_alert_translation_prompt,
 )
 
 
 class PublicAlertHygieneTests(unittest.TestCase):
+    def test_pokh_is_places_not_ballistics(self):
+        for text in ("ПОХ - увага ⚠️ ✈️", "ПОХ — увага!", "ПОХ: увага"):
+            self.assertEqual(translate_known_terse_fragment(text),
+                             "Pozniaky, Osokorky, Kharkivskyi — stay alert.")
+        self.assertIsNone(translate_known_terse_fragment("ПОХ — увага, 2 дрони з півдня"))
+        self.assertIn("NEVER a ballistic warning", build_alert_translation_prompt("ПОХ"))
+
+    def test_mixed_news_preserves_live_tactical_update(self):
+        text = "Пожежу рятувальники локалізували.\n2 дрони на Бровари"
+        self.assertEqual(strip_non_operational_news(text), "2 дрони на Бровари")
+        for live in ("Вибух, але дрон наче вижив", "Загроза балістики з Курська",
+                     "Перші ракети Х101 залітають на Сумщину", "Щойно вибух, поруч триває ліквідація пожежі",
+                     "Дрон на Бровари, пожежу локалізували"):
+            self.assertEqual(strip_non_operational_news(live), live)
+
+    def test_retrospective_excerpt_is_not_allowed_by_parser(self):
+        source = "Пожежу рятувальники локалізували."
+        raw = json.dumps(dict(decision="PUBLISH", operational_updates=[
+            dict(source=source, translation="Firefighters contained the fire.")]))
+        with self.assertRaises(ValueError):
+            parse_alert_gate_output(raw, source, mixed_news_source=True)
+
     def test_mixed_trump_post_loses_siren_and_radar_and_news_drop_stays_drop(self):
         text = "Тим часом Трамп…\nЯ можу говорити найтупіші речі, — Трамп\n00:05 🟡 Білоцерківський район — повітряна тривога, жовтий рівень: Дронова загроза (жовтий рівень)\n✈️ радар 👉🏽 @kievinform_ua1"
         clean = strip_general_siren_notices(clean_alert_source_text(text))

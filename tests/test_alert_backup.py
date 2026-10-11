@@ -7,7 +7,7 @@ import tempfile
 import time
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -317,6 +317,76 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_generic_and_old_clear_notices_never_reach_model(self):
         for text in ("🔴 ТРИВОГА В КИЄВІ та області", "Відбій, відпочивайте"):
+            await monitor.handle_alert_message(text, self.backup)
+        monitor.translate_message.assert_not_awaited()
+        monitor.safe_send.assert_not_awaited()
+
+    async def test_current_episode_excludes_old_posts_and_edits_in_both_feeds(self):
+        start = datetime(2026, 10, 11, 8, 6, 49, tzinfo=timezone.utc)
+        monitor.state_store.persist_operational_state("alert_episode_started_at", start.isoformat())
+        # The previous official Telegram observation is deliberately older.
+        monitor.state_store.persist_operational_state("telegram_alert_message_at", (start - timedelta(hours=2)).isoformat())
+        for channel in (self.primary, self.backup):
+            old = FakeTelegramMessage(1, self.text, start - timedelta(minutes=30))
+            for edited in (False, True):
+                self.assertFalse(await monitor.process_alert_feed_message(old, channel, edited=edited))
+            for invalid in (None, start.replace(tzinfo=None)):
+                self.assertFalse(await monitor.process_alert_feed_message(
+                    FakeTelegramMessage(2, self.text, invalid), channel))
+        monitor.translate_message.assert_not_awaited()
+        self.assertTrue(await monitor.process_alert_feed_message(
+            FakeTelegramMessage(3, self.text, start), self.primary))
+        monitor.safe_send.assert_awaited_once()
+
+    async def test_recovery_uses_same_episode_filter(self):
+        start = datetime.now(timezone.utc)
+        monitor.state_store.persist_operational_state("alert_episode_started_at", start.isoformat())
+        client = AsyncMock()
+        client.get_messages.side_effect = [[], [
+            FakeTelegramMessage(2, self.text, start + timedelta(seconds=1)),
+            FakeTelegramMessage(1, "Перші ракети Х101 залітають на Сумщину", start - timedelta(minutes=20)),
+        ]]
+        self.assertEqual(await monitor.backfill_alert_feed(client, {c: c for c in monitor.ALERT_FEED_CHANNELS}), 1)
+        monitor.translate_message.assert_awaited_once_with(self.text, context=[], mixed_news_source=True)
+
+    async def test_failed_start_does_not_commit_episode_and_next_cycle_gets_new_boundary(self):
+        start = datetime(2026, 10, 11, 8, 6, 49, tzinfo=timezone.utc)
+        self.patch(monitor, "alert_active", False)
+        self.patch(monitor, "alert_transition_lock", asyncio.Lock())
+        self.patch(monitor, "send_to_alert_channel", AsyncMock(return_value=False))
+        self.assertFalse(await monitor.apply_alert_state(True, "failed", event_at=start))
+        self.assertFalse(monitor.state_store.load_operational_state("alert_episode_started_at"))
+        monitor.send_to_alert_channel.return_value = True
+        await monitor.apply_alert_state(True, "retry", event_at=start)
+        await monitor.apply_alert_state(False, "clear", event_at=start + timedelta(minutes=30))
+        next_start = start + timedelta(hours=2)
+        await monitor.apply_alert_state(True, "new", event_at=next_start)
+        self.assertEqual(monitor.parse_utc_timestamp(monitor.state_store.load_operational_state("alert_episode_started_at")), next_start)
+
+    async def test_episode_follows_selected_api_and_survives_level_changes(self):
+        start = datetime(2026, 10, 11, 8, 6, 49, tzinfo=timezone.utc)
+        self.patch(monitor, "alert_active", False)
+        self.patch(monitor, "alert_transition_lock", asyncio.Lock())
+        self.patch(monitor, "send_to_alert_channel", AsyncMock(return_value=True))
+        for name, value in dict(telegram_alert_state=False, telegram_alert_level="GREEN",
+                                telegram_alert_message_at=start - timedelta(hours=2),
+                                api_alert_level="YELLOW", api_alert_event_at=start).items():
+            self.patch(monitor, name, value)
+        self.assertTrue(await monitor.reconcile_alert_state("test"))
+        self.assertEqual(monitor.parse_utc_timestamp(monitor.state_store.load_operational_state("alert_episode_started_at")), start)
+        await monitor.apply_alert_state(True, "red", level="RED", event_at=start + timedelta(minutes=10))
+        self.assertEqual(monitor.parse_utc_timestamp(monitor.state_store.load_operational_state("alert_episode_started_at")), start)
+        monitor.alert_active = False  # Simulate restart with an older Telegram snapshot.
+        await monitor.apply_alert_state(True, "restore", startup=True, level="YELLOW", event_at=start - timedelta(hours=1))
+        self.assertEqual(monitor.parse_utc_timestamp(monitor.state_store.load_operational_state("alert_episode_started_at")), start)
+        await monitor.apply_alert_state(False, "clear", event_at=start + timedelta(hours=1))
+        self.assertFalse(monitor.state_store.load_operational_state("alert_episode_started_at"))
+
+    async def test_backup_retrospective_news_never_reaches_model(self):
+        for text in (
+            "Якщо у вас є малі діти — краще виїхати з Києва: зі світлом буде складно, — директор ЦДЕ Олександр Харченко.",
+            "Київщина: триває ліквідація пожежі внаслідок атаки рф на промисловому підприємстві у Бучанському районі.\nСьогодні вночі ворог обстріляв промислове підприємство. Пожежу рятувальники локалізували, ліквідація триває.",
+        ):
             await monitor.handle_alert_message(text, self.backup)
         monitor.translate_message.assert_not_awaited()
         monitor.safe_send.assert_not_awaited()

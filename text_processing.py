@@ -313,6 +313,30 @@ def strip_general_siren_notices(text: str) -> str:
     return text.strip() if len(kept) == len(parts) else "\n".join(kept).strip()
 
 
+def strip_non_operational_news(text: str) -> str:
+    """Remove standalone service commentary and retrospective fire-response clauses."""
+    parts = re.split(r"\n+|(?<=[.!?])\s+", text)
+    kept = []
+    for part in parts:
+        # A mixed clause with an explicit live threat still belongs to the semantic gate.
+        live = re.search(
+            r"(?i)\b(?:дрон\w*|бпла|ракет\w*|баліст\w*)\b.*"
+            r"\b(?:лет\w*|літа\w*|руха\w*|наближа\w*|на\s|пуск\w*|загроз\w*)"
+            r"|\b(?:зараз|щойно|новий|нова)\b.*\b(?:вибух\w*|приліт\w*|пуск\w*)", part,
+        )
+        services = re.search(r"(?i)\b(?:світл\w*|електр\w*)\b", part) and re.search(
+            r"(?i)\b(?:директор\w*|експерт\w*|краще виїхати|буде складно|прогноз\w*)\b", part,
+        )
+        aftermath = re.search(
+            r"(?i)\b(?:ліквідаці\w*|локалізува\w*|рятувальник\w*|гасіння)\b.*\bпожеж\w*"
+            r"|\bпожеж\w*\b.*\b(?:локалізува\w*|ліквідаці\w*|рятувальник\w*|гасіння)\b"
+            r"|\b(?:сьогодні вночі|минулої ночі|вчора)\b.*\b(?:обстріля\w*|атакува\w*)\b", part,
+        )
+        if live or not (services or aftermath):
+            kept.append(part)
+    return text.strip() if len(kept) == len(parts) else "\n".join(kept).strip()
+
+
 def altitude_update_key(text: str) -> str | None:
     """Recognize complete, equivalent descent reports without discarding extra facts."""
     normalized = normalize_alert_revision(text)
@@ -452,6 +476,10 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "One additional DROP category is permitted: NON_OPERATIONAL_NEWS. Use it for ordinary politics, "
         "budgets, winter preparations, services, historical footage or retrospective news without a "
         "current operational update. Mentioning Kyiv or quoting someone about missiles does not make "
+        "ordinary news tactical. Retrospective damage reports, ongoing cleanup/firefighting after "
+        "an earlier attack, and electricity forecasts or advice to leave the city belong to NEWS, "
+        "not this live alert feed. Ongoing firefighting is not an ongoing incoming attack. "
+        "For mixed posts retain new live threats, not the retrospective material. Mentioning Kyiv does not make "
         "ordinary news tactical. Provide a verbatim evidence excerpt. Never use this category for "
         "live threats, launches, transit, trajectories, explosions, impacts, interceptions or brief "
         "operational follow-ups. Mixed news with a current operational warning must PUBLISH only the "
@@ -499,6 +527,8 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
         "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
         "Mandatory alert glossary:\n"
+        "- ПОХ = Pozniaky, Osokorky, Kharkivskyi (Kyiv neighbourhoods), NEVER a ballistic warning. "
+        "ПОХ - увага = Pozniaky, Osokorky, Kharkivskyi — stay alert.\n"
         "- ракета / ракети = missile(s), NEVER cruise missile(s) unless the source says крилата\n"
         "- Х-101 / Х101 = Kh-101 missile(s), never X101\n"
         "- крилата ракета / крилаті / крилатих = cruise missile(s), never 'winged'\n"
@@ -566,6 +596,9 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
 def translate_known_terse_fragment(text: str) -> str | None:
     """Translate common one-line tactical fragments without model interpretation."""
     normalized = re.sub(r"[.!…\s]+$", "", text.strip()).casefold()
+    if normalize_alert_for_dedup(text) in {"пох", "пох увага"}:
+        places = "Pozniaky, Osokorky, Kharkivskyi"
+        return places + (" — stay alert." if "увага" in normalized else "")
     return {
         "дарниця": "Darnytsia",
         "стоянка": "Stoianka",
@@ -695,6 +728,7 @@ def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_sourc
                     or not is_valid_alert_translation(output)):
                 raise ValueError("Operational excerpt must be grounded in the current source")
             if (strip_general_siren_notices(excerpt) != excerpt.strip()
+                    or strip_non_operational_news(excerpt) != excerpt.strip()
                     or is_commentary_alert_message(excerpt) or is_pure_ad(excerpt)):
                 raise ValueError("Excluded content in operational excerpt")
             translations.append(correct_known_translation_errors(excerpt, output.strip()))
