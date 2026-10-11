@@ -10,6 +10,16 @@ from text_processing import (
 
 
 class PublicAlertHygieneTests(unittest.TestCase):
+    def test_ballistic_warning_keeps_threat_and_shelter_not_sharing_requests(self):
+        text = "🔴 Ballistic threat due to OTRK activity by the enemy\nTake shelter!\nWarn your loved ones!\nShare with friends, many people don't know where to find threat information!"
+        self.assertEqual(clean_alert_public_text(text),
+                         "Ballistic threat due to OTRK activity by the enemy\nTake shelter!")
+        source = "Загроза балістики через активність ОТРК ворога! В укриття! Попередьте близьких! Поділіться з друзями!"
+        self.assertEqual(clean_alert_source_text(source),
+                         "Загроза балістики через активність ОТРК ворога! В укриття!")
+        self.assertEqual(clean_alert_source_text("Share with friends! New missiles towards Kyiv!"),
+                         "New missiles towards Kyiv!")
+
     def test_pokh_is_places_not_ballistics(self):
         for text in ("ПОХ - увага ⚠️ ✈️", "ПОХ — увага!", "ПОХ: увага"):
             self.assertEqual(translate_known_terse_fragment(text),

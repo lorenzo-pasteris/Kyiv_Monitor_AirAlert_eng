@@ -177,6 +177,13 @@ def clean_text(text: str) -> str:
 def clean_alert_source_text(text: str) -> str:
     """Remove promotional lines from alert-source text before filtering and translation."""
     clean = clean_text(text)
+    clean = re.sub(
+        r"(?im)(?:^|(?<=[.!?]))[^\w\n]*"
+        r"(?:(?:share|forward|repost)\b|warn\s+(?:your\s+)?(?:loved ones|friends|family)\b"
+        r"|(?:пошир\w*|поділіться|перешліть|репост\w*)\b"
+        r"|(?:попередьте|попереджайте|предупредите)\s+(?:(?:своїх|своих)\s+)?(?:рідн\w*|близ\w*|друз\w*))"
+        r"[^.!?\n]*(?:[.!?]+|$)", "", clean,
+    )
     promo_line_patterns = (
         r"(?i)\b(?:надіслати новину|написати нам|підписат\w*|підпиш\w*|підписуй\w*)\b",
         r"(?i)\b(?:send news|report news|subscrib\w*|watch live|live stream|join us)\b",
