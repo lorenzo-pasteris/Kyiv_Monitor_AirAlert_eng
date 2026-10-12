@@ -20,6 +20,41 @@ from text_processing import (
 
 
 class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
+    async def test_four_character_update_passes_actual_live_handler_and_recovery(self):
+        tree = ast.parse(Path(monitor.__file__).read_text())
+        callback = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+                        and node.name == "production_source_handler")
+        callback.decorator_list = []
+        namespace = dict(vars(monitor), channel_by_chat_id={42: self.primary, 43: self.backup})
+        exec(compile(ast.Module(body=[callback], type_ignores=[]), monitor.__file__, "exec"), namespace)
+        monitor.translate_message.return_value = "It fell."
+        for chat_id, source in ((42, self.primary), (43, self.backup)):
+            monitor.recent_alert_messages.clear()
+            message = FakeTelegramMessage(chat_id, "Впав", datetime.now(timezone.utc))
+            await namespace["production_source_handler"](types.SimpleNamespace(chat_id=chat_id, message=message))
+            self.assertEqual(monitor.state_store.get_alert_feed_cursor(source), chat_id)
+        self.assertEqual(monitor.safe_send.await_count, 2)
+        monitor.recent_alert_messages.clear()
+        client = AsyncMock()
+        client.get_messages.side_effect = [[FakeTelegramMessage(100, "Впав", datetime.now(timezone.utc))], []]
+        self.assertEqual(await monitor.backfill_alert_feed(client, {c: c for c in monitor.ALERT_FEED_CHANNELS}), 1)
+        self.assertEqual(monitor.safe_send.await_count, 3)
+
+    async def test_source_questions_do_not_reach_model_or_context(self):
+        for source in (self.primary, self.backup):
+            message = FakeTelegramMessage(1, "Де дрон?", datetime.now(timezone.utc))
+            self.assertFalse(await monitor.process_alert_feed_message(message, source))
+        monitor.translate_message.assert_not_awaited()
+        self.assertFalse(monitor.recent_alert_source_context)
+        message = FakeTelegramMessage(2, "Де дрон? 2 ракети на Київ", datetime.now(timezone.utc))
+        await monitor.process_alert_feed_message(message, self.primary)
+        self.assertEqual(monitor.translate_message.call_args.args[0], "2 ракети на Київ")
+
+    async def test_final_question_guard_preserves_only_declarative_facts(self):
+        monitor.translate_message.return_value = "Where is the drone? It disappeared."
+        await monitor.handle_alert_message("Дрон зник", self.primary)
+        monitor.safe_send.assert_awaited_once_with("🟡 It disappeared.")
+
     async def test_shadow_context_uses_only_confirmed_translations_and_both_sources(self):
         monitor.safe_send.side_effect = [False, True, True]
         await monitor.handle_alert_message(self.text, self.primary)

@@ -215,9 +215,16 @@ def clean_alert_source_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
 
 
+def strip_alert_questions(text: str) -> str:
+    """Remove complete interrogative fragments; never turn questions into assertions."""
+    parts = re.split(r"\n+|(?<=[.!?？！⁇⁈⁉])\s+", text)
+    kept = [part for part in parts if not re.search(r"[?？⁇⁈⁉❓❔]", part)]
+    return text.strip() if len(parts) == len(kept) else "\n".join(kept).strip()
+
+
 def clean_alert_public_text(text: str) -> str:
     """Strip source decorations and destinations before adding the one state indicator."""
-    text = clean_alert_source_text(text)
+    text = strip_alert_questions(clean_alert_source_text(text))
     text = re.sub(
         r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0E\uFE0F\u200D\u20E3"
         r"\u00A9\u00AE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA"
@@ -542,6 +549,7 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "always PUBLISH. Preserve separately the launch origin, transit region and stated destination, "
         "including the source prepositions, and never invent a trajectory.\n\n"
         "For PUBLISH, translate the operational update into concise, natural English for civilians "
+        "without any questions. Never invent a question or convert a source question into an assertion. "
         "in Kyiv. Use context only to resolve an omitted subject or referent in the current message. "
         "Never add a weapon type, "
         "destination, attribution, channel name, explanation, or missing context. Output ONLY English "
@@ -618,6 +626,10 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
 def translate_known_terse_fragment(text: str) -> str | None:
     """Translate common one-line tactical fragments without model interpretation."""
     normalized = re.sub(r"[.!…\s]+$", "", text.strip()).casefold()
+    if re.search(r"[?？⁇⁈⁉❓❔]", text):
+        return None
+    if normalize_alert_for_dedup(text) == "впав":
+        return "It fell."
     if normalize_alert_for_dedup(text) in {"пох", "пох увага"}:
         places = "Pozniaky, Osokorky, Kharkivskyi"
         return places + (" — stay alert." if "увага" in normalized else "")
@@ -663,7 +675,7 @@ def is_translation_meta_output(text: str) -> bool:
 
 def is_valid_alert_translation(text: str) -> bool:
     """Only publish a non-meta English result; Ukrainian/Russian belongs in Ops, never public."""
-    return not re.search(r"[А-Яа-яІіЇїЄєҐґ]", text or "") and not is_translation_meta_output(text)
+    return not re.search(r"[А-Яа-яІіЇїЄєҐґ?？⁇⁈⁉❓❔]", text or "") and not is_translation_meta_output(text)
 
 
 def correct_known_translation_errors(source_text: str, translation: str) -> str:

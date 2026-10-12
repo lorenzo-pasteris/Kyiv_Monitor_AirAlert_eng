@@ -7,10 +7,28 @@ from text_processing import (
     strip_general_siren_notices,
     strip_non_operational_news, translate_known_terse_fragment, build_alert_translation_prompt,
     parse_backup_novelty,
+    strip_alert_questions, is_valid_alert_translation,
 )
 
 
 class PublicAlertHygieneTests(unittest.TestCase):
+    def test_questions_are_removed_as_clauses_never_as_punctuation(self):
+        self.assertEqual(strip_alert_questions("Де дрон? Біля Києва чисто."), "Біля Києва чисто.")
+        self.assertEqual(strip_alert_questions("Ракета?"), "")
+        self.assertEqual(strip_alert_questions("2.5 km. Not shot down."), "2.5 km. Not shot down.")
+        for question in ("Where is it?", "Shot down？", "Shot down❓", "Missiles⁉"):
+            self.assertFalse(is_valid_alert_translation(question))
+            self.assertEqual(clean_alert_public_text(question), "")
+        raw = json.dumps(dict(decision="PUBLISH", translation="Where is the other drone?"))
+        with self.assertRaises(ValueError):
+            parse_alert_gate_output(raw, "Летів дрон на Вишгород")
+
+    def test_fell_is_not_shot_down_or_impact(self):
+        for source in ("Впав", "Впав!", "Впав 💥"):
+            self.assertEqual(translate_known_terse_fragment(source), "It fell.")
+        self.assertIsNone(translate_known_terse_fragment("Впав?"))
+        self.assertIsNone(translate_known_terse_fragment("Не впав"))
+
     def test_shadow_duplicate_annotation_never_suppresses_translation(self):
         source = "Два реактивних на Козин"
         publications = [{"id": "p1", "text": "2 jet-powered UAVs towards Kozyn"}]

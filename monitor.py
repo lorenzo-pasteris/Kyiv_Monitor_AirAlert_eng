@@ -54,6 +54,7 @@ from text_processing import (
     strip_non_operational_news,
     strip_mixed_alert_commentary,
     strip_general_siren_notices,
+    strip_alert_questions,
     translate_known_terse_fragment,
     utc_iso,
 )
@@ -1883,6 +1884,10 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
             f"Original: {html.escape(clean[:1000])}"
         ))
 
+    clean = strip_alert_questions(clean)
+    if not clean:
+        print(f"[ALERT FILTERED QUESTION] source=@{source}")
+        return True
     if not should_publish_alert(clean, source):
         return True
 
@@ -1956,12 +1961,12 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         print(f"[ALERT SKIPPED STALE] @{channel} id={message.id}")
         return False
 
-    clean = strip_general_siren_notices(clean_alert_source_text(message.text or ""))
+    clean = strip_alert_questions(strip_general_siren_notices(clean_alert_source_text(message.text or "")))
     if channel == ALERT_BACKUP_CHANNEL:
         clean = strip_non_operational_news(clean)
     cursor = state_store.get_alert_feed_cursor(channel)
     if (
-        len(clean) < 5
+        not any(char.isalnum() for char in clean)
         or is_non_operational_alert_message(clean)
         or is_pure_ad(clean)
         or is_general_siren_announcement(clean)
@@ -2255,12 +2260,14 @@ async def main():
             last_message_time = time.time()
 
             raw_text = event.message.text or ""
-            if not raw_text or len(raw_text.strip()) < 5:
+            if not raw_text.strip():
                 return
 
             channel = channel_by_chat_id.get(event.chat_id)
             if channel is None:
                 print(f"[IGNORED UNKNOWN CHAT] chat_id={event.chat_id}")
+                return
+            if channel not in ALERT_FEED_CHANNELS and len(raw_text.strip()) < 5:
                 return
             clean = clean_alert_source_text(raw_text) if channel in ALERT_FEED_CHANNELS else clean_text(raw_text)
 
