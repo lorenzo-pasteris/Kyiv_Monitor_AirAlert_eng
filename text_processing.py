@@ -139,6 +139,9 @@ ALERT_TERSE_FOLLOWUP_KEYWORDS = [
     "рембаз", "осещин", "тец-6", "березан", "українк",
 ]
 COMMENTARY_PATTERNS = (
+    r"\b(?:саме цікаве|найцікавіше|що цікаво|most interesting|what(?:'s| is) most interesting)\b"
+    r"[^.!?\n]*\b(?:дали|оголосили|видали|issued|announced)\b[^.!?\n]*"
+    r"\b(?:загроз\w*|тривог\w*|threat|warning|alert)\b",
     r"\b(?:в теорії|у теорії|по ідеї|теоретично|in theory|theoretically)\b[^.!?\n]*\b(?:відбій|all[ -]clear)\b",
     r"\b(?:відбій|all[ -]clear)\b[^.!?\n]*\b(?:мав би|має бути|should come|should happen|should be issued)\b",
     r"\b(?:не знаю|я думаю|мені здається|не розумію|чому|навіщо)\b",
@@ -617,8 +620,11 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "messages extract only those facts, preserving attribution and uncertainty; remove editorial framing. "
         "For example, commentary that someone panicked and issued yellow despite no drones is DROP; "
         "discussion of US intelligence and who failed to track launches is DROP. 'Most interesting, the US "
-        "just issued a threat from Bryansk' contains a current attributed warning: extract that warning, "
-        "not the editorial introduction, and do not upgrade it to official confirmation.\n\n"
+        "just issued a threat from Bryansk' is also EDITORIAL_COMMENTARY: DROP the entire message; "
+        "never extract a new threat from commentary about who issued or failed to issue a warning. "
+        "This is distinct from a direct operational report such as 'Threat from Bryansk!' or "
+        "'New missile launches from Bryansk', which must PUBLISH. Do not blacklist an authority "
+        "or location: distinguish commentary on warning management from direct threat reporting.\n\n"
         "Return exactly one JSON object and nothing else. For DROP provide a valid English translation. "
         "For EVERY PUBLISH use operational_updates, with no top-level translation. "
         "For DROP, evidence must be an exact non-empty excerpt from the "

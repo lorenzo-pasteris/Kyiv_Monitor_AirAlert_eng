@@ -26,9 +26,9 @@ class PublicAlertHygieneTests(unittest.TestCase):
                                                         require_excerpts=True)[0], "DROP")
 
     def test_both_feeds_require_grounded_operational_extraction(self):
-        source = "Саме цікаве що США тільки що дали загрозу з Брянська"
-        excerpt = "США тільки що дали загрозу з Брянська"
-        output = "The US has just issued a warning of a threat from Bryansk."
+        source = "Новини політики. Два дрони на Бровари"
+        excerpt = "Два дрони на Бровари"
+        output = "Two drones towards Brovary."
         for backup in (False, True):
             payload = dict(decision="PUBLISH", translation="Unwanted editorial introduction.")
             with self.assertRaises(ValueError):
@@ -41,6 +41,26 @@ class PublicAlertHygieneTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parse_alert_gate_output(json.dumps(payload), source, mixed_news_source=backup,
                                         require_excerpts=True)
+
+    def test_comment_on_warning_issuer_cannot_be_salvaged_as_threat(self):
+        for source in (
+            "Саме цікаве що США тільки що дали загрозу з Брянська",
+            "Найцікавіше що вони оголосили тривогу",
+            "Exactly what's most interesting is that the US just issued a threat from Bryansk.",
+        ):
+            self.assertTrue(is_commentary_alert_message(source))
+            raw = json.dumps(dict(decision="PUBLISH", operational_updates=[dict(
+                source=source, translation="Threat from Bryansk.")]))
+            for backup in (False, True):
+                self.assertEqual(parse_alert_gate_output(raw, source, mixed_news_source=backup,
+                                 require_excerpts=True), ("DROP", "", "EDITORIAL_COMMENTARY"))
+        for source in ("Загроза з Брянська!!", "Нові пуски ракет з Брянська"):
+            self.assertFalse(is_commentary_alert_message(source))
+            raw = json.dumps(dict(decision="PUBLISH", operational_updates=[dict(
+                source=source, translation="Threat from Bryansk.")]))
+            for backup in (False, True):
+                self.assertEqual(parse_alert_gate_output(raw, source, mixed_news_source=backup,
+                                 require_excerpts=True)[0], "PUBLISH")
 
     def test_protected_primary_drop_does_not_require_publish_schema(self):
         source = "Перші ракети Х101 залітають на Сумщину"
