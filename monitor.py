@@ -2,7 +2,7 @@
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: explicit alert templates from @KyivCityOfficial
 - Normal mode: scheduled analysis of news channels published in the news group
-- Alert mode: primary @kyivnebomonitoring plus filtered @kievinfo_kyiv backup
+- Alert mode: primary @kyivnebomonitoring plus filtered @kyiv_novyny_24 backup
 - Daily situation report: only the strict #обстановка post from @war_monitor
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -96,6 +96,7 @@ ADMIN_USER_IDS = {
 }
 # --- Channels ---
 KYIV_INFO_CHANNEL = "kievinfo_kyiv"
+ALERT_BACKUP_CHANNEL = "kyiv_novyny_24"
 AMK_CHANNEL = "AMK_Mapping"
 INSIDER_UA_CHANNEL = "insiderukr"
 KYIV_CITY_OFFICIAL_CHANNEL = "KyivCityOfficial"
@@ -122,7 +123,7 @@ ALL_CONTENT_CHANNELS = [
     UKRENERGO_CHANNEL,
     UKRZALINFO_CHANNEL,
 ]
-ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL, KYIV_INFO_CHANNEL]
+ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL, ALERT_BACKUP_CHANNEL]
 
 SUMMARY_HOURS = (1, 7, 9, 11, 13, 15, 17, 19, 21, 23)
 SUMMARY_INTERVAL = 180 if TEST_MODE else 2 * 3600
@@ -1858,7 +1859,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         return False
 
     clean = strip_general_siren_notices(clean_alert_source_text(clean))
-    if source == KYIV_INFO_CHANNEL:
+    if source == ALERT_BACKUP_CHANNEL:
         clean = strip_non_operational_news(clean)
     if not clean:
         print(f"[ALERT FILTERED CONTENT] source=@{source} reason=no_tactical_content")
@@ -1887,7 +1888,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
 
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     try:
-        if source == KYIV_INFO_CHANNEL:
+        if source == ALERT_BACKUP_CHANNEL:
             translation = await translate_message(clean[:1500], context=context, mixed_news_source=True)
         else:
             translation = await translate_message(clean[:1500], context=context)
@@ -1956,7 +1957,7 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         return False
 
     clean = strip_general_siren_notices(clean_alert_source_text(message.text or ""))
-    if channel == KYIV_INFO_CHANNEL:
+    if channel == ALERT_BACKUP_CHANNEL:
         clean = strip_non_operational_news(clean)
     cursor = state_store.get_alert_feed_cursor(channel)
     if (

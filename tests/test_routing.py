@@ -616,9 +616,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Вишгород жовтогарячий 🟧, дорозвідка.\nТроєщина та Бровари червоний 🟥.",
         )
 
-    async def test_kyiv_info_is_backup_and_remains_a_news_source(self):
-        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring", "kievinfo_kyiv"])
+    async def test_novyny_is_backup_and_kyiv_info_remains_news_only(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring", "kyiv_novyny_24"])
         self.assertIn("kievinfo_kyiv", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("kievinfo_kyiv", monitor.ALERT_FEED_CHANNELS)
+        self.assertNotIn("kyiv_novyny_24", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("kyivnebomonitoring", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("KyivDeZagrozaCHAT", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
@@ -648,7 +650,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         entities = {
             monitor.ALERT_FEED_CHANNEL: "alert-entity",
-            monitor.KYIV_INFO_CHANNEL: "backup-entity",
+            monitor.ALERT_BACKUP_CHANNEL: "backup-entity",
             monitor.WAR_MONITOR_CHANNEL: "war-monitor-entity",
         }
         await monitor.ensure_live_source_membership(FakeClient(), entities)

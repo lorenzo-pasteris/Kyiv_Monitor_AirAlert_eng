@@ -70,7 +70,7 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         monitor.recent_alert_messages.clear()
         monitor.recent_alert_source_context.clear()
         self.primary = monitor.ALERT_FEED_CHANNEL
-        self.backup = monitor.KYIV_INFO_CHANNEL
+        self.backup = monitor.ALERT_BACKUP_CHANNEL
         self.text = "2 дрони рухаються через Бровари у напрямку Києва"
 
     def patch(self, obj, name, value):
@@ -229,7 +229,7 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await monitor.process_alert_feed_message(message, self.backup))
         monitor.translate_message.assert_not_awaited()
 
-    async def test_actual_live_handler_keeps_backup_news_in_both_modes(self):
+    async def test_actual_live_handler_separates_backup_from_news_in_both_modes(self):
         # Exercise the actual nested callback without starting main/Telethon.
         tree = ast.parse(Path(monitor.__file__).read_text())
         callback = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
@@ -238,15 +238,16 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         code = compile(ast.Module(body=[callback], type_ignores=[]), monitor.__file__, "exec")
         for active in (True, False):
             monitor.alert_active = active
-            namespace = dict(vars(monitor), channel_by_chat_id={42: self.backup})
+            namespace = dict(vars(monitor), channel_by_chat_id={42: self.backup, 43: monitor.KYIV_INFO_CHANNEL})
             exec(code, namespace)
             message = FakeTelegramMessage(100 + int(active), self.text, datetime.now(timezone.utc))
             event = types.SimpleNamespace(chat_id=42, message=message)
             await namespace["production_source_handler"](event)
+            await namespace["production_source_handler"](types.SimpleNamespace(chat_id=43, message=message))
         self.assertEqual(monitor.safe_send.await_count, 1)
         with sqlite3.connect(monitor.state_store.CATEGORY_STATS_DB_PATH) as connection:
             rows = connection.execute("SELECT channel, message_id FROM normal_messages ORDER BY message_id").fetchall()
-        self.assertEqual(rows, [(self.backup, 100), (self.backup, 101)])
+        self.assertEqual(rows, [(monitor.KYIV_INFO_CHANNEL, 100), (monitor.KYIV_INFO_CHANNEL, 101)])
 
     async def test_no_longer_observed_is_not_general_all_clear(self):
         for text in ("Не спостерігається", "Не спостережень", "Не спостерігаються"):
