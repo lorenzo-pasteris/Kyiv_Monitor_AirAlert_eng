@@ -890,7 +890,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("closed categories", prompt)
         self.assertIn("When uncertain, PUBLISH", prompt)
         self.assertIn("A bare Kyiv district or immediate-approach place is always tactical", prompt)
-        self.assertIn("Always provide a valid English translation", prompt)
+        self.assertIn("For EVERY PUBLISH use operational_updates", prompt)
         self.assertIn("2 реактивних БпЛА наближаються до Київщини", prompt)
         self.assertTrue(prompt.endswith("Боярка, Вишневе"))
 

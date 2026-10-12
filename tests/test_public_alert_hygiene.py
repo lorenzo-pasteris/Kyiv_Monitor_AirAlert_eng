@@ -12,6 +12,42 @@ from text_processing import (
 
 
 class PublicAlertHygieneTests(unittest.TestCase):
+    def test_editorial_drops_are_not_rescued_by_threat_keywords(self):
+        cases = (
+            ("Міхалич з перепугу дав жовту тривогу, хоча дронів немає", "EDITORIAL_COMMENTARY"),
+            ("Трохи уточню, США нам не перестали давати розвіддані як деякі пишуть, але в цей момент той хто був відповідальний за відстеження пусків ДУЖЕ СИЛЬНО затупив", "EDITORIAL_COMMENTARY"),
+            ("О 22.10 ворог завдав удару по столиці попередньо 6-ма балістичними ракетами по кількох районах Києва. Інформації щодо пусків з території противника не поступало. Причини встановлюються.", "NON_OPERATIONAL_NEWS"),
+        )
+        for source, category in cases:
+            raw = json.dumps(dict(decision="DROP", block_category=category,
+                                  evidence=source, translation="Non-operational report."))
+            for backup in (False, True):
+                self.assertEqual(parse_alert_gate_output(raw, source, mixed_news_source=backup,
+                                                        require_excerpts=True)[0], "DROP")
+
+    def test_both_feeds_require_grounded_operational_extraction(self):
+        source = "Саме цікаве що США тільки що дали загрозу з Брянська"
+        excerpt = "США тільки що дали загрозу з Брянська"
+        output = "The US has just issued a warning of a threat from Bryansk."
+        for backup in (False, True):
+            payload = dict(decision="PUBLISH", translation="Unwanted editorial introduction.")
+            with self.assertRaises(ValueError):
+                parse_alert_gate_output(json.dumps(payload), source, mixed_news_source=backup,
+                                        require_excerpts=True)
+            payload["operational_updates"] = [dict(source=excerpt, translation=output)]
+            self.assertEqual(parse_alert_gate_output(json.dumps(payload), source,
+                             mixed_news_source=backup, require_excerpts=True)[1], output)
+            payload["operational_updates"][0]["source"] = "Invented context"
+            with self.assertRaises(ValueError):
+                parse_alert_gate_output(json.dumps(payload), source, mixed_news_source=backup,
+                                        require_excerpts=True)
+
+    def test_protected_primary_drop_does_not_require_publish_schema(self):
+        source = "Перші ракети Х101 залітають на Сумщину"
+        raw = json.dumps(dict(decision="DROP", block_category="DISTANT_WITHOUT_KYIV_TRAJECTORY",
+                              evidence=source, translation="The first Kh-101 missiles are entering Sumy region."))
+        self.assertEqual(parse_alert_gate_output(raw, source, require_excerpts=True)[0], "PUBLISH")
+
     def test_questions_are_removed_as_clauses_never_as_punctuation(self):
         self.assertEqual(strip_alert_questions("Де дрон? Біля Києва чисто."), "Біля Києва чисто.")
         self.assertEqual(strip_alert_questions("Ракета?"), "")

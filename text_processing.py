@@ -30,6 +30,7 @@ ALERT_BLOCK_CATEGORIES = {
     "FUNDRAISING",
     "ENGAGEMENT",
     "EDITORIAL_COMMENTARY",
+    "NON_OPERATIONAL_NEWS",
     "RHETORICAL_QUESTION",
     "DISTANT_WITHOUT_KYIV_TRAJECTORY",
 }
@@ -486,8 +487,8 @@ def is_priority_alert_message(text: str) -> bool:
 def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mixed_news_source=False, published_context=()) -> str:
     """Build an asymmetric gate: only a closed set of exclusions may block publication."""
     source_rules = (
-        "SOURCE-SPECIFIC RULE: this is a mixed local NEWS channel, not a dedicated tactical feed. "
-        "One additional DROP category is permitted: NON_OPERATIONAL_NEWS. Use it for ordinary politics, "
+        "CONTENT RULE FOR ALL SOURCES: even dedicated tactical feeds can contain ordinary news. "
+        "DROP category NON_OPERATIONAL_NEWS is permitted for ordinary politics, "
         "budgets, winter preparations, services, historical footage or retrospective news without a "
         "current operational update. Mentioning Kyiv or quoting someone about missiles does not make "
         "ordinary news tactical. Retrospective damage reports, ongoing cleanup/firefighting after "
@@ -499,7 +500,7 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "operational follow-ups. Mixed news with a current operational warning must PUBLISH only the "
         "operational part. Ignore ordinary news in the preceding context when resolving tactical fragments. "
         "Ambiguous operational reports must PUBLISH. General siren start/end notices "
-        "are handled separately by the official state path. These source-specific rules take precedence.\n\n"
+        "are handled separately by the official state path. These content rules take precedence.\n\n"
         "For every PUBLISH, also return operational_updates: an array of objects with source "
         "(an exact contiguous excerpt of the CURRENT message) and translation (only that excerpt in English). "
         "Select ONLY current tactical facts; exclude politics, quotations unrelated to threats, "
@@ -509,7 +510,6 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "For mixed posts, never include the excluded content in operational_updates. "
         "Do not use preceding context as an excerpt. For PUBLISH omit the top-level translation "
         "field: the operational_updates translations replace it; do not translate the full mixed post.\n\n"
-        if mixed_news_source else ""
     )
     if mixed_news_source:
         source_rules += (
@@ -530,7 +530,7 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "You translate a trusted operational feed for a real-time Kyiv air-alert channel. "
         "The default decision is PUBLISH. DROP is permitted only for exactly one of these closed "
         "categories: ADVERTISEMENT, FUNDRAISING, ENGAGEMENT, EDITORIAL_COMMENTARY, "
-        "RHETORICAL_QUESTION, DISTANT_WITHOUT_KYIV_TRAJECTORY. Never DROP because a message is "
+        "RHETORICAL_QUESTION, NON_OPERATIONAL_NEWS, DISTANT_WITHOUT_KYIV_TRAJECTORY. Never DROP because a message is "
         "brief, vague, repetitive, lacks a named threat, uses a pronoun, gives only a quantity, or "
         "contains only one or more place names. Those are normal tactical updates during an active "
         "alert. When uncertain, PUBLISH.\n\n"
@@ -607,12 +607,25 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "attribution unless explicitly present in the source. "
         f"Canonical place spellings: {CANONICAL_PLACE_SPELLINGS}. "
         "Стоянка is the settlement Stoianka; NEVER translate it as parking.\n\n"
-        "Return exactly one JSON object and nothing else. Always provide a valid English translation, "
-        "including when proposing DROP. For mixed-news PUBLISH use operational_updates instead of "
-        "the top-level translation in the generic example below. For DROP, evidence must be an exact non-empty excerpt from the "
+        "These rules apply to BOTH dedicated tactical feeds and mixed news feeds: classify the communicative "
+        "purpose, not isolated words. Complaints, sarcasm about officials issuing alerts, blame for missed "
+        "launch detection, and discussion of intelligence sharing are EDITORIAL_COMMENTARY even when they "
+        "mention missiles, launches, drones or Kyiv. A retrospective attack tally or institutional explanation "
+        "without a new immediate safety update is NON_OPERATIONAL_NEWS. Do not turn a sarcastic justification "
+        "of a siren into a standalone assertion that there are no drones. A fresh explosion, interception, "
+        "fall, trajectory, renewed threat, or immediate safety instruction remains operational. In mixed "
+        "messages extract only those facts, preserving attribution and uncertainty; remove editorial framing. "
+        "For example, commentary that someone panicked and issued yellow despite no drones is DROP; "
+        "discussion of US intelligence and who failed to track launches is DROP. 'Most interesting, the US "
+        "just issued a threat from Bryansk' contains a current attributed warning: extract that warning, "
+        "not the editorial introduction, and do not upgrade it to official confirmation.\n\n"
+        "Return exactly one JSON object and nothing else. For DROP provide a valid English translation. "
+        "For EVERY PUBLISH use operational_updates, with no top-level translation. "
+        "For DROP, evidence must be an exact non-empty excerpt from the "
         "current source message that proves the selected closed category. Use null block_category and "
         "empty evidence for PUBLISH; use one closed category and the exact excerpt for DROP:\n"
-        '{"decision":"PUBLISH","block_category":null,"translation":"English translation",'
+        '{"decision":"PUBLISH","block_category":null,"operational_updates":'
+        '[{"source":"exact operational source excerpt","translation":"English translation"}],'
         '"evidence":"","reason":"operational"}\n'
         '{"decision":"DROP","block_category":"EDITORIAL_COMMENTARY",'
         '"translation":"English translation","evidence":"exact source excerpt",'
@@ -754,7 +767,7 @@ def parse_backup_novelty(raw: str, source_text: str, publications) -> list[dict]
         return []
 
 
-def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_source=False) -> tuple[str, str, str]:
+def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_source=False, require_excerpts=False) -> tuple[str, str, str]:
     """Accept only evidenced closed-category drops; every other valid result publishes."""
     try:
         parsed = json.loads(raw)
@@ -769,15 +782,19 @@ def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_sourc
     reason = str(parsed.get("reason", "")).strip()
     if decision not in {"PUBLISH", "DROP"}:
         raise ValueError("AI decision must be PUBLISH or DROP")
-    if not (mixed_news_source and decision == "PUBLISH") and not is_valid_alert_translation(translation):
+    if not ((mixed_news_source or require_excerpts) and decision == "PUBLISH") and not is_valid_alert_translation(translation):
         raise ValueError("Every decision requires a valid English translation")
     if is_commentary_alert_message(source_text):
         return "DROP", "", "EDITORIAL_COMMENTARY"
 
     def publish(reason):
-        if not mixed_news_source:
+        if not (mixed_news_source or require_excerpts):
             return "PUBLISH", translation, reason
         updates = parsed.get("operational_updates")
+        # A rejected DROP still has a required translation; do not lose a protected
+        # tactical fragment because the DROP schema has no publication excerpts.
+        if decision == "DROP" and not mixed_news_source and not updates:
+            return "PUBLISH", translation, reason
         if not isinstance(updates, list) or not updates:
             raise ValueError("Mixed news publication requires operational excerpts")
         translations = []
@@ -799,15 +816,18 @@ def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_sourc
 
     if decision == "DROP":
         evidenced = bool(evidence) and evidence.casefold() in source_text.casefold()
-        if mixed_news_source and block_category == "NON_OPERATIONAL_NEWS" and evidenced:
+        if block_category in {"NON_OPERATIONAL_NEWS", "EDITORIAL_COMMENTARY"} and evidenced:
             # Short tactical fragments must not disappear behind a new news category.
             if len(source_text) <= 100 and (
                 (contains_operational_location(source_text) and len(source_text.split()) <= 2)
-                or is_actionable_alert_message(source_text)
-                or is_priority_alert_message(source_text)
+                or (contains_operational_location(source_text) and re.match(
+                    r"(?i)^(?:підліта\w*|новий на|далі|виліта\w*|другий)\b", source_text))
+                or re.match(
+                    r"(?i)^(?:загроза(?: балістики)? з |перші ракети |х[- ]?101 |"
+                    r"\d+ (?:дрони|ракети) на |повторні пуски|вихід ракет з )", source_text)
                 or translate_known_terse_fragment(source_text)
             ):
-                return publish("override_unapproved_drop:NON_OPERATIONAL_NEWS")
+                return publish(f"override_unapproved_drop:{block_category}")
             return "DROP", "", block_category
         if (
             block_category not in ALERT_BLOCK_CATEGORIES

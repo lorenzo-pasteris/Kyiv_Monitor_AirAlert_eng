@@ -811,7 +811,7 @@ async def translate_message(text, context=(), *, mixed_news_source=False):
                 r = await http_client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json={"model": MODEL, "max_tokens": 650 if mixed_news_source else 200,
+                    json={"model": MODEL, "max_tokens": 650 if mixed_news_source else 450,
                           "thinking": {"type": "disabled"}, "output_config": {"effort": "low"}, "messages": [{
                         "role": "user", "content": build_alert_translation_prompt(
                             text, context, mixed_news_source=mixed_news_source, published_context=publications)
@@ -820,7 +820,8 @@ async def translate_message(text, context=(), *, mixed_news_source=False):
                 )
             r.raise_for_status()
             result = r.json()["content"][0]["text"].strip()
-            decision, translation, reason = parse_alert_gate_output(result, text, mixed_news_source=mixed_news_source)
+            decision, translation, reason = parse_alert_gate_output(
+                result, text, mixed_news_source=mixed_news_source, require_excerpts=True)
             if mixed_news_source:
                 record_backup_shadow(text, result, publications)
             if decision == "DROP":

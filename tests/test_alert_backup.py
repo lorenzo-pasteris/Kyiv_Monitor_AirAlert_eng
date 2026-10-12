@@ -342,7 +342,7 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         monitor.translate_message.assert_awaited_once_with(self.text, context=(), mixed_news_source=True)
         primary = build_alert_translation_prompt(self.text)
         backup = build_alert_translation_prompt(self.text, mixed_news_source=True)
-        self.assertNotIn("NON_OPERATIONAL_NEWS", primary)
+        self.assertIn("NON_OPERATIONAL_NEWS", primary)
         self.assertIn("NON_OPERATIONAL_NEWS", backup)
 
     async def test_evidenced_ordinary_news_drop_is_scoped_to_backup(self):
@@ -350,7 +350,7 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         raw = json.dumps(dict(decision="DROP", block_category="NON_OPERATIONAL_NEWS",
                               evidence="витратив 16 млрд грн", translation="Kyiv spent UAH 16 billion on winter preparations."))
         self.assertEqual(parse_alert_gate_output(raw, text, mixed_news_source=True)[0], "DROP")
-        self.assertEqual(parse_alert_gate_output(raw, text)[0], "PUBLISH")
+        self.assertEqual(parse_alert_gate_output(raw, text)[0], "DROP")
         with self.assertRaises(ValueError):
             parse_alert_gate_output(raw, "Новий дрон на Бровари", mixed_news_source=True)
 
