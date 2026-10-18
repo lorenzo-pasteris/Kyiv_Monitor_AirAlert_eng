@@ -32,6 +32,7 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
         monitor.api_alert_event_at = None
         monitor.alert_source_mismatch_since = None
         monitor.last_source_reconcile_request_at = None
+        monitor.last_unknown_alert_message_id = 0
         monitor.webhook_silence_notified = False
         monitor.last_alert_source_mismatch = None
         monitor.last_alert_mismatch_notice_at = None
@@ -364,6 +365,67 @@ class AlertStateTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await monitor.request_source_reconcile_if_needed(now=400))
         self.assertEqual(client.post.await_count, 2)
         self.assertIsNone(monitor.alert_source_mismatch_since)
+
+    async def test_matching_yellow_still_checks_rest_every_minute(self):
+        monitor.alert_active = True
+        monitor.telegram_alert_level = monitor.api_alert_level = "YELLOW"
+        response = SimpleNamespace(status_code=200, json=lambda: {"decision": "applied"})
+        client = SimpleNamespace(post=AsyncMock(return_value=response))
+        with patch.object(monitor, "http_client", client), \
+             patch.object(monitor, "UKRAINE_ALARM_RECONCILE_URL", "http://receiver/reconcile"):
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=100))
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=159))
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=160))
+        self.assertEqual(client.post.await_count, 2)
+
+    async def test_rest_timeout_is_throttled_without_changing_level(self):
+        monitor.alert_active = True
+        monitor.alert_level = "YELLOW"
+        client = SimpleNamespace(post=AsyncMock(side_effect=TimeoutError))
+        with patch.object(monitor, "http_client", client), \
+             patch.object(monitor, "UKRAINE_ALARM_RECONCILE_URL", "http://receiver/reconcile"):
+            self.assertTrue(await monitor.request_source_reconcile_if_needed(now=100))
+            self.assertFalse(await monitor.request_source_reconcile_if_needed(now=120))
+        self.assertEqual(monitor.alert_level, "YELLOW")
+
+    async def test_repaired_api_red_overrides_stale_telegram_yellow(self):
+        monitor.alert_active = True
+        monitor.alert_level = monitor.telegram_alert_level = "YELLOW"
+        monitor.telegram_alert_state = True
+        monitor.telegram_alert_message_at = datetime(2026, 10, 18, 19, 32, tzinfo=timezone.utc)
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        payload = {
+            "known": True, "level": "RED", "event_at": "2026-10-18T19:57:23+00:00",
+            "last_webhook_at": datetime.now(timezone.utc).isoformat(),
+        }
+        client = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(status_code=200, json=lambda: payload)))
+        with patch.object(monitor, "http_client", client), \
+             patch.object(monitor, "request_source_reconcile_if_needed", new=AsyncMock()), \
+             patch.object(monitor.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await monitor.ukraine_alarm_state_loop()
+        self.assertEqual(monitor.alert_level, "RED")
+        monitor.send_to_alert_channel.assert_awaited_once()
+
+    async def test_unrecognized_official_announcement_requests_verification_once(self):
+        message = SimpleNamespace(id=21825, text="🔴 УВАГА! Новий формат повідомлення")
+        with patch.object(monitor, "request_source_reconcile_if_needed", new=AsyncMock()) as repair:
+            await monitor.report_unknown_alert_announcement(message)
+            await monitor.report_unknown_alert_announcement(message)
+        repair.assert_awaited_once_with(urgent=True)
+        self.assertEqual(len(self.owner_messages), 1)
+
+    async def test_new_template_upgrades_yellow_and_can_downgrade_to_yellow(self):
+        monitor.alert_active = True
+        monitor.alert_level = "YELLOW"
+        monitor.send_to_alert_channel = AsyncMock(return_value={"message_id": 1})
+        for offset, threat, expected in ((0, "ракетна загроза", "RED"), (1, "дронова небезпека", "YELLOW")):
+            message = SimpleNamespace(id=21825 + offset, date=datetime(2026, 10, 18, 19, 57 + offset, tzinfo=timezone.utc))
+            level = monitor.classify_kyiv_city_official_level(f"🔴 УВАГА! У Києві оголошена нова загроза – {threat}!")
+            monitor.record_telegram_alert_level(level, message)
+            await monitor.reconcile_alert_state("test official announcement")
+            self.assertEqual(monitor.alert_level, expected)
+        self.assertEqual(monitor.send_to_alert_channel.await_count, 2)
 
     async def test_webhook_silence_is_reported_once_and_recovery_once(self):
         now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)

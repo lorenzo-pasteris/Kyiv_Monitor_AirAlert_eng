@@ -23,7 +23,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.errors import AuthKeyDuplicatedError
 import state_store
-from alert_rules import classify_kyiv_city_official_level
+from alert_rules import classify_kyiv_city_official_level, is_official_alert_announcement
 from predeploy_check import validate_environment
 from text_processing import (
     AlertTranslation,
@@ -280,6 +280,7 @@ api_alert_level = None
 api_alert_event_at = None
 alert_source_mismatch_since = None
 last_source_reconcile_request_at = None
+last_unknown_alert_message_id = 0
 webhook_silence_notified = False
 last_alert_source_mismatch = None
 last_alert_mismatch_notice_at = None
@@ -571,16 +572,19 @@ async def report_alert_source_mismatch(selected="telegram"):
         )
 
 
-async def request_source_reconcile_if_needed(now=None):
-    """Ask the receiver for a REST repair when Telegram and webhook keep disagreeing."""
+async def request_source_reconcile_if_needed(now=None, *, urgent=False):
+    """Independently verify active alerts, even when both cached sources agree."""
     global alert_source_mismatch_since, last_source_reconcile_request_at
     now = time.monotonic() if now is None else now
     if api_alert_level is not None and telegram_alert_level == api_alert_level:
         alert_source_mismatch_since = None
-        return False
+        if not alert_active and not urgent:
+            return False
     if alert_source_mismatch_since is None:
         alert_source_mismatch_since = now
-    if not UKRAINE_ALARM_RECONCILE_URL or now - alert_source_mismatch_since < ALERT_SOURCE_RECONCILE_AFTER:
+    if not UKRAINE_ALARM_RECONCILE_URL:
+        return False
+    if not (alert_active or urgent) and now - alert_source_mismatch_since < ALERT_SOURCE_RECONCILE_AFTER:
         return False
     if (
         last_source_reconcile_request_at is not None
@@ -601,6 +605,23 @@ async def request_source_reconcile_if_needed(now=None):
         f"webhook={api_alert_level} decision={decision}"
     )
     return True
+
+
+async def report_unknown_alert_announcement(message):
+    """An unfamiliar official alert must trigger verification, never silent dismissal."""
+    global last_unknown_alert_message_id
+    if message.id <= max(last_unknown_alert_message_id, telegram_alert_message_id):
+        return
+    if not is_official_alert_announcement(message.text or ""):
+        return
+    last_unknown_alert_message_id = message.id
+    print(f"[UNKNOWN OFFICIAL ALERT] id={message.id}; requesting REST verification")
+    await request_source_reconcile_if_needed(urgent=True)
+    await send_to_owner(
+        "🚨 <b>Official alert announcement not recognized</b>\n"
+        "The last confirmed level is preserved; independent API verification requested.\n"
+        f"https://t.me/{ALERT_TRIGGER_CHANNEL}/{message.id}"
+    )
 
 
 async def check_webhook_liveness(state, now=None):
@@ -1088,6 +1109,8 @@ async def alert_feed_poll_loop(client, source_entities):
             latest_triggers = await client.get_messages(source_entities[ALERT_TRIGGER_CHANNEL], limit=20)
             for trigger in latest_triggers:
                 observed = classify_kyiv_city_official_level(trigger.text or "")
+                if observed is None:
+                    await report_unknown_alert_announcement(trigger)
                 if observed is not None and record_telegram_alert_level(observed, trigger):
                     print(f"[TRIGGER POLL] level={observed} id={trigger.id}")
                 if observed is not None:
@@ -2284,6 +2307,8 @@ async def main():
 
             if channel == ALERT_TRIGGER_CHANNEL:
                 level = classify_kyiv_city_official_level(clean)
+                if level is None:
+                    await report_unknown_alert_announcement(event.message)
                 if level is not None:
                     if record_telegram_alert_level(level, event.message):
                         print(f"Telegram trigger update: {level}")
