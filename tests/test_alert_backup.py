@@ -13,13 +13,65 @@ from unittest.mock import AsyncMock, patch
 
 from test_routing import FakeTelegramMessage, monitor
 from text_processing import (
-    build_alert_translation_prompt, correct_known_translation_errors,
+    build_alert_translation_prompt, clean_alert_source_text, correct_known_translation_errors,
     is_general_siren_announcement, normalize_alert_revision, parse_alert_gate_output,
     translate_known_terse_fragment,
 )
 
+REAL_TRANSLATE_MESSAGE = monitor.translate_message
+
 
 class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_fragments_bypass_model_on_both_sources(self):
+        with patch.object(monitor, "http_client", AsyncMock()) as client:
+            for mixed in (False, True):
+                for source, expected in (("СкайМол", "SkyMall"),
+                                         ("Сильно знижується!", "Descending sharply.")):
+                    self.assertEqual(await REAL_TRANSLATE_MESSAGE(source, mixed_news_source=mixed), expected)
+            client.post.assert_not_awaited()
+
+    async def test_footer_only_edit_is_durable_duplicate_but_course_change_passes(self):
+        original = "⏺**Повернув на центр / Поділ**"
+        footer = "\n**Київ — пряма трансляція**** **👈\nНадіслати новину"
+        message = FakeTelegramMessage(81690, original, datetime.now(timezone.utc))
+        self.assertTrue(await monitor.process_alert_feed_message(message, self.backup))
+        # Simulate loss of in-memory dedup on restart / expiry of the 180s window.
+        monitor.recent_alert_messages.clear()
+        monitor.state_store.initialize_stats_db()
+        message.text = original + footer
+        self.assertFalse(await monitor.process_alert_feed_message(message, self.backup, edited=True))
+        self.assertEqual(monitor.translate_message.await_count, 1)
+        self.assertEqual(monitor.safe_send.await_count, 1)
+        message.text = "⏺**Повернув на Оболонь**" + footer
+        self.assertTrue(await monitor.process_alert_feed_message(message, self.backup, edited=True))
+        self.assertEqual(monitor.safe_send.await_count, 2)
+
+    def test_footer_cleanup_preserves_tactical_lines_and_revision_information(self):
+        for footer in ("Київ — пряма трансляція 👈", "**Київ — пряма трансляція**** **👈",
+                       "[Київ — пряма трансляція](https://t.me/example) 👈"):
+            self.assertEqual(clean_alert_source_text("Бортничі, Гнідин\n" + footer), "Бортничі, Гнідин")
+        text = "Пряма трансляція: 2 дрони на Київ"
+        self.assertEqual(clean_alert_source_text(text), text)
+        for changed in ("Не летить на Поділ", "Ще один на Поділ", "2 дрони на Поділ"):
+            self.assertNotEqual(normalize_alert_revision(changed), normalize_alert_revision("На Поділ"))
+
+    def test_verified_locality_errors_and_missing_fragments(self):
+        for source, expected in (
+            ("СкайМол", "SkyMall"), ("**Лісовий масив**", "Lisovyi Masyv"),
+            ("Совки", "Sovky"), ("Вишеньки", "Vyshenky"), ("Вишневе", "Vyshneve"),
+            ("Мінський", "Minskyi Masyv"), ("Сильно знижується!", "Descending sharply."),
+            ("Різко знижується", "Descending sharply."),
+        ):
+            self.assertEqual(translate_known_terse_fragment(source), expected)
+        for source in ("СкайМол знижки", "Сильно знижується?", "Не знижується", "Ціна знижується"):
+            self.assertIsNone(translate_known_terse_fragment(source))
+        self.assertEqual(correct_known_translation_errors("Совки, поки високо літає", "Soviets, while flying high"),
+                         "Sovky, while flying high")
+        self.assertEqual(correct_known_translation_errors("Реактивний на Вишеньки", "Jet-powered UAV toward Vyshneve"),
+                         "Jet-powered UAV toward Vyshenky")
+        both = "Vyshenky and Vyshneve"
+        self.assertEqual(correct_known_translation_errors("Вишеньки та Вишневе", both), both)
+
     async def test_four_character_update_passes_actual_live_handler_and_recovery(self):
         tree = ast.parse(Path(monitor.__file__).read_text())
         callback = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)

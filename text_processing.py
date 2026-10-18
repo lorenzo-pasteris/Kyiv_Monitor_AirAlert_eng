@@ -93,6 +93,11 @@ OPERATIONAL_LOCATION_STEMS = {
     "березан": "Berezan",
     "рембаз": "Rembaza",
     "конча-засп": "Koncha-Zaspa",
+    "совки": "Sovky",
+    "вишеньк": "Vyshenky",
+    "лісовий масив": "Lisovyi Masyv",
+    "мінський": "Minskyi Masyv",
+    "скаймол": "SkyMall",
 }
 # Launch-area fragments are tactical in the trusted real-time feed even when a
 # Kyiv trajectory has not yet been stated; cruise-missile courses can be updated later.
@@ -196,6 +201,9 @@ def clean_alert_source_text(text: str) -> str:
         r"(?i)^\s*(?:💙\s*)?dnipro alerts\s*•\s*(?:💛\s*)?kyiv alerts\s*$",
         r"(?i)^\s*(?:ℹ️\s*)?alerts live\s*•\s*(?:🤙\s*)?feedback\s*$",
         r"(?i)^\s*(?:👉\s*)?live\s*[:!—-]*\s*$",
+        # Footer edits must not create a new tactical revision. Match the whole
+        # standalone footer, not a live report containing these words.
+        r"(?i)^[\W_]*київ[\W_]+пряма\s+трансляція[\W_]*$",
         r"(?i)^\s*(?:уся|вся|вся інформація|all information)\s+(?:інформація\s+)?(?:з|из|from)\s+київ\s*[|—:-]*\s*де\s+загроза\s*$",
         r"^\s*ㅤ\s*$",
     )
@@ -560,6 +568,12 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "location, direction, quantity, time, uncertainty marker, and distinction between observed, "
         "reported, probable, intercepted, and confirmed events. Do not invent a weapon or destination.\n\n"
         "Mandatory alert glossary:\n"
+        "- Совки = Sovky (Kyiv neighbourhood), NEVER Soviets.\n"
+        "- Вишеньки / Вишеньок = Vyshenky, a DIFFERENT place from Вишневе = Vyshneve.\n"
+        "- Лісовий масив = Lisovyi Masyv (Kyiv neighbourhood), NEVER forest tract.\n"
+        "- Мінський in a Kyiv tactical location update = Minskyi Masyv, NEVER Minsk city.\n"
+        "- СкайМол / Скай Мол = SkyMall, a Kyiv landmark, not an advertisement by itself.\n"
+        "- знижується / знижує висоту = descending / losing altitude: a live movement update, not news.\n"
         "- ПОХ = Pozniaky, Osokorky, Kharkivskyi (Kyiv neighbourhoods), NEVER a ballistic warning. "
         "ПОХ - увага = Pozniaky, Osokorky, Kharkivskyi — stay alert.\n"
         "- ракета / ракети = missile(s), NEVER cruise missile(s) unless the source says крилата\n"
@@ -647,6 +661,21 @@ def translate_known_terse_fragment(text: str) -> str | None:
     normalized = re.sub(r"[.!…\s]+$", "", text.strip()).casefold()
     if re.search(r"[?？⁇⁈⁉❓❔]", text):
         return None
+    # Exact complete fragments only: a place mentioned in an advert or a
+    # retrospective story must still go through the normal filters.
+    bare = normalize_alert_for_dedup(text)
+    places = {
+        "совки": "Sovky", "вишеньки": "Vyshenky", "вишневе": "Vyshneve",
+        "лісовий масив": "Lisovyi Masyv", "мінський": "Minskyi Masyv",
+        "мінський масив": "Minskyi Masyv", "скаймол": "SkyMall",
+        "скай мол": "SkyMall",
+    }
+    if bare in places:
+        return places[bare]
+    descent = re.fullmatch(r"(сильно |різко |поступово )?знижується", bare)
+    if descent:
+        qualifier = {"сильно ": " sharply", "різко ": " sharply", "поступово ": " gradually"}
+        return "Descending" + qualifier.get(descent.group(1), "") + "."
     if normalize_alert_for_dedup(text) == "впав":
         return "It fell."
     if normalize_alert_for_dedup(text) in {"пох", "пох увага"}:
@@ -700,6 +729,17 @@ def is_valid_alert_translation(text: str) -> bool:
 def correct_known_translation_errors(source_text: str, translation: str) -> str:
     """Correct high-risk cases where model wording changes the reported event."""
     source = source_text.casefold()
+    place_corrections = (
+        (r"\bсовки\b", r"\bsoviets\b", "Sovky"),
+        (r"\bлісовий\s+масив\b", r"\bforest\s+(?:tract|massif)\b", "Lisovyi Masyv"),
+        (r"\bмінський\b", r"\bminsk\b", "Minskyi Masyv"),
+    )
+    for source_pattern, output_pattern, canonical in place_corrections:
+        if re.search(source_pattern, source):
+            translation = re.sub(output_pattern, canonical, translation, flags=re.I)
+    # Never rewrite Vyshneve if both distinct places occur in the source.
+    if re.search(r"\bвишеньк\w*", source) and not re.search(r"\bвишнев\w*", source):
+        translation = re.sub(r"\bvyshneve\b", "Vyshenky", translation, flags=re.I)
     if re.search(r"не спостеріга(?:ється|ються)|не спостережень", source):
         translation = re.sub(
             r"\bno threats(?: currently)? observed\b", "No longer observed", translation, flags=re.I

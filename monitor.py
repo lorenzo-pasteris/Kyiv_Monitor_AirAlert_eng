@@ -1978,6 +1978,7 @@ async def process_alert_feed_message(message, channel, *, edited=False):
     if not state_store.claim_alert_feed_delivery(channel, message.id, clean):
         print(f"[ALERT SKIPPED DELIVERED] @{channel} id={message.id} edited={edited}")
         return False
+    print(f"[ALERT EVALUATING] @{channel} id={message.id} edited={edited} input={clean[:150]!r}")
     context = remember_alert_source_message(
         channel,
         message.id,
