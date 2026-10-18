@@ -41,7 +41,7 @@ Railway riavvia automaticamente il worker. Dopo l'avvio devono essere controllat
 
 - connessione Telegram;
 - registrazione delle sorgenti corrette;
-- stato del trigger `@kyiv_airraid_alert`;
+- stato del trigger ufficiale `@KyivCityOfficial`;
 - capacità di pubblicare le allerte nel canale `TARGET_CHAT_ID` e i riepiloghi nel gruppo `SUMMARY_CHAT_ID`.
 
 Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e generare un avviso, evitando un restart loop infinito.
@@ -50,7 +50,7 @@ Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e ge
 
 ### Segnali osservati
 
-- ultimo stato esplicito ricevuto da `@kyiv_airraid_alert`;
+- ultimo livello esplicito GREEN/YELLOW/RED ricevuto da `@KyivCityOfficial`;
 - tempo trascorso dall'ultimo aggiornamento riconoscibile;
 - corretta registrazione dell'handler Telegram.
 
@@ -58,6 +58,7 @@ Se si verificano tre riavvii ravvicinati, il ciclo automatico deve fermarsi e ge
 
 - Un messaggio esplicito di allarme per Kyiv attiva ALERT.
 - Un messaggio esplicito di cessato allarme per Kyiv attiva NORMAL.
+- Un passaggio YELLOW↔RED mantiene ALERT attivo e pubblica il nuovo livello.
 - Messaggi ambigui non modificano lo stato conosciuto.
 - Se il canale non è leggibile, viene inviato un avviso critico e viene conservato l'ultimo stato.
 - UkraineAlarm può operare soltanto come osservatore shadow opzionale: segnala a Ops

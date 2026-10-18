@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import os
 import random
 import sqlite3
@@ -31,7 +32,7 @@ def load_monitor():
         "ADMIN_USER_IDS": "392256147",
         "TEST_MODE": "false",
     })
-    os.environ.pop("UKRAINE_ALARM_API_KEY", None)
+    os.environ.pop("UKRAINE_ALARM_STATE_URL", None)
 
     httpx_stub = types.ModuleType("httpx")
     telethon_stub = types.ModuleType("telethon")
@@ -107,7 +108,6 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         monitor.production_client = None
         monitor.content_source_entities = {}
         monitor.summary_lock = asyncio.Lock()
-        monitor.summary_watchdog_attempts.clear()
 
     async def asyncTearDown(self):
         monitor.state_store.CATEGORY_STATS_DB_PATH = self.original_db_path
@@ -161,6 +161,21 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.state_store.load_pending_normal_messages(), [])
         self.assertEqual(monitor.state_store.get_source_cursor(channel), 901)
 
+    async def test_official_alert_templates_do_not_enter_summary_history(self):
+        now = datetime.now(timezone.utc)
+        channel = monitor.ALERT_TRIGGER_CHANNEL
+        entities = {name: name for name in monitor.ALL_CONTENT_CHANNELS}
+        client = FakeHistoryClient({name: [] for name in monitor.ALL_CONTENT_CHANNELS})
+        client.messages_by_channel[channel] = [
+            FakeTelegramMessage(910, "🟡 УВАГА! У Києві оголошена дронова небезпека!", now),
+            FakeTelegramMessage(911, "У Києві відновили рух автобусів.", now),
+        ]
+
+        self.assertTrue(await monitor.sync_normal_history(client, entities))
+        pending = monitor.state_store.load_pending_normal_messages()
+        self.assertEqual([row["message_id"] for row in pending], [911])
+        self.assertEqual(monitor.state_store.get_source_cursor(channel), 911)
+
     async def test_failed_delivery_retains_pending_and_success_marks_processed(self):
         channel = monitor.KYIV_INFO_CHANNEL
         message_id = 501
@@ -171,15 +186,19 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
             "Kyiv metro announced a concrete service disruption.",
         )
 
-        async def fake_analyzer(messages):
+        async def fake_analyzer(messages, *args):
             result = {
-                key: {"selected_ids": [], "bullets": []}
+                key: {"selected_ids": [], "items": []}
                 for key in monitor.CATEGORIES
             }
             stable_id = f"{channel}:{message_id}"
-            result["kyiv_city"] = {
+            result["kyiv_region"] = {
                 "selected_ids": [stable_id],
-                "bullets": ["Kyiv metro announced a service disruption."],
+                "items": [{
+                    "event_key": "2026-09-01|kyiv|metro-disruption",
+                    "text": "Kyiv metro announced a service disruption.",
+                    "is_update": False,
+                }],
             }
             return result
 
@@ -206,6 +225,26 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
                 (channel, message_id),
             ).fetchone()[0]
         self.assertEqual(status, "processed")
+
+    async def test_rejected_analysis_stays_private_and_retains_pending(self):
+        monitor.state_store.persist_normal_message(
+            monitor.KYIV_INFO_CHANNEL,
+            502,
+            datetime.now(timezone.utc),
+            "A relevant Kyiv update that must be retried.",
+        )
+        public_messages = []
+        owner_messages = []
+        monitor.analyze_hourly_matrix = lambda *args: asyncio.sleep(0, result=None)
+        monitor.send_to_summary_group = lambda text: asyncio.sleep(0, result=public_messages.append(text))
+        monitor.send_to_owner = lambda text: asyncio.sleep(
+            0, result=owner_messages.append(text) or {"message_id": 1}
+        )
+
+        self.assertFalse(await monitor.build_summary(trigger="rejected-analysis"))
+        self.assertEqual(public_messages, [])
+        self.assertEqual(len(monitor.state_store.load_pending_normal_messages()), 1)
+        self.assertIn("Nothing was published", owner_messages[0])
 
     async def test_alert_discards_pending_and_clear_advances_all_cursors(self):
         now = datetime.now(timezone.utc)
@@ -277,14 +316,55 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
         response[1]["activeAlerts"].append({"type": "AIR"})
+        with self.assertRaisesRegex(ValueError, "no threat level"):
+            monitor.parse_ukraine_alarm_kyiv_state(response)
+
+        response[1]["activeAlertLevels"] = []
+        self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
+        response[1]["activeAlertLevels"] = [
+            {"alertLevel": "Yellow", "reason": "UAV activity"}
+        ]
         self.assertTrue(monitor.parse_ukraine_alarm_kyiv_state(response))
+        self.assertEqual(monitor.parse_ukraine_alarm_kyiv_level(response), "YELLOW")
+        response[1]["activeAlertLevels"].append(
+            {"alertLevel": "Red", "reason": "Missile threat"}
+        )
+        self.assertEqual(monitor.parse_ukraine_alarm_kyiv_level(response), "RED")
+        response[1].pop("activeAlertLevels")
+        response[1]["ActiveAlertLevels"] = []
+        self.assertFalse(monitor.parse_ukraine_alarm_kyiv_state(response))
+        self.assertEqual(monitor.parse_ukraine_alarm_kyiv_level(response[1]), "GREEN")
 
         with self.assertRaisesRegex(ValueError, "Kyiv City"):
             monitor.parse_ukraine_alarm_kyiv_state(response[:1])
 
+    def test_ukraine_alarm_state_exposes_provider_time(self):
+        state = monitor.parse_ukraine_alarm_state({
+            "known": True, "level": "red", "event_at": "2026-10-10T10:57:05.1234567Z",
+            "last_webhook_at": "2026-10-10T10:58:00+00:00", "started_at": "bad",
+        })
+        self.assertEqual(state["level"], "RED")
+        self.assertEqual(state["event_at"].isoformat(), "2026-10-10T10:57:05.123456+00:00")
+        self.assertEqual(state["last_webhook_at"].isoformat(), "2026-10-10T10:58:00+00:00")
+        self.assertIsNone(state["started_at"])
+        undated = monitor.parse_ukraine_alarm_state({"known": True, "level": "GREEN", "event_at": "2026-10-10T10:57:05"})
+        self.assertIsNone(undated["event_at"])
+        unknown = monitor.parse_ukraine_alarm_state({"known": False, "event_at": "2026-10-10T10:57:05Z"})
+        self.assertEqual((unknown["level"], unknown["event_at"]), (None, None))
+
+    def test_ukraine_alarm_webhook_state_requires_an_exact_level(self):
+        self.assertIsNone(monitor.parse_ukraine_alarm_state_level({"known": False}))
+        self.assertEqual(
+            monitor.parse_ukraine_alarm_state_level({"known": True, "level": "Yellow"}),
+            "YELLOW",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid level"):
+            monitor.parse_ukraine_alarm_state_level({"known": True, "level": "AIR"})
+
     async def asyncSetUp(self):
         self.sent = []
         monitor.recent_alert_messages.clear()
+        monitor.alert_publication_lock = asyncio.Lock()
 
         async def fake_send_message(chat_id, text):
             self.sent.append((chat_id, text))
@@ -310,22 +390,113 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_alert_lifecycle_uses_minimal_public_copy(self):
         monitor.telegram_alert_state = True
+        monitor.telegram_alert_level = "RED"
         monitor.alert_active = False
+        monitor.alert_level = "GREEN"
         for channel in monitor.ALL_CONTENT_CHANNELS:
             monitor.buffers[channel].append({"time": "12:00", "text": "discard me"})
 
         await monitor.reconcile_alert_state("random-test")
-        self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🚨 <b>AIR ALERT — KYIV</b>"))
+        self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, monitor.ALERT_LEVEL_MESSAGES["RED"]))
         self.assertNotIn("REAL-TIME mode", self.sent[-1][1])
-        self.assertTrue(all(not items for items in monitor.buffers.values()))
+        self.assertTrue(all(len(items) == 1 for items in monitor.buffers.values()))
+        for items in monitor.buffers.values():
+            items.clear()
 
         monitor.telegram_alert_state = False
+        monitor.telegram_alert_level = "GREEN"
         await monitor.reconcile_alert_state("random-test")
         clear_text = self.sent[-1][1]
         self.assertEqual(self.sent[-1][0], ALERT_CHAT_ID)
         self.assertIn("✅ <b>ALL CLEAR — KYIV</b>", clear_text)
-        self.assertIn(f'<a href="{SUMMARY_CHAT_LINK}">Join Kyiv News →</a>', clear_text)
+        self.assertNotIn("href=", clear_text)
+        self.assertNotIn("Join Kyiv News", clear_text)
         self.assertNotIn("Back to NORMAL mode", clear_text)
+
+    async def test_undated_api_level_cannot_override_official_telegram_level(self):
+        original = (
+            monitor.api_alert_level,
+            monitor.telegram_alert_level,
+            monitor.telegram_alert_state,
+            monitor.alert_level,
+            monitor.alert_active,
+        )
+        try:
+            monitor.api_alert_level = "RED"
+            monitor.telegram_alert_level = "YELLOW"
+            monitor.telegram_alert_state = True
+            monitor.alert_level = "YELLOW"
+            monitor.alert_active = True
+            await monitor.reconcile_alert_state("api-test")
+            self.assertFalse(any(chat == ALERT_CHAT_ID for chat, _ in self.sent))
+            self.assertEqual(monitor.alert_level, "YELLOW")
+        finally:
+            (
+                monitor.api_alert_level,
+                monitor.telegram_alert_level,
+                monitor.telegram_alert_state,
+                monitor.alert_level,
+                monitor.alert_active,
+            ) = original
+
+    async def test_telegram_controls_state_until_first_webhook_snapshot(self):
+        original = (
+            monitor.api_alert_level,
+            monitor.telegram_alert_level,
+            monitor.telegram_alert_state,
+            monitor.alert_level,
+            monitor.alert_active,
+        )
+        try:
+            monitor.api_alert_level = None
+            monitor.telegram_alert_level = "YELLOW"
+            monitor.telegram_alert_state = True
+            monitor.alert_level = "RED"
+            monitor.alert_active = True
+            self.assertTrue(await monitor.reconcile_alert_state("startup-race-test"))
+            self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, monitor.ALERT_LEVEL_MESSAGES["YELLOW"]))
+            self.assertEqual(monitor.alert_level, "YELLOW")
+        finally:
+            (
+                monitor.api_alert_level,
+                monitor.telegram_alert_level,
+                monitor.telegram_alert_state,
+                monitor.alert_level,
+                monitor.alert_active,
+            ) = original
+
+    async def test_realtime_messages_use_current_alert_level_colour(self):
+        original = (
+            monitor.alert_active,
+            monitor.alert_level,
+            monitor.translate_message,
+            monitor.safe_send,
+        )
+
+        async def fake_translation(text, context=()):
+            return "Operational update"
+
+        async def fake_safe_send(text):
+            return await monitor.send_to_alert_channel(text)
+
+        try:
+            monitor.alert_active = True
+            monitor.alert_level = "YELLOW"
+            monitor.translate_message = fake_translation
+            monitor.safe_send = fake_safe_send
+            self.assertTrue(await monitor.handle_alert_message("Жуляни"))
+            self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🟡 Operational update"))
+
+            monitor.alert_level = "RED"
+            self.assertTrue(await monitor.handle_alert_message("Нивки"))
+            self.assertEqual(self.sent[-1], (ALERT_CHAT_ID, "🔴 Operational update"))
+        finally:
+            (
+                monitor.alert_active,
+                monitor.alert_level,
+                monitor.translate_message,
+                monitor.safe_send,
+            ) = original
 
     async def test_fundraising_and_engagement_posts_are_rejected(self):
         donation = (
@@ -370,6 +541,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         kellogg_commentary = "Келлог менш ефективний ніж Петя, всю балістику пропускає"
         engagement_commentary = "У Києві є важко поранені, віримо в медиків"
         glossary_commentary = "Бандероль - крилата ракета"
+        hope_commentary = "Сподіваємось більше нічого не прилетить і буде відбій"
+        camera_speculation = "Ці просто кружляють над Києвом. Не здивуюсь, якщо на них камери"
+        petya_commentary = "Нарешті у Києві вперше за 2 місяці Петя відпрацював на повну"
+        survived_volley_commentary = "Наче другий залп пережили, ви як там?"
+        hostomel_encouragement = "Гостомель котики, тримайтесь, ми з вами💔"
+        sarcastic_all_clear = "Ого, навіть відбій дали — щось новеньке"
+        debris_warning = "ППО працює добре, але уламки ніхто не скасовував, тому на вулицю не виходимо"
 
         self.assertTrue(monitor.is_commentary_alert_message(commentary))
         self.assertTrue(monitor.is_commentary_alert_message(rhetorical))
@@ -377,19 +555,38 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.is_commentary_alert_message(kellogg_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(engagement_commentary))
         self.assertTrue(monitor.is_commentary_alert_message(glossary_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(hope_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(camera_speculation))
+        self.assertTrue(monitor.is_commentary_alert_message(petya_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(survived_volley_commentary))
+        self.assertTrue(monitor.is_commentary_alert_message(hostomel_encouragement))
+        self.assertTrue(monitor.is_commentary_alert_message(sarcastic_all_clear))
+        self.assertTrue(monitor.is_commentary_alert_message(
+            "Wow, they even issued an all clear—that's something new"
+        ))
+        self.assertTrue(monitor.is_commentary_alert_message("Seems we survived a second volley. How are you?"))
+        self.assertFalse(monitor.is_commentary_alert_message(debris_warning))
         self.assertFalse(monitor.is_commentary_alert_message(operational))
+        self.assertEqual(
+            monitor.strip_mixed_alert_commentary(
+                "Літають як у себе вдома. Русанівка, Троєщина, Дарниця"
+            ),
+            "Русанівка, Троєщина, Дарниця",
+        )
 
         original_active = monitor.alert_active
         try:
             monitor.alert_active = True
             self.assertTrue(await monitor.handle_alert_message(commentary))
+            self.assertTrue(await monitor.handle_alert_message(survived_volley_commentary))
         finally:
             monitor.alert_active = original_active
 
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual(self.sent[0][0], monitor.OPS_CHAT_ID)
-        self.assertIn("<b>COMMENTO</b>", self.sent[0][1])
-        self.assertNotEqual(self.sent[0][0], monitor.ALERT_OUTPUT_CHAT_ID)
+        self.assertEqual(len(self.sent), 2)
+        for destination, message in self.sent:
+            self.assertEqual(destination, monitor.OPS_CHAT_ID)
+            self.assertIn("<b>COMMENTO</b>", message)
+            self.assertNotEqual(destination, monitor.ALERT_OUTPUT_CHAT_ID)
 
     async def test_alert_source_promotional_footer_is_removed(self):
         raw = (
@@ -402,6 +599,12 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.clean_alert_source_text(raw),
             "🔴 Ballistic ballistics from the east",
         )
+        for promo in (
+            "Обов'язково сьогодні підпишіться на наш ракетний канал!!",
+            "Підписуйтесь на ракетний канал",
+            "Be sure to subscribe to our missile channel today!!",
+        ):
+            self.assertEqual(monitor.clean_alert_source_text(promo), "")
 
     async def test_alert_source_keeps_linked_tactical_text(self):
         raw = (
@@ -413,8 +616,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Вишгород жовтогарячий 🟧, дорозвідка.\nТроєщина та Бровари червоний 🟥.",
         )
 
-    async def test_kyiv_nebo_monitoring_is_the_only_alert_feed(self):
-        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring"])
+    async def test_novyny_is_backup_and_kyiv_info_remains_news_only(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring", "kyiv_novyny_24"])
+        self.assertIn("kievinfo_kyiv", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("kievinfo_kyiv", monitor.ALERT_FEED_CHANNELS)
+        self.assertNotIn("kyiv_novyny_24", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("kyivnebomonitoring", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("KyivDeZagrozaCHAT", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("kyiv_alerts", monitor.ALL_CONTENT_CHANNELS)
@@ -426,6 +632,154 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_insider_ua_is_an_hourly_content_source_only(self):
         self.assertIn("insiderukr", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("insiderukr", monitor.ALERT_FEED_CHANNELS)
+
+    async def test_selected_official_sources_are_content_and_war_monitor_is_special(self):
+        self.assertNotIn("agentstvonews", monitor.ALL_CONTENT_CHANNELS)
+        self.assertEqual(monitor.ALERT_TRIGGER_CHANNEL, "KyivCityOfficial")
+        for channel in ("KyivCityOfficial", "suspilne_kyiv", "ukrenergo", "UkrzalInfo"):
+            self.assertIn(channel, monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("war_monitor", monitor.ALL_CONTENT_CHANNELS)
+        self.assertNotIn("war_monitor", monitor.ALERT_FEED_CHANNELS)
+
+    async def test_war_monitor_is_joined_as_a_required_live_source(self):
+        joined = []
+
+        class FakeClient:
+            async def __call__(self, request):
+                joined.append(request)
+
+        entities = {
+            monitor.ALERT_FEED_CHANNEL: "alert-entity",
+            monitor.ALERT_BACKUP_CHANNEL: "backup-entity",
+            monitor.WAR_MONITOR_CHANNEL: "war-monitor-entity",
+        }
+        await monitor.ensure_live_source_membership(FakeClient(), entities)
+
+        self.assertEqual(joined, ["alert-entity", "backup-entity", "war-monitor-entity"])
+
+    async def test_war_monitor_accepts_only_todays_tagged_daily_report(self):
+        today = datetime(2026, 8, 31).date()
+        valid = (
+            "📡 Обстановка станом на 00:00\n"
+            "31.08.26\n\n— Стратегічна авіація:\nНе активна;\n\n"
+            "#обстановка@war_monitor"
+        )
+        self.assertTrue(monitor.is_daily_war_monitor_report(valid, today))
+        self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("31.08.26", "30.08.26"), today))
+        self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("📡 Обстановка", "Оновлення"), today))
+        self.assertFalse(monitor.is_daily_war_monitor_report(valid.replace("#обстановка@war_monitor", ""), today))
+
+    async def test_preparation_signal_filter_keeps_indicators_not_routine_trajectories(self):
+        self.assertTrue(monitor.is_preparation_signal_candidate("Активні частоти стратегічної авіації"))
+        self.assertTrue(monitor.is_preparation_signal_candidate("Розвід БпЛА працює як ретранслятор"))
+        self.assertFalse(monitor.is_preparation_signal_candidate("Один БпЛА летить на Бровари"))
+
+    async def test_war_monitor_publishes_to_news_only(self):
+        original_claim = monitor.state_store.claim_alert_feed_delivery
+        original_collect = monitor.collect_preparation_signals
+        original_translate = monitor.translate_war_monitor_report
+        original_summary_sender = monitor.send_to_summary_group
+        original_alert_sender = monitor.send_to_alert_channel
+        news_messages = []
+        alert_messages = []
+
+        monitor.state_store.claim_alert_feed_delivery = lambda *args: True
+        monitor.collect_preparation_signals = lambda: asyncio.sleep(0, result=[])
+        monitor.translate_war_monitor_report = lambda *args: asyncio.sleep(0, result="assessment")
+        monitor.send_to_summary_group = lambda text: asyncio.sleep(0, result=news_messages.append(text) or {"message_id": 1})
+        monitor.send_to_alert_channel = lambda text: asyncio.sleep(0, result=alert_messages.append(text) or {"message_id": 2})
+        try:
+            now = datetime.now(monitor.TZ)
+            message = FakeTelegramMessage(
+                99,
+                f"📡 Обстановка станом на 00:00\n{now:%d.%m.%y}\n\n#обстановка@war_monitor",
+                now,
+            )
+            self.assertTrue(await monitor.process_war_monitor_report(message))
+            self.assertEqual(news_messages, ["assessment"])
+            self.assertEqual(alert_messages, [])
+        finally:
+            monitor.state_store.claim_alert_feed_delivery = original_claim
+            monitor.collect_preparation_signals = original_collect
+            monitor.translate_war_monitor_report = original_translate
+            monitor.send_to_summary_group = original_summary_sender
+            monitor.send_to_alert_channel = original_alert_sender
+
+    async def test_night_recap_is_capped_to_seven_bullets_and_two_per_category(self):
+        result = {
+            key: {
+                "selected_ids": [],
+                "items": [
+                    {"event_key": f"{key}-{index}", "text": f"{key}-{index}", "is_update": False}
+                    for index in range(3)
+                ],
+            }
+            for key in monitor.CATEGORIES
+        }
+        capped = monitor.cap_night_recap_bullets(result)
+        self.assertEqual(sum(len(data["items"]) for data in capped.values()), 7)
+        self.assertTrue(all(len(data["items"]) <= 2 for data in capped.values()))
+
+    async def test_summary_event_filter_blocks_history_and_cross_category_duplicates(self):
+        empty = {key: {"selected_ids": [], "items": []} for key in monitor.CATEGORIES}
+        empty["kyiv_region"]["items"] = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "text": "A residential building in Boryspil was damaged overnight.",
+            "is_update": False,
+        }]
+        empty["security_consequences"]["items"] = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "text": "The Boryspil residential building sustained blast damage.",
+            "is_update": False,
+        }]
+        filtered = monitor.filter_previously_published_events(empty, [])
+        self.assertEqual(len(filtered["kyiv_region"]["items"]), 1)
+        self.assertEqual(filtered["security_consequences"]["items"], [])
+
+        history = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "category": "kyiv_region",
+            "text": "A residential building in Boryspil was damaged overnight.",
+            "published_at": datetime.now(monitor.TZ).isoformat(),
+        }]
+        repeated = {key: {"selected_ids": [], "items": []} for key in monitor.CATEGORIES}
+        repeated["security_consequences"]["items"] = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "text": "A residential building in Boryspil was damaged overnight.",
+            "is_update": False,
+        }]
+        filtered = monitor.filter_previously_published_events(repeated, history)
+        self.assertTrue(all(not data["items"] for data in filtered.values()))
+
+        update = {key: {"selected_ids": [], "items": []} for key in monitor.CATEGORIES}
+        update["security_consequences"]["items"] = [{
+            "event_key": "2026-09-01|boryspil|residential-strike",
+            "text": "Authorities now report 12 people wounded in the Boryspil residential strike.",
+            "is_update": True,
+        }]
+        filtered = monitor.filter_previously_published_events(update, history)
+        self.assertEqual(filtered["security_consequences"]["items"], [])
+        self.assertEqual(len(filtered["kyiv_region"]["items"]), 1)
+        self.assertTrue(filtered["kyiv_region"]["items"][0]["text"].startswith("Update —"))
+
+    async def test_war_monitor_polls_only_during_the_night_window(self):
+        self.assertFalse(monitor.is_war_monitor_poll_window(datetime(2026, 9, 1, 23, 29, tzinfo=monitor.TZ)))
+        self.assertTrue(monitor.is_war_monitor_poll_window(datetime(2026, 9, 1, 23, 30, tzinfo=monitor.TZ)))
+        self.assertTrue(monitor.is_war_monitor_poll_window(datetime(2026, 9, 2, 0, 59, tzinfo=monitor.TZ)))
+        self.assertFalse(monitor.is_war_monitor_poll_window(datetime(2026, 9, 2, 1, 0, tzinfo=monitor.TZ)))
+        self.assertEqual(
+            monitor.seconds_until_war_monitor_poll_start(
+                datetime(2026, 9, 2, 1, 0, tzinfo=monitor.TZ)
+            ),
+            22.5 * 3600,
+        )
+
+    async def test_summary_schedule_uses_requested_kyiv_hours(self):
+        self.assertEqual(monitor.SUMMARY_HOURS, (1, 7, 9, 11, 13, 15, 17, 19, 21, 23))
+        now = datetime(2026, 8, 31, 10, 30, tzinfo=monitor.TZ)
+        self.assertEqual(monitor.seconds_until_next_summary(now), 0.5 * 3600)
+        after_last = datetime(2026, 8, 31, 22, 30, tzinfo=monitor.TZ)
+        self.assertEqual(monitor.seconds_until_next_summary(after_last), 0.5 * 3600)
 
     async def test_manual_override_admin_allowlist(self):
         self.assertTrue(monitor.is_authorized_admin(392256147))
@@ -464,23 +818,58 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         source = "Без загроз по бандеролям, тривогу дали на реактивний в бік Броварів"
         prompt = monitor.build_alert_translation_prompt(source)
         self.assertIn("jet-powered UAV(s)", prompt)
-        self.assertIn("cruise missile(s)", prompt)
-        self.assertIn("cruise missile(s), never S8000", prompt)
         self.assertIn("NEVER cruise missile(s) unless", prompt)
         self.assertIn("no high-speed targets", prompt)
-        self.assertNotIn("S8000 Banderol", prompt)
-        self.assertIn("No threat from cruise missiles", prompt)
+        self.assertIn("Бандероль = Banderol", prompt)
+        self.assertIn("бандеролі = Banderols", prompt)
+        self.assertIn("NEVER infer a weapon type", prompt)
+        self.assertIn("No threat from Banderols", prompt)
+        self.assertNotIn("Бандероль / бандеролі / бандеролям = cruise missile(s)", prompt)
         self.assertIn("never 'minus'", prompt)
         self.assertIn("never translate them literally as gifts or parcels", prompt)
+        self.assertIn("never good or friendly drones", prompt)
+        self.assertIn("черговий дрон = another drone, NEVER a red drone", prompt)
+        self.assertIn("вибух / вибухи = explosion(s), NEVER impact(s)", prompt)
+        self.assertIn("NEVER cats or kittens", prompt)
+        self.assertIn("the subject is omitted, so NEVER invent 'we' or 'they'", prompt)
+        self.assertIn("air defence may become active", prompt)
         self.assertTrue(prompt.endswith(source))
+
+    async def test_known_semantic_translation_errors_are_corrected(self):
+        cases = (
+            (
+                "Черговий дрон повз Княжичі у бік ДВРЗ",
+                "Red drone passing Knyazhychi toward DVRZ.",
+                "Another drone passing Knyazhychi toward DVRZ.",
+            ),
+            (
+                "Вибух, але дрон наче вижив",
+                "An impact, but the drone appears to have survived.",
+                "An explosion, but the drone appears to have survived.",
+            ),
+            (
+                "Гостомель котики, тримайтесь",
+                "Hostomel cats, hang in there.",
+                "",  # Social commentary stays blocked even if the model publishes it.
+            ),
+        )
+        for source, bad_translation, expected in cases:
+            raw = json.dumps({
+                "decision": "PUBLISH",
+                "block_category": None,
+                "translation": bad_translation,
+                "evidence": "",
+                "reason": "operational",
+            })
+            self.assertEqual(monitor.parse_alert_gate_output(raw, source)[1], expected)
 
     async def test_known_terse_alert_fragments_never_need_model_context(self):
         self.assertEqual(monitor.translate_known_terse_fragment("Дарниця"), "Darnytsia")
+        self.assertEqual(monitor.translate_known_terse_fragment("Стоянка"), "Stoianka")
         self.assertEqual(monitor.translate_known_terse_fragment("ТЕЦ-5"), "CHP-5")
         self.assertEqual(monitor.translate_known_terse_fragment("Збили"), "Shot down")
-        self.assertEqual(
-            monitor.translate_known_terse_fragment("По балістиці очікуємо на відбій"),
-            "The ballistic threat is expected to be lifted shortly.",
+        self.assertIsNone(
+            monitor.translate_known_terse_fragment("По балістиці очікуємо на відбій")
         )
         self.assertEqual(
             monitor.translate_known_terse_fragment("Балістика на Київ!"),
@@ -490,6 +879,260 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         prompt = monitor.build_alert_translation_prompt("Дарниця")
         self.assertIn("Never ask for more context", prompt)
         self.assertIn("'Дарниця' = 'Darnytsia'", prompt)
+        self.assertIn("Стоянка is the settlement Stoianka", prompt)
+
+    async def test_semantic_alert_gate_allows_only_evidenced_closed_category_drops(self):
+        prompt = monitor.build_alert_translation_prompt(
+            "Боярка, Вишневе",
+            ["2 реактивних БпЛА наближаються до Київщини"],
+        )
+        self.assertIn("default decision is PUBLISH", prompt)
+        self.assertIn("closed categories", prompt)
+        self.assertIn("When uncertain, PUBLISH", prompt)
+        self.assertIn("A bare Kyiv district or immediate-approach place is always tactical", prompt)
+        self.assertIn("For EVERY PUBLISH use operational_updates", prompt)
+        self.assertIn("2 реактивних БпЛА наближаються до Київщини", prompt)
+        self.assertTrue(prompt.endswith("Боярка, Вишневе"))
+
+        self.assertEqual(
+            monitor.parse_alert_gate_output(
+                '{"decision":"DROP","block_category":"EDITORIAL_COMMENTARY",'
+                '"translation":"Editorial complaint.","evidence":"чому","reason":"commentary"}',
+                "чому досі тривога",
+            ),
+            ("DROP", "", "EDITORIAL_COMMENTARY"),
+        )
+        self.assertEqual(
+            monitor.parse_alert_gate_output(
+                '{"decision":"PUBLISH","block_category":null,'
+                '"translation":"UAV heading toward Kyiv.","evidence":"","reason":"current_threat"}',
+                "БпЛА на Київ",
+            ),
+            ("PUBLISH", "UAV heading toward Kyiv.", "current_threat"),
+        )
+        with self.assertRaises(ValueError):
+            monitor.parse_alert_gate_output('{"translation":"Maybe publish this"}')
+
+    async def test_operational_locations_and_unapproved_drops_publish(self):
+        real_tactical_updates = (
+            "Нивки",
+            "Шулявка",
+            "Жуляни",
+            "Підлітають до Броварів",
+            "Новий на Вишгород",
+            "Далі Чабани",
+            "Вилітає в район Василькова",
+            "Жуляни, Вишневе",
+            "Другий Нивки, Солома",
+            "Стоянка",
+            "Осещина",
+            "Пуща-Водиця",
+        )
+        for text in real_tactical_updates:
+            self.assertTrue(monitor.contains_operational_location(text), text)
+            self.assertEqual(
+                monitor.parse_alert_gate_output(
+                    '{"decision":"DROP","block_category":"EDITORIAL_COMMENTARY",'
+                    '"translation":"Operational location update.",'
+                    '"evidence":"' + text + '","reason":"vague"}',
+                    text,
+                ),
+                (
+                    "PUBLISH",
+                    "Operational location update.",
+                    "override_unapproved_drop:EDITORIAL_COMMENTARY",
+                ),
+            )
+
+        self.assertEqual(
+            monitor.parse_alert_gate_output(
+                '{"decision":"DROP","block_category":"VAGUE",'
+                '"translation":"Four of them there.","evidence":"Їх там 4шт","reason":"ambiguous"}',
+                "Їх там 4шт",
+            ),
+            ("PUBLISH", "Four of them there.", "override_unapproved_drop:VAGUE"),
+        )
+
+    async def test_distant_update_without_kyiv_trajectory_can_be_dropped(self):
+        text = "Нові залітають на Чернігівщину"
+        self.assertFalse(monitor.contains_operational_location(text))
+        self.assertEqual(
+            monitor.parse_alert_gate_output(
+                '{"decision":"DROP","block_category":"DISTANT_WITHOUT_KYIV_TRAJECTORY",'
+                '"translation":"New threats entering Chernihiv region.",'
+                '"evidence":"Чернігівщину","reason":"distant"}',
+                text,
+            ),
+            ("DROP", "", "DISTANT_WITHOUT_KYIV_TRAJECTORY"),
+        )
+
+    async def test_priority_threats_cannot_be_dropped_as_distant(self):
+        priority_updates = (
+            ("Загроза з Брянська!!", "Загроза"),
+            (
+                "Вибухи в Брянську, робота ворожого ППО, але все одно максимально уважно",
+                "Вибухи",
+            ),
+            ("Загроза балістики з Курська", "балістики"),
+            ("Вихід ракет з Брянської області", "ракет"),
+            ("Перші ракети Х101 залітають на Сумщину", "ракети"),
+            ("Х101 залітають на Сумщину", "Х101"),
+            ("Калібри проходять Вінниччину", "Калібри"),
+        )
+        for text, evidence in priority_updates:
+            self.assertTrue(monitor.is_priority_alert_message(text), text)
+            self.assertEqual(
+                monitor.parse_alert_gate_output(
+                    '{"decision":"DROP","block_category":"DISTANT_WITHOUT_KYIV_TRAJECTORY",'
+                    f'"translation":"Priority threat update.","evidence":"{evidence}",'
+                    '"reason":"distant"}',
+                    text,
+                ),
+                (
+                    "PUBLISH",
+                    "Priority threat update.",
+                    "override_unapproved_drop:DISTANT_WITHOUT_KYIV_TRAJECTORY",
+                ),
+            )
+
+        prompt = monitor.build_alert_translation_prompt(priority_updates[0][0])
+        self.assertIn("Those priority updates always PUBLISH", prompt)
+        self.assertIn("ANY Ukrainian region is tactical", prompt)
+        self.assertIn("Брянськ / Брянська / Брянську = Bryansk", prompt)
+        self.assertIn("Воронеж / Воронежа = Voronezh", prompt)
+        self.assertIn("Х-101 / Х101 = Kh-101 missile(s)", prompt)
+
+        for origin in ("Брянськ", "Воронеж", "Курськ", "Крим", "Каспій"):
+            self.assertTrue(monitor.contains_operational_location(origin), origin)
+            self.assertEqual(
+                monitor.parse_alert_gate_output(
+                    '{"decision":"DROP","block_category":"DISTANT_WITHOUT_KYIV_TRAJECTORY",'
+                    f'"translation":"Launch-area update.","evidence":"{origin}",'
+                    '"reason":"distant"}',
+                    origin,
+                )[0],
+                "PUBLISH",
+            )
+
+    async def test_semantic_drop_is_checkpointed_instead_of_retried(self):
+        original_active = monitor.alert_active
+        original_translate = monitor.translate_message
+
+        async def semantic_drop(text, context=()):
+            return False
+
+        try:
+            monitor.alert_active = True
+            monitor.translate_message = semantic_drop
+            self.assertTrue(
+                await monitor.handle_alert_message(
+                    "2 нових на Чернігівщині",
+                    generation=monitor.alert_generation,
+                )
+            )
+        finally:
+            monitor.alert_active = original_active
+            monitor.translate_message = original_translate
+
+    async def test_translation_failure_is_bounded_and_checkpointed(self):
+        class InvalidResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"content": [{"text": "{}"}]}
+
+        class InvalidTranslationClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, *args, **kwargs):
+                self.calls += 1
+                return InvalidResponse()
+
+        original_active = monitor.alert_active
+        original_client = monitor.http_client
+        original_slots = monitor.translation_slots
+        original_owner = monitor.send_to_owner
+        original_timeout = getattr(monitor.httpx, "Timeout", None)
+        client = InvalidTranslationClient()
+        owner_messages = []
+
+        try:
+            monitor.alert_active = True
+            monitor.http_client = client
+            monitor.translation_slots = asyncio.Semaphore(1)
+            monitor.httpx.Timeout = lambda *args, **kwargs: None
+            monitor.send_to_owner = lambda text: asyncio.sleep(
+                0, result=owner_messages.append(text) or {"message_id": 1}
+            )
+
+            self.assertTrue(
+                await monitor.handle_alert_message(
+                    "Невідомий об'єкт рухається поблизу Києва",
+                    generation=monitor.alert_generation,
+                )
+            )
+        finally:
+            monitor.alert_active = original_active
+            monitor.http_client = original_client
+            monitor.translation_slots = original_slots
+            monitor.send_to_owner = original_owner
+            if original_timeout is None:
+                delattr(monitor.httpx, "Timeout")
+            else:
+                monitor.httpx.Timeout = original_timeout
+
+        self.assertEqual(client.calls, monitor.TRANSLATION_MAX_ATTEMPTS)
+        self.assertEqual(len(owner_messages), 1)
+
+    async def test_scheduled_summary_runs_during_active_alert(self):
+        original_active = monitor.alert_active
+        original_builder = monitor.build_summary
+        calls = []
+
+        async def fake_builder(**kwargs):
+            calls.append(kwargs)
+            return True
+
+        try:
+            monitor.alert_active = True
+            monitor.build_summary = fake_builder
+            self.assertTrue(await monitor.run_scheduled_summary())
+        finally:
+            monitor.alert_active = original_active
+            monitor.build_summary = original_builder
+
+        self.assertEqual(len(calls), 1)
+
+    async def test_alert_source_context_resolves_terse_followups_and_expires(self):
+        monitor.recent_alert_source_context.clear()
+        start = datetime(2026, 8, 28, 2, 20, tzinfo=timezone.utc)
+        self.assertEqual(
+            monitor.remember_alert_source_message(
+                "kyivnebomonitoring", 1, "2 реактивних на Київщині", start
+            ),
+            [],
+        )
+        self.assertEqual(
+            monitor.remember_alert_source_message(
+                "kyivnebomonitoring", 2, "Боярка, Вишневе", start + timedelta(minutes=1)
+            ),
+            ["2 реактивних на Київщині"],
+        )
+        self.assertEqual(
+            monitor.remember_alert_source_message(
+                "kyivnebomonitoring", 3, "Новий епізод", start + timedelta(minutes=11)
+            ),
+            ["Боярка, Вишневе"],
+        )
+        self.assertEqual(
+            monitor.remember_alert_source_message(
+                "kyivnebomonitoring", 3, "Новий епізод виправлено", start + timedelta(minutes=11)
+            ),
+            ["Боярка, Вишневе"],
+        )
+        monitor.recent_alert_source_context.clear()
 
     async def test_model_meta_commentary_can_never_be_published_as_translation(self):
         bad_outputs = (
@@ -531,7 +1174,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.state_store.get_alert_feed_cursor = lambda name: 0
             monitor.state_store.set_alert_feed_cursor = lambda name, value: True
             monitor.state_store.claim_alert_feed_delivery = lambda name, message_id, text: True
-            monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
+            monitor.schedule_alert_delivery = lambda text, source, context=(): asyncio.create_task(
                 fake_delivery(text, source)
             )
             monitor.recent_alert_messages.clear()
@@ -597,7 +1240,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_alert_poller_recovers_messages_after_cursor(self):
         now = datetime.now(timezone.utc)
         channel = monitor.ALERT_FEED_CHANNEL
-        entities = {channel: channel}
+        entities = {name: name for name in monitor.ALERT_FEED_CHANNELS}
         client = FakeHistoryClient({channel: [
             FakeTelegramMessage(125071, "Залісся – уважно по БпЛА", now - timedelta(minutes=2)),
             FakeTelegramMessage(125072, "1 на Троєщину! 1 на Бровари", now - timedelta(minutes=1)),
@@ -611,7 +1254,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         delivered = []
         cursors = {channel: 125071}
 
-        async def fake_handler(text, source, generation):
+        async def fake_handler(text, source, generation, context=()):
             delivered.append((text, source, generation))
             return True
 
@@ -667,7 +1310,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.state_store.release_alert_feed_delivery = lambda name, message_id, text: claims.discard(
                 (name, message_id, monitor.normalize_alert_for_dedup(text))
             )
-            monitor.schedule_alert_delivery = lambda text, source: asyncio.create_task(
+            monitor.schedule_alert_delivery = lambda text, source, context=(): asyncio.create_task(
                 fake_delivery(text, source)
             )
 
@@ -711,12 +1354,14 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         update = "⚠️ 3 шахеди рухаються через Васильків у напрямку Києва"
 
         self.assertTrue(monitor.should_publish_alert(first, "kyiv_alerts", now=100.0))
+        monitor.remember_published_alert(first, "kyiv_alerts", now=100.0)
         self.assertFalse(monitor.should_publish_alert(duplicate, "kyiv_alerts", now=130.0))
         self.assertTrue(monitor.should_publish_alert(update, "kyiv_alerts", now=140.0))
 
     async def test_duplicate_window_expires(self):
         message = "Балістична ціль рухається у напрямку Києва"
         self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=100.0))
+        monitor.remember_published_alert(message, "kyiv_alerts", now=100.0)
         self.assertTrue(monitor.should_publish_alert(message, "kyiv_alerts", now=281.0))
 
 

@@ -16,7 +16,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from text_processing import alert_feed_cursor_key, normalize_alert_for_dedup, utc_iso
+from text_processing import alert_feed_cursor_key, normalize_alert_revision, utc_iso
 
 CATEGORY_STATS_DB_PATH = os.environ.get(
     "CATEGORY_STATS_DB_PATH", "/data/kyiv_monitor_category_stats.sqlite3"
@@ -194,7 +194,7 @@ def claim_alert_feed_delivery(channel, message_id, text):
     """Atomically reserve one source-message version across worker restarts."""
     if not stats_db_ready:
         return True
-    fingerprint = hashlib.sha256(normalize_alert_for_dedup(text).encode()).hexdigest()
+    fingerprint = hashlib.sha256(normalize_alert_revision(text).encode()).hexdigest()
     try:
         with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
             cursor = connection.execute(
@@ -213,7 +213,7 @@ def release_alert_feed_delivery(channel, message_id, text):
     """Release a failed reservation so the same message version can retry."""
     if not stats_db_ready:
         return
-    fingerprint = hashlib.sha256(normalize_alert_for_dedup(text).encode()).hexdigest()
+    fingerprint = hashlib.sha256(normalize_alert_revision(text).encode()).hexdigest()
     try:
         with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
             connection.execute(
@@ -404,3 +404,26 @@ def persist_category_stats(run_at, snapshots, category_results, channels):
                         )
     except Exception as exc:
         print(f"[STATS DB ERROR] write failed: {type(exc).__name__}: {exc}")
+
+
+def load_recent_published_classifications(hours=24, limit=40):
+    """Return recent source material already used in public summaries."""
+    if not stats_db_ready:
+        return []
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        with sqlite3.connect(CATEGORY_STATS_DB_PATH) as connection:
+            rows = connection.execute(
+                """SELECT run_at, category, preview
+                   FROM hourly_classifications
+                   ORDER BY run_at DESC
+                   LIMIT 200""",
+            ).fetchall()
+        return [
+            {"run_at": run_at, "category": category, "preview": preview}
+            for run_at, category, preview in rows
+            if datetime.fromisoformat(run_at).astimezone(timezone.utc) >= cutoff
+        ][:int(limit)]
+    except Exception as exc:
+        print(f"[STATS DB ERROR] recent classification read failed: {type(exc).__name__}: {exc}")
+        return []

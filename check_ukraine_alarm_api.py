@@ -4,6 +4,8 @@ import json
 import os
 import urllib.request
 
+from text_processing import parse_ukraine_alarm_kyiv_state
+
 
 key = os.environ["UKRAINE_ALARM_API_KEY"].strip()
 request = urllib.request.Request(
@@ -13,24 +15,5 @@ request = urllib.request.Request(
 with urllib.request.urlopen(request, timeout=15) as response:
     regions = json.load(response)
 
-kyiv = next(
-    (
-        region
-        for region in regions
-        if {
-            str(region.get("regionName", "")).strip().casefold(),
-            str(region.get("regionEngName", "")).strip().casefold(),
-        }
-        & {"київ", "м. київ", "kyiv", "kyiv city"}
-    ),
-    None,
-)
-if kyiv is None:
-    raise RuntimeError("API response is valid JSON but Kyiv City is missing")
-
-active = any(
-    str(alert.get("type", "")).upper() == "AIR"
-    for alert in kyiv.get("activeAlerts") or []
-    if isinstance(alert, dict)
-)
+active = parse_ukraine_alarm_kyiv_state(regions)
 print(f"UkraineAlarm API check passed: Kyiv City AIR={'ACTIVE' if active else 'CLEAR'}")
