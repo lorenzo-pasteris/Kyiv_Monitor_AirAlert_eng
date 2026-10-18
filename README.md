@@ -156,7 +156,8 @@ ruff check .
 the file to edit when adding or upgrading a dependency. `requirements-lock.txt` pins
 the full resolved tree, including transitive packages like `pyaes`, `rsa` and
 `httpcore`. `.github/workflows/deploy-production.yml` sets it as Railway's build
-install command (`RAILPACK_INSTALL_CMD`) before each deploy, and CI installs from it
+install command (`RAILPACK_INSTALL_CMD`) before each deploy, creating `/app/.venv`
+as required by Railpack's runtime image. CI installs from the same lock file
 too, so every environment runs the exact versions that were tested. Regenerate it
 after changing `requirements.txt`:
 

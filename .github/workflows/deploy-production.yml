@@ -45,7 +45,7 @@ jobs:
 
       - name: Pin Railway's build install command to the lock file
         run: |
-          printf 'pip install -r requirements-lock.txt' | railway variable set RAILPACK_INSTALL_CMD --stdin --skip-deploys --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
+          printf '%s' 'python -m venv /app/.venv && /app/.venv/bin/python -m pip install -r requirements-lock.txt' | railway variable set RAILPACK_INSTALL_CMD --stdin --skip-deploys --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
 
       - name: Stamp the deployment archive
         run: "printf '\\n# Deployment run: %s\\n' \"$GITHUB_RUN_ID\" >> monitor.py"
