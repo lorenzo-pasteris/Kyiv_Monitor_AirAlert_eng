@@ -99,12 +99,12 @@ class PublicAlertHygieneTests(unittest.TestCase):
             self.assertEqual(parse_backup_novelty(json.dumps(payload), source, publications)[0]["status"], "UNCERTAIN")
             self.assertEqual(parse_alert_gate_output(json.dumps(payload), source, mixed_news_source=True)[0], "PUBLISH")
 
-    def test_shadow_prompt_is_backup_only_and_protects_new_threats(self):
+    def test_novelty_prompt_covers_both_sources_and_protects_new_threats(self):
         publications = [{"id": "p1", "text": "2 drones towards Kozyn"}]
         primary = build_alert_translation_prompt("Козин", published_context=publications)
         backup = build_alert_translation_prompt("Козин", mixed_news_source=True, published_context=publications)
-        self.assertNotIn("OBSERVATION ONLY", primary)
-        self.assertNotIn('"p1"', primary)
+        self.assertIn("OBSERVATION ONLY", primary)
+        self.assertIn('"p1"', primary)
         self.assertIn("OBSERVATION ONLY", backup)
         self.assertIn("A new missile launch", backup)
         self.assertIn("negation or uncertainty", backup)

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 from test_routing import FakeTelegramMessage, monitor
 from text_processing import (
+    AlertTranslation,
     build_alert_translation_prompt, clean_alert_source_text, correct_known_translation_errors,
     is_general_siren_announcement, normalize_alert_revision, parse_alert_gate_output,
     translate_known_terse_fragment,
@@ -22,6 +23,21 @@ REAL_TRANSLATE_MESSAGE = monitor.translate_message
 
 
 class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
+    async def test_semantic_repeat_is_checkpointed_without_sending_on_either_source(self):
+        for previous, current in ((self.primary, self.backup), (self.backup, self.primary)):
+            monitor.recent_alert_messages.clear()
+            monitor.state_store.persist_operational_state("backup_confirmed_v1", "{}")
+            monitor.remember_confirmed_translation("A drone is heading toward Brovary", previous)
+            history = monitor.backup_publication_context()
+            source = "Дрон зараз летить на Бровари"
+            raw = json.dumps({"decision": "PUBLISH", "operational_updates": [{
+                "source": source, "translation": "A UAV is moving toward Brovary",
+                "novelty": {"status": "DUPLICATE", "duplicate_of": [history[-1]["id"]]},
+            }]})
+            monitor.translate_message.return_value = AlertTranslation("A UAV is moving toward Brovary", raw, history)
+            self.assertTrue(await monitor.handle_alert_message(source, current))
+        monitor.safe_send.assert_not_awaited()
+
     async def test_missing_fragments_bypass_model_on_both_sources(self):
         with patch.object(monitor, "http_client", AsyncMock()) as client:
             for mixed in (False, True):

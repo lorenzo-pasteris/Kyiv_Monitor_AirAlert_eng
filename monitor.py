@@ -26,6 +26,8 @@ import state_store
 from alert_rules import classify_kyiv_city_official_level
 from predeploy_check import validate_environment
 from text_processing import (
+    AlertTranslation,
+    remove_confirmed_cross_source_duplicates,
     CANONICAL_PLACE_SPELLINGS,
     altitude_update_key,
     build_alert_translation_prompt,
@@ -804,14 +806,14 @@ async def translate_message(text, context=(), *, mixed_news_source=False):
         if mixed_news_source:
             record_backup_shadow(text, "{}", backup_publication_context())
         return known_fragment
-    publications = backup_publication_context() if mixed_news_source else []
+    publications = backup_publication_context()
     for attempt in range(1, TRANSLATION_MAX_ATTEMPTS + 1):
         try:
             async with translation_slots:
                 r = await http_client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json={"model": MODEL, "max_tokens": 650 if mixed_news_source else 450,
+                    json={"model": MODEL, "max_tokens": 650 if mixed_news_source or publications else 450,
                           "thinking": {"type": "disabled"}, "output_config": {"effort": "low"}, "messages": [{
                         "role": "user", "content": build_alert_translation_prompt(
                             text, context, mixed_news_source=mixed_news_source, published_context=publications)
@@ -830,7 +832,7 @@ async def translate_message(text, context=(), *, mixed_news_source=False):
             if reason.startswith("override_unapproved_drop:"):
                 print(f"[ALERT DROP OVERRIDDEN] reason={reason!r} input={text[:120]!r}")
             print(f"[TRANSLATION OK] input={text[:120]!r} output={translation[:120]!r}")
-            return translation
+            return AlertTranslation(translation, result, publications)
         except Exception as exc:
             state = "RETRY" if attempt < TRANSLATION_MAX_ATTEMPTS else "FAILED"
             print(
@@ -1922,8 +1924,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         # handled so the five-second recovery poll cannot bill it indefinitely.
         return True
 
-    translation = clean_alert_public_text(translation)
-    if not translation:
+    if not clean_alert_public_text(translation):
         print(f"[ALERT EMPTY AFTER CLEANING] source=@{source}")
         return True
 
@@ -1935,6 +1936,14 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         if generation != alert_generation or not alert_active:
             return False
         if not should_publish_alert(clean, source):
+            return True
+        translation, removed = remove_confirmed_cross_source_duplicates(
+            translation, clean[:1500], source, backup_publication_context())
+        if removed:
+            print("[ALERT SEMANTIC DUPLICATE] " + json.dumps(
+                {"source": source, "removed": removed}, ensure_ascii=False))
+        translation = clean_alert_public_text(translation)
+        if not translation:
             return True
         indicator = "🟡" if alert_level == "YELLOW" else "🔴"
         delivered = bool(await safe_send(f"{indicator} {html.escape(translation)}"))

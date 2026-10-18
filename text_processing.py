@@ -522,7 +522,7 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
         "Do not use preceding context as an excerpt. For PUBLISH omit the top-level translation "
         "field: the operational_updates translations replace it; do not translate the full mixed post.\n\n"
     )
-    if mixed_news_source:
+    if mixed_news_source or published_context:
         source_rules += (
             "OBSERVATION ONLY: for each operational_updates entry add novelty with status "
             "NEW, DUPLICATE or UNCERTAIN, duplicate_of (an array of confirmed publication IDs), "
@@ -811,6 +811,87 @@ def parse_backup_novelty(raw: str, source_text: str, publications) -> list[dict]
         return result
     except (ValueError, TypeError, AttributeError, KeyError):
         return []
+
+
+class AlertTranslation(str):
+    """Keep validated translation and comparison evidence together across awaits."""
+
+    def __new__(cls, text, raw, publications):
+        result = super().__new__(cls, text)
+        result.raw = raw
+        result.publications = publications
+        return result
+
+
+def remove_confirmed_cross_source_duplicates(translation, source_text, source, publications):
+    """Fail open; suppress only complete, evidenced, recent cross-source repeats."""
+    if not isinstance(translation, AlertTranslation):
+        return str(translation), []
+    # New arrivals while the model was running invalidate its view of events.
+    if publications != translation.publications:
+        return str(translation), []
+    try:
+        parsed = json.loads(translation.raw)
+        updates = parsed["operational_updates"]
+        evaluations = parse_backup_novelty(translation.raw, source_text, publications)
+        if not updates or len(updates) != len(evaluations):
+            return str(translation), []
+        history = {item["id"]: item for item in publications}
+        kept, removed = [], []
+        for update, evaluation in zip(updates, evaluations):
+            excerpt = update["source"]
+            # Reuse all production validation, including excerpt grounding.
+            single = dict(parsed, operational_updates=[update])
+            _, output, _ = parse_alert_gate_output(json.dumps(single), source_text, require_excerpts=True)
+            refs = evaluation["duplicate_of"]
+            previous = history.get(refs[0]) if len(refs) == 1 else None
+            protected = re.search(
+                r"(?i)\b(?:ще|чергов\w*|знов\w*|інш\w*|нов\w*|не|ні|без|наче|схоже|можливо|"
+                r"ймовір\w*|попередньо|нібито|пуск\w*|запуск\w*|баліст\w*|another|again|new|not|no|without|"
+                r"possibly|apparently|probably|may|might|seems|likely|reported|launch\w*|ballistic)\b",
+                excerpt + " " + output + " " + (previous["text"] if previous else ""),
+            )
+            # Bare locations/outcomes do not identify the same target reliably.
+            complete = len(normalize_alert_for_dedup(excerpt).split()) >= 4
+            def signature(text):
+                lowered = text.casefold()
+                places = {place.casefold() for place in OPERATIONAL_LOCATION_STEMS.values()
+                          if place.casefold() in lowered}
+                numbers = set(re.findall(r"\d+(?:[.,]\d+)?", text))
+                numbers.update(str(index) for index, word in enumerate(
+                    ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"))
+                    if re.search(rf"\b{word}\b", lowered))
+                # Unknown capitalised names must not vanish just because the
+                # canonical Kyiv glossary does not contain them yet.
+                names = set(re.findall(r"\b[A-Z][A-Za-z-]+\b", text)) - {
+                    "A", "An", "The", "Drone", "Drones", "UAV", "UAVs", "It", "One",
+                    "Heading", "Moving", "Flying",
+                }
+                directions = set(re.findall(r"\b(?:north|south|east|west|toward|away|over|from|through)\w*", lowered))
+                facts = {label for label, pattern in (
+                    ("drone", r"\b(?:drone|uav)s?\b"), ("missile", r"\bmissiles?\b"),
+                    ("jet", r"\bjet\b"), ("cruise", r"\bcruise\b"),
+                    ("explosion", r"\b(?:explosion|blast)s?\b"),
+                    ("impact", r"\b(?:impact|hit|struck)\b"),
+                    ("shot_down", r"\b(?:shot down|intercepted|destroyed)\b"),
+                    ("descent", r"\b(?:descend\w*|altitude|fall\w*)\b"),
+                    ("turned", r"\bturn\w*\b"), ("clear", r"\bclear\b"),
+                ) if re.search(pattern, lowered)}
+                attributes = set(re.findall(r"\b(?:high|low|fast|slow|accelerat\w*|decelerat\w*)\b", lowered))
+                return places, numbers, directions, facts, names, attributes
+            duplicate = (evaluation["status"] == "DUPLICATE" and previous
+                         and previous["source"] != source and complete and not protected
+                         and isinstance(previous.get("at"), (int, float))
+                         and 0 <= datetime.now(timezone.utc).timestamp() - previous["at"] <= 120
+                         and signature(output)[0]
+                         and signature(output) == signature(previous["text"]))
+            if duplicate:
+                removed.append({"source": excerpt, "duplicate_of": refs})
+            else:
+                kept.append(output)
+        return "\n".join(kept), removed
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return str(translation), []
 
 
 def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_source=False, require_excerpts=False) -> tuple[str, str, str]:
