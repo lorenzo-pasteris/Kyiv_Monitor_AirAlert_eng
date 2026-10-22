@@ -2,7 +2,7 @@
  Kyiv Alert Monitor v6 — low-latency async pipeline
 - Production trigger: explicit alert templates from @KyivCityOfficial
 - Normal mode: scheduled analysis of news channels published in the news group
-- Alert mode: primary @kyivnebomonitoring plus filtered @kyiv_novyny_24 backup
+- Alert mode: @kyivnebomonitoring only; secondary tactical feed disabled
 - Daily situation report: only the strict #обстановка post from @war_monitor
 - Health check every 12h: private warning to owner if channels go silent
 """
@@ -126,7 +126,7 @@ ALL_CONTENT_CHANNELS = [
     UKRENERGO_CHANNEL,
     UKRZALINFO_CHANNEL,
 ]
-ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL, ALERT_BACKUP_CHANNEL]
+ALERT_FEED_CHANNELS = [ALERT_FEED_CHANNEL]
 
 SUMMARY_HOURS = (1, 7, 9, 11, 13, 15, 17, 19, 21, 23)
 SUMMARY_INTERVAL = 180 if TEST_MODE else 2 * 3600
@@ -1981,7 +1981,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
 
 async def process_alert_feed_message(message, channel, *, edited=False):
     """Filter, deliver and checkpoint one ALERT-feed message."""
-    if not alert_active:
+    if channel not in ALERT_FEED_CHANNELS or not alert_active:
         return False
     episode_at = parse_utc_timestamp(state_store.load_operational_state("alert_episode_started_at"))
     message_at = getattr(message, "date", None)

@@ -60,12 +60,17 @@ signals from the preceding six hours.
 The explicit Kyiv alert templates from `@KyivCityOfficial` control the mode and its
 GREEN/YELLOW/RED level. YELLOW publishes a drone-threat notice, RED publishes the
 higher-threat notice, and every YELLOW↔RED change is shown publicly. While active,
-actionable new messages and edits from `@kyivnebomonitoring` and backup `@kievinfo_kyiv` enter the low-latency
+actionable new messages and edits from `@kyivnebomonitoring` alone enter the low-latency
 translation pipeline. NORMAL summaries are suspended, alert transitions are
 serialized, public delivery must be confirmed before the state is committed, and
 stale translations are discarded after the alert ends.
 
-The primary never waits for a backup report or a silence timer. Both feeds use the
+The secondary tactical feed (`@kyiv_novyny_24`) is disabled: no live messages,
+edits or history recovery from that source enter the alert pipeline. News sources
+and official Telegram/API alert-state sources are unchanged. The existing backup
+filter implementation remains covered by offline tests but is not enabled.
+
+The primary never waits for a backup report or a silence timer. The retained filters use the
 same text, image and translation filters. A shared three-minute history contains
 only confirmed public deliveries and is persisted across restarts. Obvious repeats
 are checked before translation and again atomically before sending, including when

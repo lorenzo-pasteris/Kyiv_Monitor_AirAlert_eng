@@ -616,8 +616,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             "Вишгород жовтогарячий 🟧, дорозвідка.\nТроєщина та Бровари червоний 🟥.",
         )
 
-    async def test_novyny_is_backup_and_kyiv_info_remains_news_only(self):
-        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring", "kyiv_novyny_24"])
+    async def test_novyny_disabled_and_kyiv_info_remains_news_only(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring"])
         self.assertIn("kievinfo_kyiv", monitor.ALL_CONTENT_CHANNELS)
         self.assertNotIn("kievinfo_kyiv", monitor.ALERT_FEED_CHANNELS)
         self.assertNotIn("kyiv_novyny_24", monitor.ALL_CONTENT_CHANNELS)
@@ -655,7 +655,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         }
         await monitor.ensure_live_source_membership(FakeClient(), entities)
 
-        self.assertEqual(joined, ["alert-entity", "backup-entity", "war-monitor-entity"])
+        self.assertEqual(joined, ["alert-entity", "war-monitor-entity"])
 
     async def test_war_monitor_accepts_only_todays_tagged_daily_report(self):
         today = datetime(2026, 8, 31).date()

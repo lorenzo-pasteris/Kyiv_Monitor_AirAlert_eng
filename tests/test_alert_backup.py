@@ -22,6 +22,20 @@ from text_processing import (
 REAL_TRANSLATE_MESSAGE = monitor.translate_message
 
 
+class ActiveAlertSourceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_primary_enabled_and_secondary_cannot_publish_even_edits(self):
+        self.assertEqual(monitor.ALERT_FEED_CHANNELS, ["kyivnebomonitoring"])
+        self.assertIn("kievinfo_kyiv", monitor.ALL_CONTENT_CHANNELS)
+        self.assertEqual(monitor.ALERT_TRIGGER_CHANNEL, "KyivCityOfficial")
+        with patch.object(monitor, "alert_active", True), \
+             patch.object(monitor, "translate_message", new=AsyncMock()) as translate:
+            for edited in (False, True):
+                message = FakeTelegramMessage(123, "Ракети на Київ", datetime.now(timezone.utc))
+                self.assertFalse(await monitor.process_alert_feed_message(
+                    message, monitor.ALERT_BACKUP_CHANNEL, edited=edited))
+            translate.assert_not_awaited()
+
+
 class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
     async def test_semantic_repeat_is_checkpointed_without_sending_on_either_source(self):
         for previous, current in ((self.primary, self.backup), (self.backup, self.primary)):
@@ -174,6 +188,8 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         monitor.recent_alert_source_context.clear()
         self.primary = monitor.ALERT_FEED_CHANNEL
         self.backup = monitor.ALERT_BACKUP_CHANNEL
+        # Retain offline coverage of the disabled backup without enabling it in production.
+        self.patch(monitor, "ALERT_FEED_CHANNELS", [self.primary, self.backup])
         self.text = "2 дрони рухаються через Бровари у напрямку Києва"
 
     def patch(self, obj, name, value):
