@@ -176,8 +176,12 @@ ALERT_LEVEL_MESSAGES = {
 
 
 def build_all_clear_message():
-    """Return the official all-clear without promotional links."""
-    return "✅ <b>ALL CLEAR — KYIV</b>"
+    """Include our news link only in the official all-clear, not source alerts."""
+    safe_link = html.escape(SUMMARY_CHAT_LINK or "", quote=True)
+    return (
+        "✅ <b>ALL CLEAR — KYIV</b>\n\n"
+        f'<a href="{safe_link}">Join Kyiv News →</a>'
+    )
 
 # --- Cross-source categories (normal mode) ---
 # A source is only provenance. Every buffered message is evaluated against every category.
