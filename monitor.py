@@ -13,6 +13,8 @@ import json
 import os
 import re
 import time
+from types import SimpleNamespace
+from weakref import WeakValueDictionary
 import httpx
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -27,6 +29,9 @@ from alert_rules import classify_kyiv_city_official_level, is_official_alert_ann
 from predeploy_check import validate_environment
 from text_processing import (
     AlertTranslation,
+    alert_translation_key,
+    caption_requires_image,
+    restore_alert_place_tokens,
     remove_confirmed_cross_source_duplicates,
     CANONICAL_PLACE_SPELLINGS,
     altitude_update_key,
@@ -310,6 +315,8 @@ ALERT_PUBLICATION_HISTORY_KEY = "alert_publications_v1"
 recent_alert_source_context = deque(maxlen=12)
 alert_delivery_tasks = set()
 alert_generation = 0
+alert_message_locks = WeakValueDictionary()
+ALERT_TRANSLATION_RECOVERY_SECONDS = 90
 ALERT_DEDUP_WINDOW = 180
 TEST_SOURCE_PREFIX = "[TEST_SOURCE:kyivnebomonitoring]"
 TEST_BUFFER_CHANNEL = AMK_CHANNEL
@@ -374,7 +381,7 @@ async def is_blocked_alert_image(message):
         print(f"[ALERT IMAGE CHECK ERROR] {type(exc).__name__}: {exc}")
         return False
 
-def should_publish_alert(text, source, now=None):
+def should_publish_alert(text, source, now=None, *, ignore_same_source=False):
     """Read only confirmed deliveries; uncertainty must never suppress an update."""
     timestamp = time.time() if now is None else now
     normalized = alert_duplicate_key(text)
@@ -384,10 +391,12 @@ def should_publish_alert(text, source, now=None):
     while recent_alert_messages and timestamp - recent_alert_messages[0][0] > ALERT_DEDUP_WINDOW:
         recent_alert_messages.popleft()
 
-    if normalized.startswith("altitude-descent:") and recent_alert_messages:
+    if normalized.startswith("altitude-descent:") and recent_alert_messages and not ignore_same_source:
         # No location: another source or intervening update may concern a different target.
         return recent_alert_messages[-1][1:] != (source, normalized)
     for _, previous_source, previous_text in recent_alert_messages:
+        if ignore_same_source and source == previous_source:
+            continue
         # A bare district or contextual fragment can describe another target.
         if source != previous_source:
             if min(len(normalized.split()), len(previous_text.split())) < 4 or not contains_operational_location(text):
@@ -484,7 +493,7 @@ def restore_published_alerts():
         print("[ALERT HISTORY] invalid stored history; allowing messages")
 
 
-def remember_alert_source_message(source, message_id, text, message_at=None):
+def remember_alert_source_message(source, message_id, text, message_at=None, edit_at=None):
     """Return recent same-source context, then remember this tactical source message."""
     timestamp = message_at.timestamp() if message_at else time.time()
     cutoff = timestamp - 10 * 60
@@ -494,9 +503,37 @@ def remember_alert_source_message(source, message_id, text, message_at=None):
     ]
     recent_alert_source_context.clear()
     recent_alert_source_context.extend(retained)
-    context = [item[3] for item in retained if item[1] == source][-3:]
-    recent_alert_source_context.append((timestamp, source, message_id, text[:1000]))
+    context = [item[3] for item in sorted(retained, key=lambda item: (item[0], item[2]))
+               if item[1] == source and item[2] < message_id and item[0] <= timestamp][-3:]
+    available_at = max(timestamp, edit_at.timestamp()) if edit_at else timestamp
+    recent_alert_source_context.append((available_at, source, message_id, text[:1000]))
     return context
+
+
+async def alert_reply_context(message, source, context):
+    """Read only a preceding same-source reply, never its later edited version."""
+    reply_id = getattr(message, "reply_to_msg_id", None)
+    get_reply = getattr(message, "get_reply_message", None)
+    if not reply_id or reply_id >= message.id or not get_reply:
+        return context
+    try:
+        reply = await asyncio.wait_for(get_reply(), timeout=2)
+        if (not reply or getattr(reply, "chat_id", None) != getattr(message, "chat_id", None)
+                or getattr(message, "chat_id", None) is None):
+            return context
+        at, reply_at = message.date, reply.date
+        if not at.tzinfo or not reply_at.tzinfo or not 0 <= (at - reply_at).total_seconds() <= 600:
+            return context
+        if getattr(reply, "edit_date", None) and reply.edit_date > at:
+            return context
+        text = strip_mixed_alert_commentary(strip_general_siren_notices(
+            strip_alert_questions(clean_alert_source_text(reply.text or ""))))
+        if not text or is_non_operational_alert_message(text) or is_pure_ad(text) or is_commentary_alert_message(text):
+            return context
+        return [f"Reply to earlier source message: {text[:1000]}"] + [item for item in context if item != text][-2:]
+    except Exception as exc:
+        print(f"[ALERT REPLY UNAVAILABLE] @{source} id={message.id} {type(exc).__name__}")
+        return context
 
 def seconds_until_next_summary(now=None) -> float:
     """Return the delay to the next configured Europe/Kyiv summary slot."""
@@ -825,13 +862,14 @@ async def apply_alert_state(desired, source, *, level=None, startup=False, publi
         return True
 
 
-async def translate_message(text, context=(), *, mixed_news_source=False):
+async def translate_message(text, context=(), *, mixed_news_source=False, previous_revision=None):
     known_fragment = translate_known_terse_fragment(text)
     if known_fragment:
         if mixed_news_source:
             record_backup_shadow(text, "{}", backup_publication_context())
         return known_fragment
     publications = backup_publication_context()
+    repair_hint = ""
     for attempt in range(1, TRANSLATION_MAX_ATTEMPTS + 1):
         try:
             async with translation_slots:
@@ -841,12 +879,17 @@ async def translate_message(text, context=(), *, mixed_news_source=False):
                     json={"model": MODEL, "max_tokens": 650 if mixed_news_source or publications else 450,
                           "thinking": {"type": "disabled"}, "output_config": {"effort": "low"}, "messages": [{
                         "role": "user", "content": build_alert_translation_prompt(
-                            text, context, mixed_news_source=mixed_news_source, published_context=publications)
+                            text, context, mixed_news_source=mixed_news_source, published_context=publications,
+                            previous_revision=previous_revision) + repair_hint
                     }]},
                     timeout=httpx.Timeout(15.0, connect=5.0),
                 )
             r.raise_for_status()
-            result = r.json()["content"][0]["text"].strip()
+            response = r.json()
+            if response.get("stop_reason") == "max_tokens":
+                raise ValueError("Truncated model response")
+            result = response["content"][0]["text"].strip()
+            result = restore_alert_place_tokens(result, text, context)
             decision, translation, reason = parse_alert_gate_output(
                 result, text, mixed_news_source=mixed_news_source, require_excerpts=True)
             if mixed_news_source:
@@ -859,6 +902,9 @@ async def translate_message(text, context=(), *, mixed_news_source=False):
             print(f"[TRANSLATION OK] input={text[:120]!r} output={translation[:120]!r}")
             return AlertTranslation(translation, result, publications)
         except Exception as exc:
+            # Send only our validation error, never provider exceptions/credentials.
+            if isinstance(exc, ValueError):
+                repair_hint = f"\nValidation failed: {str(exc)[:160]}. Return a corrected complete JSON object."
             state = "RETRY" if attempt < TRANSLATION_MAX_ATTEMPTS else "FAILED"
             print(
                 f"[TRANSLATION {state}] attempt={attempt}/{TRANSLATION_MAX_ATTEMPTS} "
@@ -1098,6 +1144,13 @@ async def backfill_alert_feed(client, source_entities):
             if not alert_active:
                 print(f"[ALERT BACKFILL STOPPED] @{channel} reason=clear")
                 return delivered
+            if getattr(message, "photo", None):
+                # Preserve background image checks: a slow image must not hold
+                # up later text updates or the next official-trigger poll.
+                task = schedule_alert_feed_message(message, channel)
+                task.add_done_callback(report_background_alert_result)
+                await asyncio.sleep(0)
+                continue
             if await process_alert_feed_message(message, channel):
                 delivered += 1
     if delivered:
@@ -1121,6 +1174,7 @@ async def alert_feed_poll_loop(client, source_entities):
                     await reconcile_alert_state(f"poll:@{ALERT_TRIGGER_CHANNEL}")
                     break
             if alert_active:
+                await retry_failed_alerts()
                 delivered = await backfill_alert_feed(client, source_entities)
                 if delivered:
                     print(f"[ALERT POLL RECOVERED] delivered={delivered}")
@@ -1564,6 +1618,9 @@ async def telegram_request(method, payload):
             print(f"Telegram {method} error: {data}")
             return None
         except Exception as exc:
+            if method == "sendMessage":
+                print("Telegram sendMessage outcome unknown; automatic resend suppressed")
+                return None
             if attempt < 3:
                 await asyncio.sleep(attempt + 1)
                 continue
@@ -1839,55 +1896,25 @@ async def health_loop():
 
 
 
-def schedule_alert_delivery(clean, source, context=()):
+def schedule_alert_delivery(clean, source, context=(), delivery=None):
     """Track background delivery so transitions and shutdown can drain it safely."""
-    generation = alert_generation
+    generation = delivery.get("generation", alert_generation) if delivery is not None else alert_generation
     task = asyncio.create_task(
-        handle_alert_message(clean, source=source, generation=generation, context=context)
+        handle_alert_message(clean, source=source, generation=generation, context=context, delivery=delivery)
     )
     alert_delivery_tasks.add(task)
     task.add_done_callback(alert_delivery_tasks.discard)
     return task
 
 
-def schedule_alert_image_processing(message, channel, clean, edited, context=()):
-    """Analyze an image without holding up later alert-feed messages."""
-    task = asyncio.create_task(
-        process_alert_image_message(message, channel, clean, edited, context)
-    )
-    alert_delivery_tasks.add(task)
-    task.add_done_callback(alert_delivery_tasks.discard)
-    return task
-
-
-async def process_alert_image_message(message, channel, clean, edited, context=()):
-    try:
-        if await is_blocked_alert_image(message):
-            state_store.set_alert_feed_cursor(
-                channel, max(state_store.get_alert_feed_cursor(channel), message.id)
-            )
-            print(f"[ALERT FILTERED IMAGE] @{channel} id={message.id}")
-            return False
-        delivered = bool(await schedule_alert_delivery(clean, source=channel, context=context))
-        if delivered:
-            state_store.set_alert_feed_cursor(
-                channel, max(state_store.get_alert_feed_cursor(channel), message.id)
-            )
-            print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
-        else:
-            state_store.release_alert_feed_delivery(channel, message.id, clean)
-        return delivered
-    except asyncio.CancelledError:
-        state_store.release_alert_feed_delivery(channel, message.id, clean)
-        raise
-
-
-async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None, context=()):
+async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None, context=(), delivery=None):
     """Translate first, then publish one final English alert if it is still current."""
     generation = alert_generation if generation is None else generation
     if generation != alert_generation or not alert_active:
         print(f"[ALERT STALE] skipped source=@{source} generation={generation}")
         return False
+    if delivery is not None:
+        delivery["status"] = "dropped"
 
     clean = strip_general_siren_notices(clean_alert_source_text(clean))
     if source == ALERT_BACKUP_CHANNEL:
@@ -1918,15 +1945,19 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
     if not clean:
         print(f"[ALERT FILTERED QUESTION] source=@{source}")
         return True
-    if not should_publish_alert(clean, source):
+    if not should_publish_alert(clean, source, ignore_same_source=delivery is not None):
         return True
 
     print(f"[ALERT ACCEPTED] @{source}: {clean[:100]}")
     try:
+        revision_options = {}
+        if delivery is not None and delivery.get("translation"):
+            revision_options["previous_revision"] = {
+                "source": delivery["published_source"], "translation": delivery["translation"]}
         if source == ALERT_BACKUP_CHANNEL:
-            translation = await translate_message(clean[:1500], context=context, mixed_news_source=True)
+            translation = await translate_message(clean[:1500], context=context, mixed_news_source=True, **revision_options)
         else:
-            translation = await translate_message(clean[:1500], context=context)
+            translation = await translate_message(clean[:1500], context=context, **revision_options)
     except asyncio.CancelledError:
         print(f"[ALERT CANCELLED] translation interrupted source=@{source} generation={generation}")
         raise
@@ -1939,7 +1970,7 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         # source cursor so the poller cannot bill the same classification forever.
         return True
     if not translation:
-        print(f"[ALERT CHECKPOINTED] translation unavailable source=@{source}")
+        print(f"[ALERT TRANSLATION ERROR] source=@{source}")
         try:
             await send_to_owner(
                 f"Ops: alert not published because translation was unavailable.\n"
@@ -1947,9 +1978,8 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
             )
         except Exception as ops_err:
             print(f"Ops notify failed: {ops_err}")
-        # translate_message already exhausted its bounded attempts. Treat this as
-        # handled so the five-second recovery poll cannot bill it indefinitely.
-        return True
+        # The source wrapper records a bounded, episode-scoped recovery job.
+        return None
 
     if not clean_alert_public_text(translation):
         print(f"[ALERT EMPTY AFTER CLEANING] source=@{source}")
@@ -1962,7 +1992,10 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
     async with alert_publication_lock:
         if generation != alert_generation or not alert_active:
             return False
-        if not should_publish_alert(clean, source):
+        if delivery is not None and time.time() >= delivery["deadline"]:
+            delivery["status"] = "expired_error"
+            return False
+        if not should_publish_alert(clean, source, ignore_same_source=delivery is not None):
             return True
         translation, removed = remove_confirmed_cross_source_duplicates(
             translation, clean[:1500], source, backup_publication_context())
@@ -1973,8 +2006,31 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         if not translation:
             return True
         indicator = "🟡" if alert_level == "YELLOW" else "🔴"
-        delivered = bool(await safe_send(f"{indicator} {html.escape(translation)}"))
+        if delivery is not None and delivery.get("translation"):
+            if alert_translation_key(translation) == alert_translation_key(delivery["translation"]):
+                delivery["status"] = "duplicate_edit"
+                print(f"[ALERT DUPLICATE EDIT] @{source} id={delivery['message_id']}")
+                return True
+        previous_id = delivery.get("output_id") if delivery is not None else None
+        correction = previous_id and re.search(r"(?i)\b(?:уточнення|виправлення|поправка|уточнюю|виправляю)\b", clean)
+        label = "CORRECTION — " if correction else ("UPDATE — " if previous_id else "")
+        public_text = f"{indicator} {html.escape(label + translation)}"
+        if delivery is not None:
+            # A crash/timeout after this point has an unknown send outcome. Never
+            # automatically replay it; Telegram sendMessage is not idempotent.
+            delivery["status"] = "delivery_unknown"
+            state_store.save_alert_message(source, delivery["message_id"], delivery)
+        if correction:
+            response = await edit_message(ALERT_OUTPUT_CHAT_ID, previous_id, public_text)
+        else:
+            response = await safe_send(public_text)
+        delivered = bool(response)
         if delivered:
+            if delivery is not None:
+                delivery.update(status="published", translation=translation, published_source=clean,
+                                output_id=response.get("message_id") if isinstance(response, dict) else previous_id)
+                state_store.save_alert_message(source, delivery["message_id"], delivery)
+                print(f"[ALERT PUBLISHED] @{source} source_id={delivery['message_id']} output_id={delivery['output_id']}")
             remember_published_alert(clean, source)
             try:
                 remember_confirmed_translation(translation, source)
@@ -1983,34 +2039,93 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         return delivered
 
 
+def schedule_alert_feed_message(message, channel, *, edited=False):
+    # Track the delivery, not the poller/listener that happens to call it. Closing
+    # an alert may cancel this job without permanently cancelling the feed poller.
+    task = asyncio.create_task(_process_locked_alert_feed_message(message, channel, edited, alert_generation))
+    alert_delivery_tasks.add(task)
+    task.add_done_callback(alert_delivery_tasks.discard)
+    return task
+
+
+def report_background_alert_result(task):
+    if not task.cancelled() and task.exception():
+        print(f"[ALERT BACKGROUND ERROR] {type(task.exception()).__name__}")
+
+
 async def process_alert_feed_message(message, channel, *, edited=False):
+    task = schedule_alert_feed_message(message, channel, edited=edited)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if asyncio.current_task().cancelling():
+            raise
+        return False
+
+
+async def _process_locked_alert_feed_message(message, channel, edited, generation):
+    key = (channel, message.id)
+    lock = alert_message_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        if generation != alert_generation:
+            return False
+        return await _process_alert_feed_message(message, channel, edited=edited)
+
+
+async def _process_alert_feed_message(message, channel, *, edited=False):
     """Filter, deliver and checkpoint one ALERT-feed message."""
     if channel not in ALERT_FEED_CHANNELS or not alert_active:
         return False
-    episode_at = parse_utc_timestamp(state_store.load_operational_state("alert_episode_started_at"))
+    episode = state_store.load_operational_state("alert_episode_started_at") or ""
+    episode_at = parse_utc_timestamp(episode)
+    delivery = state_store.load_alert_message(channel, message.id)
+    now = time.time()
+    clean = strip_alert_questions(strip_general_siren_notices(clean_alert_source_text(message.text or "")))
+    if channel == ALERT_BACKUP_CHANNEL:
+        clean = strip_non_operational_news(clean)
+    fingerprint = normalize_alert_revision(clean)
+    if delivery.get("status") == "delivery_unknown":
+        print(f"[ALERT DELIVERY UNKNOWN] @{channel} id={message.id} requires reconciliation")
+        return False
+    retrying = (delivery.get("status") in {"translation_error", "processing"}
+                and delivery.get("fingerprint") == fingerprint)
+    if retrying and (delivery.get("episode") != episode or now >= delivery.get("deadline", 0)
+                     or delivery.get("attempts", 0) >= 2):
+        delivery["status"] = "expired_error"
+        state_store.save_alert_message(channel, message.id, delivery)
+        return False
+    if retrying and now < delivery.get("next_retry", 0):
+        return False
     message_at = getattr(message, "date", None)
     if episode_at and (not isinstance(message_at, datetime) or message_at.tzinfo is None
                        or message_at < episode_at):
         state_store.set_alert_feed_cursor(channel, max(state_store.get_alert_feed_cursor(channel), message.id))
         print(f"[ALERT OUTSIDE EPISODE] @{channel} id={message.id} edited={edited}")
         return False
-    if not edited and state_store.is_stale_alert_feed_message(channel, message.id):
+    if not retrying and not edited and state_store.is_stale_alert_feed_message(channel, message.id):
         print(f"[ALERT SKIPPED STALE] @{channel} id={message.id}")
         return False
 
-    clean = strip_alert_questions(strip_general_siren_notices(clean_alert_source_text(message.text or "")))
-    if channel == ALERT_BACKUP_CHANNEL:
-        clean = strip_non_operational_news(clean)
+    revision_at = utc_iso(getattr(message, "edit_date", None) or message.date)
+    if delivery.get("revision_at", "") > revision_at:
+        return False
+    if delivery.get("fingerprint") == fingerprint and not retrying:
+        return False
     cursor = state_store.get_alert_feed_cursor(channel)
     if (
         not any(char.isalnum() for char in clean)
         or is_non_operational_alert_message(clean)
         or is_pure_ad(clean)
         or is_general_siren_announcement(clean)
+        or (getattr(message, "photo", None) and caption_requires_image(clean))
     ):
+        delivery.update(status="dropped", fingerprint=fingerprint, revision_at=revision_at)
+        state_store.save_alert_message(channel, message.id, delivery)
         state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
         print(f"[ALERT FILTERED] @{channel} id={message.id}")
         return False
+    if retrying:
+        state_store.release_alert_feed_delivery(channel, message.id, clean)
     if not state_store.claim_alert_feed_delivery(channel, message.id, clean):
         print(f"[ALERT SKIPPED DELIVERED] @{channel} id={message.id} edited={edited}")
         return False
@@ -2020,20 +2135,54 @@ async def process_alert_feed_message(message, channel, *, edited=False):
         message.id,
         strip_mixed_alert_commentary(clean),
         getattr(message, "date", None),
+        getattr(message, "edit_date", None),
     )
-
-    if getattr(message, "photo", None):
-        schedule_alert_image_processing(message, channel, clean, edited, context)
-        print(f"[ALERT IMAGE QUEUED] @{channel} id={message.id}")
-        return True
-
-    delivered = bool(await schedule_alert_delivery(clean, source=channel, context=context))
+    context = delivery.get("context", context) if retrying else await alert_reply_context(message, channel, context)
+    delivery.update(
+        message_id=message.id, text=clean, message_at=utc_iso(message.date), revision_at=revision_at,
+        fingerprint=fingerprint, episode=episode, context=context, generation=alert_generation,
+        attempts=delivery.get("attempts", 0) + 1 if retrying else 1,
+        deadline=delivery.get("deadline", now) if retrying else now + ALERT_TRANSLATION_RECOVERY_SECONDS,
+        next_retry=now + 40, status="image_pending" if getattr(message, "photo", None) else "processing",
+    )
+    state_store.save_alert_message(channel, message.id, delivery)
+    if getattr(message, "photo", None) and await is_blocked_alert_image(message):
+        delivery["status"] = "dropped"
+        state_store.save_alert_message(channel, message.id, delivery)
+        state_store.set_alert_feed_cursor(channel, max(state_store.get_alert_feed_cursor(channel), message.id))
+        return False
+    if delivery["status"] == "image_pending":
+        delivery["status"] = "processing"
+        state_store.save_alert_message(channel, message.id, delivery)
+    result = await schedule_alert_delivery(clean, source=channel, context=context, delivery=delivery)
+    delivered = bool(result)
+    if result is None:
+        delivery.update(status="translation_error", next_retry=time.time() + 10)
+    elif not delivered and delivery.get("status") not in {"delivery_unknown", "expired_error"}:
+        delivery["status"] = "cancelled"
+    state_store.save_alert_message(channel, message.id, delivery)
+    if delivery.get("status") == "delivery_unknown":
+        await send_to_owner(f"Ops: Telegram delivery outcome unknown; no automatic resend. Source: @{channel}/{message.id}")
     if delivered:
-        state_store.set_alert_feed_cursor(channel, max(cursor, message.id))
+        state_store.set_alert_feed_cursor(channel, max(state_store.get_alert_feed_cursor(channel), message.id))
         print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
     else:
         state_store.release_alert_feed_delivery(channel, message.id, clean)
     return delivered
+
+
+async def retry_failed_alerts():
+    """At most one recovery batch (two API attempts), within 90s of first processing."""
+    if not alert_active:
+        return
+    episode = state_store.load_operational_state("alert_episode_started_at") or ""
+    for channel, message_id, state in state_store.pending_alert_retries(episode):
+        if channel not in ALERT_FEED_CHANNELS or not alert_active:
+            continue
+        message = SimpleNamespace(id=message_id, text=state["text"], photo=None,
+                                  date=parse_utc_timestamp(state["message_at"]),
+                                  edit_date=parse_utc_timestamp(state["revision_at"]))
+        await process_alert_feed_message(message, channel, edited=True)
 
 
 async def process_test_source_text(clean):

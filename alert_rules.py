@@ -24,8 +24,16 @@ def classify_kyiv_city_official_level(text: str) -> str | None:
             continue
         if re.search(r"(?:ракетна|балістична)\s+(?:загроза|небезпека)|missile threat", clause):
             return "RED"
+        if re.search(r"масован\w*\s+дронов\w*|(?:mass|massive|large-scale)\s+drone", clause):
+            return "RED"
         if re.search(r"дронова\s+(?:загроза|небезпека)|drone threat", clause):
             return "YELLOW"
+    if re.match(
+        r"^[^\w]*attention\s*[!:—–-]\s*(?:mass|massive|large-scale) drone threat in kyiv[!.\s]*$", lowered
+    ):
+        return "RED"
+    if re.search(r"\b(?:mass|massive|large-scale) drone threat in kyiv\b", lowered):
+        return None
     if any(phrase in lowered for phrase in (
         "у києві оголошена дронова небезпека",
         "у києві оголошена дронова загроза",

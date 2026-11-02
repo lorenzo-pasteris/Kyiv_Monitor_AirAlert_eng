@@ -1034,7 +1034,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.alert_active = original_active
             monitor.translate_message = original_translate
 
-    async def test_translation_failure_is_bounded_and_checkpointed(self):
+    async def test_translation_failure_is_bounded_and_reported_as_error(self):
         class InvalidResponse:
             def raise_for_status(self):
                 return None
@@ -1067,7 +1067,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 0, result=owner_messages.append(text) or {"message_id": 1}
             )
 
-            self.assertTrue(
+            self.assertIsNone(
                 await monitor.handle_alert_message(
                     "Невідомий об'єкт рухається поблизу Києва",
                     generation=monitor.alert_generation,
@@ -1174,7 +1174,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.state_store.get_alert_feed_cursor = lambda name: 0
             monitor.state_store.set_alert_feed_cursor = lambda name, value: True
             monitor.state_store.claim_alert_feed_delivery = lambda name, message_id, text: True
-            monitor.schedule_alert_delivery = lambda text, source, context=(): asyncio.create_task(
+            monitor.schedule_alert_delivery = lambda text, source, context=(), delivery=None: asyncio.create_task(
                 fake_delivery(text, source)
             )
             monitor.recent_alert_messages.clear()
@@ -1204,28 +1204,28 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_alert_image_is_filtered_in_background(self):
+    async def test_delayed_image_filter_never_moves_cursor_backwards(self):
         channel = monitor.ALERT_FEED_CHANNEL
         gate = asyncio.Event()
         cursors = {channel: 30000}
         original_image_check = monitor.is_blocked_alert_image
         original_get_cursor = monitor.state_store.get_alert_feed_cursor
         original_set_cursor = monitor.state_store.set_alert_feed_cursor
+        original_active = monitor.alert_active
 
         async def blocked_after_delay(message):
             await gate.wait()
             return True
 
         try:
+            monitor.alert_active = True
             monitor.is_blocked_alert_image = blocked_after_delay
             monitor.state_store.get_alert_feed_cursor = lambda name: cursors[name]
             monitor.state_store.set_alert_feed_cursor = lambda name, value: cursors.__setitem__(name, value) or True
             message = FakeTelegramMessage(
                 30001, "Оперативне оновлення", datetime.now(timezone.utc), photo=object()
             )
-            task = monitor.schedule_alert_image_processing(
-                message, channel, message.text, False
-            )
+            task = asyncio.create_task(monitor.process_alert_feed_message(message, channel))
             await asyncio.sleep(0)
             self.assertFalse(task.done())
             cursors[channel] = 30002
@@ -1236,6 +1236,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.is_blocked_alert_image = original_image_check
             monitor.state_store.get_alert_feed_cursor = original_get_cursor
             monitor.state_store.set_alert_feed_cursor = original_set_cursor
+            monitor.alert_active = original_active
 
     async def test_alert_poller_recovers_messages_after_cursor(self):
         now = datetime.now(timezone.utc)
@@ -1254,7 +1255,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         delivered = []
         cursors = {channel: 125071}
 
-        async def fake_handler(text, source, generation, context=()):
+        async def fake_handler(text, source, generation, context=(), delivery=None):
             delivered.append((text, source, generation))
             return True
 
@@ -1310,7 +1311,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             monitor.state_store.release_alert_feed_delivery = lambda name, message_id, text: claims.discard(
                 (name, message_id, monitor.normalize_alert_for_dedup(text))
             )
-            monitor.schedule_alert_delivery = lambda text, source, context=(): asyncio.create_task(
+            monitor.schedule_alert_delivery = lambda text, source, context=(), delivery=None: asyncio.create_task(
                 fake_delivery(text, source)
             )
 

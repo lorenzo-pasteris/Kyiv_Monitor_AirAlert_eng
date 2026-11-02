@@ -12,8 +12,10 @@ every function in this module observe the patched value.
 """
 import fcntl
 import hashlib
+import json
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 
 from text_processing import alert_feed_cursor_key, normalize_alert_revision, utc_iso
@@ -94,6 +96,14 @@ def initialize_stats_db():
                     PRIMARY KEY (channel, message_id, fingerprint)
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS alert_message_state (
+                    channel TEXT NOT NULL, message_id INTEGER NOT NULL,
+                    state TEXT NOT NULL, updated_at REAL NOT NULL,
+                    PRIMARY KEY (channel, message_id)
+                )"""
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS alert_message_updated ON alert_message_state(updated_at)")
         print(f"[STATS DB] ready path={CATEGORY_STATS_DB_PATH}")
         return True
     except Exception as exc:
@@ -184,6 +194,47 @@ def get_alert_feed_cursor(channel):
         return int(value) if value is not None else 0
     except (TypeError, ValueError):
         return 0
+
+
+def load_alert_message(channel, message_id):
+    if not stats_db_ready:
+        return {}
+    # Unlike a dedup cache, a failed read must not be interpreted as permission
+    # to publish again. Let the caller report/retry storage errors, without API spend.
+    with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+        row = connection.execute(
+            "SELECT state FROM alert_message_state WHERE channel=? AND message_id=?",
+            (channel, message_id),
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def save_alert_message(channel, message_id, state):
+    if not stats_db_ready:
+        return
+    with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+        connection.execute(
+            """INSERT INTO alert_message_state VALUES (?, ?, ?, ?)
+               ON CONFLICT(channel, message_id) DO UPDATE SET
+                   state=excluded.state, updated_at=excluded.updated_at""",
+            (channel, message_id, json.dumps(state, ensure_ascii=False), time.time()),
+        )
+
+
+def pending_alert_retries(episode, now=None):
+    if not stats_db_ready:
+        return []
+    now = time.time() if now is None else now
+    with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+        rows = connection.execute(
+            "SELECT channel, message_id, state FROM alert_message_state WHERE updated_at>=?",
+            (now - 120,),
+        ).fetchall()
+    return [(channel, message_id, state) for channel, message_id, raw in rows
+            if (state := json.loads(raw)).get("episode") == episode
+            and state.get("status") in {"translation_error", "processing"}
+            and state.get("attempts", 0) < 2
+            and state.get("next_retry", now + 1) <= now < state.get("deadline", 0)]
 
 
 def set_alert_feed_cursor(channel, message_id):

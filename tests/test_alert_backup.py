@@ -61,6 +61,7 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
             client.post.assert_not_awaited()
 
     async def test_footer_only_edit_is_durable_duplicate_but_course_change_passes(self):
+        monitor.translate_message.side_effect = ["Turned toward the centre / Podil", "Turned toward Obolon"]
         original = "⏺**Повернув на центр / Поділ**"
         footer = "\n**Київ — пряма трансляція**** **👈\nНадіслати новину"
         message = FakeTelegramMessage(81690, original, datetime.now(timezone.utc))
@@ -390,6 +391,7 @@ class BackupAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(monitor.state_store.claim_alert_feed_delivery(self.primary, 1, "Не спостерігається"))
 
     async def test_equivalent_edit_publishes_once_but_operational_edit_passes(self):
+        monitor.translate_message.side_effect = ["No longer observed.", "Observed again near Chabany."]
         for text in ("Не спостережень", "Не спостерігається", "Знову спостерігається біля Чабанів"):
             msg = FakeTelegramMessage(21234, text, datetime.now(timezone.utc))
             await monitor.process_alert_feed_message(msg, self.primary, edited=True)
