@@ -11,6 +11,41 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
+NEWS_ATTRIBUTION_RULE = (
+    "PUBLIC NEWS STYLE: Never name the Telegram source channel, its handle or its display name in "
+    "the public text, including AMK, AMK Mapping, Kyiv Oblast and war_monitor. SOURCE metadata is "
+    "for internal tracing only. Omit channel attribution or use 'Reportedly', 'Reports indicate' "
+    "or 'Reported:' when attribution carries uncertainty. Do not turn a claim into a confirmed fact. "
+    "Preserve all uncertainty markers and named official authorities actually quoted in the source "
+    "(for example the Air Force, emergency services or Ukrenergo). Keep Kyiv Oblast when it is the "
+    "location of an event. Do not append channel names, source footers or Telegram links.\n\n"
+)
+
+
+def clean_news_attributions(text: str, channels=()) -> str:
+    """Remove publisher attribution, retaining geography and the reported status."""
+    names = {"AMK", "AMK Mapping", "Kyiv Oblast", "Kyiv Info", "War Monitor"}
+    # Ukrenergo is also the authority responsible for the grid: retain its name
+    # in substantive attribution, while still removing its Telegram handle.
+    for channel in channels:
+        if channel.casefold() != "ukrenergo":
+            names.update((channel, channel.replace("_", " ")))
+    source = r"(?:@[A-Za-z0-9_]+|\b(?:" + "|".join(
+        re.escape(name) for name in sorted(names, key=lambda name: (-len(name), name))
+    ) + r")\b)(?:\s+(?:Telegram\s+)?channel)?"
+    source += r"(?!(?:['’]s)?\s+(?:authorities|administration|officials?|police|emergency|military|governor|council)\b)"
+    text = re.sub(
+        rf"(?im)^(\s*(?:[•*-]\s*)?){source}\s+(reports?|reported|says?|said|claims?|claimed)\b(?:\s+that\b)?\s*[:,—–-]?\s*",
+        lambda match: match[1] + ("Claim: " if match[2].lower().startswith("claim") else "Reported: "), text,
+    )
+    text = re.sub(rf"(?i)\baccording to\s+(?:the\s+)?{source}",
+                  lambda match: "According to reports" if match[0][0].isupper() else "according to reports", text)
+    text = re.sub(rf"(?i)\b(as\s+)?reported by\s+(?:the\s+)?{source}",
+                  lambda match: "reportedly" if match[1] else "reported", text)
+    text = re.sub(rf"(?i)\(\s*source:\s*{source}\s*\)", "", text)
+    text = re.sub(rf"(?im)^\s*source:\s*{source}\s*[.]?\s*$", "", text)
+    return "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()).strip()
+
 # --- Pre-filters ---
 AD_INDICATORS = ["#реклама","реклама","знижк","розпродаж","промокод","купуй","придбай","акція","магазин","замовляй","доставка"]
 DONATION_INDICATORS = [

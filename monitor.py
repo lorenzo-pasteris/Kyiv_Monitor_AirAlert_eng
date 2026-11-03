@@ -34,11 +34,13 @@ from text_processing import (
     restore_alert_place_tokens,
     remove_confirmed_cross_source_duplicates,
     CANONICAL_PLACE_SPELLINGS,
+    NEWS_ATTRIBUTION_RULE,
     altitude_update_key,
     build_alert_translation_prompt,
     clean_alert_source_text,
     clean_alert_public_text,
     clean_text,
+    clean_news_attributions,
     contains_operational_location,  # noqa: F401 -- re-exported for routing regressions
     is_actionable_alert_message,
     is_commentary_alert_message,
@@ -995,6 +997,7 @@ async def translate_war_monitor_report(text, signals=None):
                     "messages": [{
                         "role": "user",
                         "content": (
+                            NEWS_ATTRIBUTION_RULE +
                             "Create a concise English Night Threat Assessment for civilians in Ukraine. The "
                             "@war_monitor daily report is the authoritative baseline for the current posture. "
                             "Secondary monitoring posts are unconfirmed context and may be used only when they "
@@ -1053,7 +1056,7 @@ async def process_war_monitor_report(message):
         state_store.release_alert_feed_delivery(WAR_MONITOR_CHANNEL, message.id, raw)
         return False
 
-    rendered = html.escape(translated)
+    rendered = html.escape(clean_news_attributions(translated, ALL_CONTENT_CHANNELS + [WAR_MONITOR_CHANNEL]))
     if not await send_to_summary_group(rendered):
         state_store.release_alert_feed_delivery(WAR_MONITOR_CHANNEL, message.id, raw)
         await send_to_owner("Ops: @war_monitor daily report failed to publish in the news channel.")
@@ -1312,7 +1315,8 @@ def normalize_category_result(parsed, messages):
             if not isinstance(item["is_update"], bool):
                 raise TypeError(f"{category_key}.items is_update must be boolean")
             event_key = re.sub(r"[^a-z0-9|_-]+", "-", item["event_key"].lower()).strip("-")[:120]
-            text = item["text"].strip().lstrip("•- ").strip()
+            text = clean_news_attributions(
+                item["text"].strip().lstrip("•- ").strip(), ALL_CONTENT_CHANNELS + [WAR_MONITOR_CHANNEL])
             if not event_key or not text or event_key in assigned_event_keys:
                 continue
             assigned_event_keys.add(event_key)
@@ -1447,6 +1451,7 @@ async def analyze_hourly_matrix(messages, published_history=None, published_sour
         for item in (published_source_history or [])
     ) or "None recorded."
     prompt = (
+        NEWS_ATTRIBUTION_RULE +
         "Classify Ukrainian news messages. The source is provenance only: evaluate EVERY message against "
         "EVERY category below. Assign each qualifying message to exactly one best primary category; the same "
         "message ID must never appear in multiple categories. "
@@ -1459,7 +1464,8 @@ async def analyze_hourly_matrix(messages, published_history=None, published_sour
         "technical details change. Write that event once, in one category. Prefer the latest corroborated update; "
         "if credible reports still conflict, say that figures remain inconsistent rather than adding or choosing "
         "between them. Never combine weapon quantities from separate messages into a new aggregate. Attribute "
-        "technical counts and claims to the stated authority, monitoring source or OSINT source. Preserve words "
+        "technical counts and claims to a named official authority when stated; otherwise use neutral wording "
+        "such as 'Reported:' or 'Unconfirmed reports indicate' without naming the monitoring or OSINT channel. Preserve words "
         "such as likely, possible, estimated and unconfirmed. A thermal anomaly does not prove its cause. Do not "
         "publish exact coordinates, unsupported superlatives or inferred targets. Prioritize civilian consequences, "
         "service disruption, transport changes and official public guidance over weapon inventories.\n\n"
