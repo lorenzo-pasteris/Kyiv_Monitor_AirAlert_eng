@@ -73,7 +73,7 @@ PRIORITY_ALERT_RE = re.compile(
     r"\b(?:баліст\w*|баллист\w*|ракет\w*|missile\w*|ballistic\w*|крилат\w*|"
     r"х[-\s]?(?:101|55|59|22|47)\w*|калібр\w*|калибр\w*|іскандер\w*|искандер\w*|"
     r"кинджал\w*|кінджал\w*|циркон\w*|бандерол\w*|с[-\s]?(?:300|400)\w*|"
-    r"загроз\w*|угроз\w*|threat\w*|пуск\w*|launch\w*|вихід\w*|выход\w*|"
+    r"загроз\w*|угроз\w*|threat\w*|пуск\w*|launch\w*|вихід\w*|виход\w*|выход\w*|"
     r"відбій\w*|отбой\w*|all[ -]?clear|максимально\s+уважн\w*|maximum\s+alert)\b",
     re.IGNORECASE,
 )
@@ -120,6 +120,8 @@ OPERATIONAL_LOCATION_STEMS = {
     "коцюбин": "Kotsiubynske",
     "борщагів": "Borshchahivka",
     "димер": "Dymer",
+    "димерка": "Dymerka",
+    "петрівц": "Petrivtsi",
     "осещин": "Oseshchyna",
     "тарасів": "Tarasivka",
     "заліс": "Zalissia",
@@ -181,7 +183,7 @@ ALERT_PLACE_ALIASES = {
     "Hnidyn": "гнідин|гнідина|гнідином",
     "Brovary": "бровари|броварів|броварами|броварах",
     "Boryspil": "бориспіль|борисполя|борисполем|борисполі",
-    "Vyshhorod": "вишгород|вишгорода|вишгородом|вишгороді",
+    "Vyshhorod": "вишгород|вишгорода|вишгородом|вишгороді|вишглрод",
     "Vyshneve": "вишневе|вишневого|вишневому|вишневим",
     "Vyshenky": "вишеньки|вишеньок|вишеньками|вишеньках",
     "Boyarka": "боярка|боярку|боярки|бояркою",
@@ -213,6 +215,12 @@ ALERT_PLACE_ALIASES = {
     "Bila Tserkva": "біла церква|білу церкву|білої церкви|білій церкві",
     "Bryansk": "брянськ|брянська|брянську|брянск|брянска",
     "Voronezh": "воронеж|воронежа|воронежу",
+    "Dymer": "димер|димера|димеру|димері|димером",
+    "Dymerka": "димерка|димерку|димерки|димерці",
+    "Petrivtsi": "петрівці|петрівців|петрівцях|петрівцями",
+    "Solomianka": "солома|солому|соломи|солом['’ʼ]янка|солом['’ʼ]янку",
+    "Lebedivka": "лебедівка|лебедівку|лебедівки|лебедівці",
+    "CHP-6": "тец[- ]6",
 }
 
 
@@ -228,9 +236,13 @@ def protected_place_tokens(text: str) -> dict[str, str]:
 def alert_numeric_facts(text: str) -> list[str]:
     # Accept common spelled-out quantities as well as digits; never reject "дві"
     # -> "two" just because English formatting differs.
+    # "This one"/"the last one" identify a track, not a new quantity. "Another
+    # (one)" does express the additional single target in ще один/ще одна.
+    text = re.sub(r"\b(?:this|that|the (?:last|other|second|first|remaining)) one\b", "track", text, flags=re.I)
+    text = re.sub(r"\banother(?: one)?\b", "1", text, flags=re.I)
     for value, words in enumerate((
-        "нуль|ноль|zero", "один|одна|одне|одну|one", "два|дві|две|two",
-        "три|three", "чотири|четыре|four", "п['’ʼ]ять|пять|five",
+        "нуль|ноль|zero", "один|одна|одне|одну|черговий|чергова|чергове|чергову|one", "два|дві|две|двоє|двох|two",
+        "три|троє|трьох|three", "чотири|четверо|чотирьох|четыре|four", "п['’ʼ]ять|пять|five",
         "шість|шесть|six", "сім|семь|seven", "вісім|восемь|eight",
         "дев['’ʼ]ять|девять|nine", "десять|ten",
     )):
@@ -252,7 +264,11 @@ def restore_alert_place_tokens(raw: str, source_text: str, context=()) -> str:
     # Adjectival district/region names may contain the settlement in English.
     # Stems permit those names; only exact matches above create protected tokens.
     allowed.update(name for stem, name in OPERATIONAL_LOCATION_STEMS.items()
-                   if re.search(rf"\b{re.escape(stem)}\w*", context_text, re.I))
+                   if re.search(rf"\b{re.escape(stem)}\w*", context_text, re.I) and
+                   (name not in ALERT_PLACE_ALIASES or re.search(
+                       rf"\b{re.escape(stem)}\w*\s+(?:район\w*|област\w*)", context_text, re.I)))
+    allowed.update(name for name in ALERT_PLACE_ALIASES
+                   if any(place.startswith(name + " ") for place in tuple(allowed)))
 
     def restore(excerpt, output):
         if not isinstance(output, str):
@@ -291,6 +307,10 @@ def restore_alert_place_tokens(raw: str, source_text: str, context=()) -> str:
                 raise ValueError("Negation omitted")
         if re.search(r"\b(?:виліта\w*|проліта\w*)\b", excerpt, re.I) and re.search(r"\btak(?:e|es|ing|en) off\b", output, re.I):
             raise ValueError("Movement mistranslated as take-off")
+        if re.search(r"\ball[ -]clear\b", output, re.I) and not re.search(r"\b(?:відбій|отбой)\b", excerpt, re.I):
+            raise ValueError("All clear invented: чисто or loss of tracking is not an official all-clear")
+        if re.search(r"\b(?:промаз\w*|не (?:попал\w*|влуч\w*))\b", excerpt, re.I) and not re.search(r"\bmiss\w*\b", output, re.I):
+            raise ValueError("Missed interception outcome omitted")
         return output
 
     if parsed.get("decision", "").upper() in {"PUBLISH", "DROP"}:
@@ -299,6 +319,14 @@ def restore_alert_place_tokens(raw: str, source_text: str, context=()) -> str:
             if not isinstance(excerpt, str) or not excerpt or excerpt not in source_text:
                 raise ValueError("Ungrounded source excerpt")
             update["translation"] = restore(excerpt, update.get("translation"))
+        if parsed.get("decision", "").upper() == "PUBLISH":
+            remaining = source_text
+            for update in parsed.get("operational_updates", []):
+                remaining = remaining.replace(update["source"], " ", 1)
+            remaining = strip_mixed_alert_commentary(strip_general_siren_notices(
+                strip_alert_questions(clean_alert_source_text(remaining))))
+            if any(is_operational_fragment(part.strip()) for part in re.split(r"[,;.!\n]+", remaining)):
+                raise ValueError("Operational fact omitted from excerpts; include outcomes and uncertainty")
     if parsed.get("translation"):
         parsed["translation"] = restore(source_text, parsed["translation"])
     return json.dumps(parsed, ensure_ascii=False)
@@ -325,6 +353,10 @@ ALERT_TERSE_FOLLOWUP_KEYWORDS = [
     "рембаз", "осещин", "тец-6", "березан", "українк",
 ]
 COMMENTARY_PATTERNS = (
+    r"\b(?:давай(?:те)?|дайте|оголоси\w*|give|issue)\b[^.!?\n]*\b(?:відбій|all[ -]clear)\b",
+    r"^\s*(?:\d+|перш\w*|друг\w*|трет\w*|четверт\w*|п['’ʼ]ят\w*|шост\w*|сьом\w*|восьм\w*)"
+    r"\s+тривог\w*\b[^.!?\n]*\b(?:сьогодні|за день)\b",
+    r"\b(?:сподіва\w*|наде\w*|we hope|hopefully)\b",
     r"\b(?:саме цікаве|найцікавіше|що цікаво|most interesting|what(?:'s| is) most interesting)\b"
     r"[^.!?\n]*\b(?:дали|оголосили|видали|issued|announced)\b[^.!?\n]*"
     r"\b(?:загроз\w*|тривог\w*|threat|warning|alert)\b",
@@ -463,7 +495,35 @@ def strip_mixed_alert_commentary(text: str) -> str:
     """Remove a known editorial prefix while preserving the tactical remainder."""
     for pattern in MIXED_COMMENTARY_PREFIXES:
         text = re.sub(pattern, "", text, flags=re.I)
+    # Remove a social wish or siren-management tail without losing the actual
+    # observation before it. Do not split uncertainty (схоже/можливо) off a fact.
+    text = re.sub(r"(?i)[,;]\s*(?:сподіва\w*|наде\w*|we hope|hopefully|"
+                  r"очікуємо на відбій|чекаємо на відбій)\b[^.!?\n]*[.!?]*", "", text)
     return text.strip()
+
+
+def is_operational_fragment(text: str) -> bool:
+    """Protect short observations, quantities and safety orders, not every mention of a weapon."""
+    if not text or len(text) > 180 or is_commentary_alert_message(text) or is_non_operational_alert_message(text):
+        return False
+    bare = normalize_alert_for_dedup(text)
+    if translate_known_terse_fragment(text):
+        return True
+    if contains_operational_location(text) and len(bare.split()) <= 2:
+        return True
+    if contains_operational_location(text) and re.match(
+        r"(?i)^(?:залишил\w*|останн\w*|цей|ця|другий|далі|ще|на|повз|підліта\w*|виліта\w*)\b", text.strip()
+    ):
+        return True
+    return bool(re.match(
+        r"(?i)^(?:(?:схоже|наче|можливо|попередньо)\s+)?"
+        r"(?:(?:цей|ця|він|вона)(?: також)?\s+)?"
+        r"(?:промаз\w*|не (?:попал\w*|влуч\w*)|впав\b|впала\b|впали\b|пада\w*|"
+        r"збит\w*|збил\w*|мінус\w*|не (?:фіксу\w*|спостеріга\w*)|"
+        r"(?:дуже\s+)?(?:багато|численн\w*|масов\w*|повторн\w*|нов\w*)\s+(?:виход\w*|пуск\w*)|"
+        r"балістика\s+на\b|нирнул\w*\s+бігом\b|"
+        r"(?:весь\s+київ\s+)?(?:сховайтеся|сховалися|ховайтеся|(?:негайно\s+)?(?:в|до)\s+укриття)\b)", text.strip())
+        or re.fullmatch(r"(?i)(?:схоже|наче|можливо|попередньо|\d+|двоє|троє)", bare))
 
 
 def is_pure_ad(text: str) -> bool:
@@ -727,6 +787,22 @@ def build_alert_translation_prompt(text: str, context: Iterable[str] = (), *, mi
             "certainty are new facts: translate them faithfully, never reuse stale facts.\n\n"
         )
     source_rules += (
+        "TACTICAL FIDELITY: Publish ALL current operational facts, including an apparent missed "
+        "interception before a continued trajectory. Do not hide outcomes, negation or uncertainty "
+        "by selecting a smaller excerpt. Numerous launches (багато виходів), urgent take-cover "
+        "orders (нирнули бігом), and landmark fragments (ГЕС, мости) in an attack sequence are "
+        "operational, NEVER ENGAGEMENT or distant news. вихід/виходи/виходів in a launch report "
+        "means launch(es), not exits. Балістика на Київ means ballistic missiles heading toward "
+        "Kyiv; only загроза балістики means ballistic threat. Never replace an incoming track "
+        "with a mere threat. Do not infer an impact, quantity or launch origin. "
+        "Двоє/двох means two; another means ще один/ще одна; this one/last one identifies a track. "
+        "Чисто and loss of tracking NEVER mean an official all-clear. Only explicit відбій may "
+        "be translated as all-clear; preserve threat-specific scope. Demands to officials to "
+        "issue an all-clear, daily siren counts and wishes are commentary; remove them. "
+        "Preserve an operational observation in a mixed post before a social wish. "
+        "Димерка = Dymerka (not Dymer); Петрівці = Petrivtsi (not Petrivka); Солома = Solomianka. "
+        "Вишглрод is a known source typo for Vyshhorod; do not invent PLACE tokens. "
+        "A typo in a short apparent-fall report is not grounds to classify it as ordinary news.\n\n"
         "PLACE SAFETY: In translation fields use the exact PLACE_n token for each matched place "
         "below. Keep source/evidence excerpts verbatim in Ukrainian. The application restores "
         "these tokens to the canonical names. Never substitute a similar-looking settlement. "
@@ -868,6 +944,26 @@ def translate_known_terse_fragment(text: str) -> str | None:
     # Exact complete fragments only: a place mentioned in an advert or a
     # retrospective story must still go through the normal filters.
     bare = normalize_alert_for_dedup(text)
+    if re.fullmatch(r"(?:дуже )?(?:багато|численні|масові) (?:виходів|виходи|пусків|пуски)", bare):
+        return "Numerous launches."
+    if re.fullmatch(r"(?:нові|повторні) (?:виходи|пуски)", bare):
+        return "New launches." if bare.startswith("нові") else "Repeated launches."
+    if re.fullmatch(r"нирнули (?:бігом|швидко|негайно)(?: кудись)?", bare):
+        return "Take cover immediately!"
+    if re.fullmatch(r"(?:все )?не (?:спостерігається|спостерігаються|фіксується)", bare):
+        return "No longer observed."
+    if re.fullmatch(r"(?:все )?(?:поки )?чисто", bare):
+        return "Currently clear."
+    if re.fullmatch(r"київ без загроз", bare):
+        return "No threats currently reported in Kyiv."
+    if bare in {"падає", "падають"}:
+        return "Falling."
+    if re.fullmatch(r"(?:схоже|наче|можливо) впав(?: (?:десь|день))? (?:у|в) лісі", bare):
+        return "It appears to have fallen in the forest."
+    landmarks = {"гес": "Hydroelectric power station", "міст": "bridge", "мости": "bridges"}
+    parts = [part.strip().casefold() for part in re.split(r"[,/]+", text.strip(".!… "))]
+    if parts and all(part in landmarks for part in parts):
+        return ", ".join(landmarks[part] for part in parts) + "!"
     places = {
         "совки": "Sovky", "вишеньки": "Vyshenky", "вишневе": "Vyshneve",
         "лісовий масив": "Lisovyi Masyv", "мінський": "Minskyi Masyv",
@@ -895,7 +991,7 @@ def translate_known_terse_fragment(text: str) -> str | None:
         "не спостерігається": "No longer observed.",
         "не спостерігаються": "No longer observed.",
         "не спостережень": "No longer observed.",
-        "балістика на київ": "Ballistic threat to Kyiv!",
+        "балістика на київ": "Ballistic missiles heading toward Kyiv!",
         "відбій по балістиці": "The ballistic threat has been lifted.",
     }.get(normalized)
 
@@ -1148,6 +1244,8 @@ def parse_alert_gate_output(raw: str, source_text: str = "", *, mixed_news_sourc
         return "PUBLISH", "\n".join(translations), reason
 
     if decision == "DROP":
+        if is_operational_fragment(source_text):
+            return publish(f"override_unapproved_drop:{block_category or 'NONE'}")
         if re.match(
             r"(?i)^(?:(?:весь\s+київ|усі|всі)[,\s!]*)?"
             r"(?:сховайтеся|сховалися|ховайтеся|(?:негайно\s+)?(?:в|до)\s+укриття)\b", source_text

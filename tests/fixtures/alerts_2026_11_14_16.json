@@ -1,0 +1,289 @@
+{
+  "provenance": "Public current Telegram text retrieved 2026-11-17; null publication means not found, not a deletion audit. Model replies used in tests are constructed, not recovered API payloads.",
+  "messages": [
+    {
+      "id": 23286,
+      "at": "2026-11-14T07:13:29+00:00",
+      "text": "Все, не спостерігається",
+      "url": "https://t.me/kyivnebomonitoring/23286",
+      "published": {
+        "id": 8701,
+        "text": "🟡 All clear, no longer observed",
+        "at": "2026-11-14T07:13:31+00:00",
+        "url": "https://t.me/kyivairalert/8701"
+      }
+    },
+    {
+      "id": 23287,
+      "at": "2026-11-14T07:23:59+00:00",
+      "text": "Ще один на Петрівці, Вишгород",
+      "url": "https://t.me/kyivnebomonitoring/23287",
+      "published": {
+        "id": 8702,
+        "text": "🟡 Another one at Petrivka, Vyshhorod",
+        "at": "2026-11-14T07:24:02+00:00",
+        "url": "https://t.me/kyivairalert/8702"
+      }
+    },
+    {
+      "id": 23308,
+      "at": "2026-11-14T09:42:55+00:00",
+      "text": "Залишилось двоє, Гостомель/Боярка",
+      "url": "https://t.me/kyivnebomonitoring/23308",
+      "published": null
+    },
+    {
+      "id": 23310,
+      "at": "2026-11-14T09:44:57+00:00",
+      "text": "Другий на північ області, Димер",
+      "url": "https://t.me/kyivnebomonitoring/23310",
+      "published": null
+    },
+    {
+      "id": 23314,
+      "at": "2026-11-14T09:48:47+00:00",
+      "text": "Останній на Лебедівку",
+      "url": "https://t.me/kyivnebomonitoring/23314",
+      "published": null
+    },
+    {
+      "id": 23315,
+      "at": "2026-11-14T09:49:58+00:00",
+      "text": "Київ без загроз",
+      "url": "https://t.me/kyivnebomonitoring/23315",
+      "published": null
+    },
+    {
+      "id": 23319,
+      "at": "2026-11-15T03:24:01+00:00",
+      "text": "Реактивний на Петрівці/Вишглрод",
+      "url": "https://t.me/kyivnebomonitoring/23319",
+      "published": null
+    },
+    {
+      "id": 23333,
+      "at": "2026-11-15T06:46:50+00:00",
+      "text": "Ще один реактив на ТЕЦ-6, Троєщину",
+      "url": "https://t.me/kyivnebomonitoring/23333",
+      "published": null
+    },
+    {
+      "id": 23338,
+      "at": "2026-11-15T06:49:56+00:00",
+      "text": "Цей на Гостомель",
+      "url": "https://t.me/kyivnebomonitoring/23338",
+      "published": null
+    },
+    {
+      "id": 23342,
+      "at": "2026-11-15T06:57:19+00:00",
+      "text": "Солома далі",
+      "url": "https://t.me/kyivnebomonitoring/23342",
+      "published": {
+        "id": 8760,
+        "text": "🟡 Soloma further",
+        "at": "2026-11-15T06:57:23+00:00",
+        "url": "https://t.me/kyivairalert/8760"
+      }
+    },
+    {
+      "id": 23353,
+      "at": "2026-11-15T08:17:55+00:00",
+      "text": "Ще одна бандероль на водосховище",
+      "url": "https://t.me/kyivnebomonitoring/23353",
+      "published": null
+    },
+    {
+      "id": 23376,
+      "at": "2026-11-15T21:18:01+00:00",
+      "text": "Шоста тривога на балістику за сьогодні",
+      "url": "https://t.me/kyivnebomonitoring/23376",
+      "published": {
+        "id": 8804,
+        "text": "🔴 Sixth ballistic alert today",
+        "at": "2026-11-15T21:18:03+00:00",
+        "url": "https://t.me/kyivairalert/8804"
+      }
+    },
+    {
+      "id": 23377,
+      "at": "2026-11-15T21:20:41+00:00",
+      "text": "У русні продовжує працювати ППО, сподіваємося зранку буде -кілька балістичних установок",
+      "url": "https://t.me/kyivnebomonitoring/23377",
+      "published": {
+        "id": 8805,
+        "text": "🔴 Air defence is continuing to operate in Russia; we hope that by morning there will be minus several ballistic launchers",
+        "at": "2026-11-15T21:20:44+00:00",
+        "url": "https://t.me/kyivairalert/8805"
+      }
+    },
+    {
+      "id": 23403,
+      "at": "2026-11-16T08:52:43+00:00",
+      "text": "Далі Димерка",
+      "url": "https://t.me/kyivnebomonitoring/23403",
+      "published": {
+        "id": 8845,
+        "text": "🟡 Next, Dymer",
+        "at": "2026-11-16T08:52:45+00:00",
+        "url": "https://t.me/kyivairalert/8845"
+      }
+    },
+    {
+      "id": 23417,
+      "at": "2026-11-16T09:52:20+00:00",
+      "text": "Схоже промазали, виліз в бік Вишгорода на висоті 100м!",
+      "url": "https://t.me/kyivnebomonitoring/23417",
+      "published": {
+        "id": 8861,
+        "text": "🟡 moving toward Vyshhorod at 100m altitude",
+        "at": "2026-11-16T09:52:23+00:00",
+        "url": "https://t.me/kyivairalert/8861"
+      }
+    },
+    {
+      "id": 23421,
+      "at": "2026-11-16T09:56:49+00:00",
+      "text": "Схоже впав день у лісі",
+      "url": "https://t.me/kyivnebomonitoring/23421",
+      "published": null
+    },
+    {
+      "id": 23430,
+      "at": "2026-11-16T12:50:37+00:00",
+      "text": "Ще двоє на півночі області, перший в бік Вишгорода",
+      "url": "https://t.me/kyivnebomonitoring/23430",
+      "published": null
+    },
+    {
+      "id": 23431,
+      "at": "2026-11-16T12:55:53+00:00",
+      "text": "Цей також мінус",
+      "url": "https://t.me/kyivnebomonitoring/23431",
+      "published": null
+    },
+    {
+      "id": 23432,
+      "at": "2026-11-16T12:56:06+00:00",
+      "text": "Останній в районі Димера",
+      "url": "https://t.me/kyivnebomonitoring/23432",
+      "published": null
+    },
+    {
+      "id": 23435,
+      "at": "2026-11-16T15:02:49+00:00",
+      "text": "Падає!",
+      "url": "https://t.me/kyivnebomonitoring/23435",
+      "published": null
+    },
+    {
+      "id": 23444,
+      "at": "2026-11-16T16:54:53+00:00",
+      "text": "Міхалич давай вже відбій, загроз немає",
+      "url": "https://t.me/kyivnebomonitoring/23444",
+      "published": {
+        "id": 8891,
+        "text": "🔴 Mikhalych, give the all clear already, there are no threats",
+        "at": "2026-11-16T16:54:56+00:00",
+        "url": "https://t.me/kyivairalert/8891"
+      }
+    },
+    {
+      "id": 23446,
+      "at": "2026-11-16T21:26:37+00:00",
+      "text": "Загроза балістики з Брянська та Курська",
+      "url": "https://t.me/kyivnebomonitoring/23446",
+      "published": {
+        "id": 8894,
+        "text": "🔴 Ballistic threat from Bryansk and Kursk",
+        "at": "2026-11-16T21:26:39+00:00",
+        "url": "https://t.me/kyivairalert/8894"
+      }
+    },
+    {
+      "id": 23447,
+      "at": "2026-11-16T21:26:57+00:00",
+      "text": "Балістика на Київ!",
+      "url": "https://t.me/kyivnebomonitoring/23447",
+      "published": {
+        "id": 8895,
+        "text": "🔴 Ballistic threat to Kyiv!",
+        "at": "2026-11-16T21:26:58+00:00",
+        "url": "https://t.me/kyivairalert/8895"
+      }
+    },
+    {
+      "id": 23448,
+      "at": "2026-11-16T21:27:24+00:00",
+      "text": "Нирнули бігом кудись!!",
+      "url": "https://t.me/kyivnebomonitoring/23448",
+      "published": null
+    },
+    {
+      "id": 23449,
+      "at": "2026-11-16T21:27:38+00:00",
+      "text": "Дуже багато виходів",
+      "url": "https://t.me/kyivnebomonitoring/23449",
+      "published": null
+    },
+    {
+      "id": 23454,
+      "at": "2026-11-16T21:30:25+00:00",
+      "text": "ГЕС, мости!",
+      "url": "https://t.me/kyivnebomonitoring/23454",
+      "published": null
+    },
+    {
+      "id": 23459,
+      "at": "2026-11-16T21:32:24+00:00",
+      "text": "Балістика на Київ!",
+      "url": "https://t.me/kyivnebomonitoring/23459",
+      "published": {
+        "id": 8904,
+        "text": "🔴 Ballistic threat to Kyiv!",
+        "at": "2026-11-16T21:32:25+00:00",
+        "url": "https://t.me/kyivairalert/8904"
+      }
+    },
+    {
+      "id": 23463,
+      "at": "2026-11-16T21:33:33+00:00",
+      "text": "Все, чисто",
+      "url": "https://t.me/kyivnebomonitoring/23463",
+      "published": {
+        "id": 8908,
+        "text": "🔴 All clear",
+        "at": "2026-11-16T21:33:35+00:00",
+        "url": "https://t.me/kyivairalert/8908"
+      }
+    },
+    {
+      "id": 23464,
+      "at": "2026-11-16T21:37:00+00:00",
+      "text": "Котики мої, як ви?",
+      "url": "https://t.me/kyivnebomonitoring/23464",
+      "published": null
+    },
+    {
+      "id": 23467,
+      "at": "2026-11-16T21:42:18+00:00",
+      "text": "Загалом русня застосувала вже ~25 балістичних ракет по Дніпру, Запоріжжю, Києву, Черкасам",
+      "url": "https://t.me/kyivnebomonitoring/23467",
+      "published": null
+    },
+    {
+      "id": 23468,
+      "at": "2026-11-16T21:46:19+00:00",
+      "text": "Котики, якщо вважаєте, що канал для вас корисний, і адмінчик заслужив, можете підтримати та закинути пару гриМників на енергос, бережіть себе☕️\n\nhttps://send.monobank.ua/jar/97VjvFbdsX\n\n4441111120108042",
+      "url": "https://t.me/kyivnebomonitoring/23468",
+      "published": null
+    },
+    {
+      "id": 23471,
+      "at": "2026-11-16T21:52:25+00:00",
+      "text": "Останнім часом підтримує мало людей, дякую всім не байдужим, навіть найменший вклад це важливо для мене",
+      "url": "https://t.me/kyivnebomonitoring/23471",
+      "published": null
+    }
+  ]
+}

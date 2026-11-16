@@ -237,6 +237,21 @@ def pending_alert_retries(episode, now=None):
             and state.get("next_retry", now + 1) <= now < state.get("deadline", 0)]
 
 
+def pending_alert_reconciliations(episode, now=None):
+    if not stats_db_ready:
+        return []
+    now = time.time() if now is None else now
+    with sqlite3.connect(CATEGORY_STATS_DB_PATH, timeout=5) as connection:
+        rows = connection.execute(
+            "SELECT channel, message_id, state FROM alert_message_state WHERE updated_at>=?",
+            (now - 120,),
+        ).fetchall()
+    return [(channel, message_id, state) for channel, message_id, raw in rows
+            if (state := json.loads(raw)).get("episode") == episode
+            and state.get("status") == "delivery_unknown"
+            and state.get("next_reconcile", 0) <= now]
+
+
 def set_alert_feed_cursor(channel, message_id):
     return persist_operational_state(alert_feed_cursor_key(channel), int(message_id))
 

@@ -873,7 +873,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             monitor.translate_known_terse_fragment("Балістика на Київ!"),
-            "Ballistic threat to Kyiv!",
+            "Ballistic missiles heading toward Kyiv!",
         )
         self.assertEqual(await monitor.translate_message("Збили"), "Shot down")
         prompt = monitor.build_alert_translation_prompt("Дарниця")

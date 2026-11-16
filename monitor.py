@@ -299,6 +299,8 @@ alert_level = "GREEN"
 last_send_time = 0
 last_message_time = time.time()
 production_client = None
+alert_output_entity = None
+alert_output_reference = int(ALERT_OUTPUT_CHAT_ID)
 content_source_entities = {}
 MIN_SEND_INTERVAL = 1.0 if TEST_MODE else 0.2
 
@@ -1177,6 +1179,7 @@ async def alert_feed_poll_loop(client, source_entities):
                     await reconcile_alert_state(f"poll:@{ALERT_TRIGGER_CHANNEL}")
                     break
             if alert_active:
+                await reconcile_unknown_alerts()
                 await retry_failed_alerts()
                 delivered = await backfill_alert_feed(client, source_entities)
                 if delivered:
@@ -1625,7 +1628,7 @@ async def telegram_request(method, payload):
             return None
         except Exception as exc:
             if method == "sendMessage":
-                print("Telegram sendMessage outcome unknown; automatic resend suppressed")
+                print(f"Telegram sendMessage outcome unknown; exception={type(exc).__name__}; automatic resend suppressed")
                 return None
             if attempt < 3:
                 await asyncio.sleep(attempt + 1)
@@ -1654,6 +1657,10 @@ async def edit_message(chat_id, message_id, text):
 async def send_to_alert_channel(text):
     """Send alert lifecycle and real-time messages to the alert-only channel."""
     result = await send_message(ALERT_OUTPUT_CHAT_ID, text)
+    if result and result.get("message_id"):
+        # A confirmed output ID bounds history reconciliation, excluding earlier
+        # identical fragments about different targets. No extra network request.
+        state_store.persist_operational_state("last_alert_output_id", str(result["message_id"]))
     if TEST_MODE and result and result.get("message_id"):
         bot_output_message_ids.add(result["message_id"])
     return result
@@ -1688,9 +1695,13 @@ async def startup_self_check():
         "summary": SUMMARY_OUTPUT_CHAT_ID,
         "ops": OPS_CHAT_ID,
     }
+    global alert_output_reference
     for name, chat_id in destinations.items():
-        if not await telegram_request("getChat", {"chat_id": chat_id}):
+        chat = await telegram_request("getChat", {"chat_id": chat_id})
+        if not chat:
             failures.append(f"Bot API cannot access the {name} destination")
+        elif name == "alert" and isinstance(chat, dict) and chat.get("username"):
+            alert_output_reference = "@" + chat["username"]
 
     if failures:
         message = "🚨 <b>Startup self-check failed</b>\n" + "\n".join(
@@ -2023,8 +2034,15 @@ async def handle_alert_message(clean, source=ALERT_FEED_CHANNEL, generation=None
         public_text = f"{indicator} {html.escape(label + translation)}"
         if delivery is not None:
             # A crash/timeout after this point has an unknown send outcome. Never
-            # automatically replay it; Telegram sendMessage is not idempotent.
+            # blindly replay it; Telegram sendMessage is not idempotent.
             delivery["status"] = "delivery_unknown"
+            delivery.update(
+                attempt_text=public_text, attempt_translation=translation, attempt_source=clean,
+                send_started_at=time.time(), next_reconcile=time.time() + 20,
+                attempt_after_id=int(state_store.load_operational_state("last_alert_output_id") or 0),
+                delivery_attempts=1, reconciliation_checks=0,
+                edit_target_id=previous_id if correction else None,
+            )
             state_store.save_alert_message(source, delivery["message_id"], delivery)
         if correction:
             response = await edit_message(ALERT_OUTPUT_CHAT_ID, previous_id, public_text)
@@ -2091,7 +2109,8 @@ async def _process_alert_feed_message(message, channel, *, edited=False):
         clean = strip_non_operational_news(clean)
     fingerprint = normalize_alert_revision(clean)
     if delivery.get("status") == "delivery_unknown":
-        print(f"[ALERT DELIVERY UNKNOWN] @{channel} id={message.id} requires reconciliation")
+        # The bounded reconciliation loop owns this state; polling must neither
+        # translate it again nor flood the logs every five seconds.
         return False
     retrying = (delivery.get("status") in {"translation_error", "processing"}
                 and delivery.get("fingerprint") == fingerprint)
@@ -2168,13 +2187,116 @@ async def _process_alert_feed_message(message, channel, *, edited=False):
         delivery["status"] = "cancelled"
     state_store.save_alert_message(channel, message.id, delivery)
     if delivery.get("status") == "delivery_unknown":
-        await send_to_owner(f"Ops: Telegram delivery outcome unknown; no automatic resend. Source: @{channel}/{message.id}")
+        print(f"[ALERT DELIVERY UNKNOWN] @{channel} id={message.id}; queued for reconciliation")
+        await send_to_owner(f"Ops: Telegram delivery outcome unknown; checking channel history. Source: @{channel}/{message.id}")
     if delivered:
         state_store.set_alert_feed_cursor(channel, max(state_store.get_alert_feed_cursor(channel), message.id))
         print(f"[ALERT PROCESSED] @{channel} id={message.id} edited={edited}")
     else:
         state_store.release_alert_feed_delivery(channel, message.id, clean)
     return delivered
+
+
+async def prepare_alert_reconciliation():
+    """Resolve the output with the existing session, including fresh StringSessions."""
+    global alert_output_entity
+    try:
+        entity = await asyncio.wait_for(production_client.get_entity(alert_output_reference), timeout=5)
+        if utils.get_peer_id(entity) != int(ALERT_OUTPUT_CHAT_ID):
+            raise ValueError("Output channel identity mismatch")
+        history = await asyncio.wait_for(production_client.get_messages(entity, limit=1), timeout=5)
+        alert_output_entity = entity
+        if history:
+            state_store.persist_operational_state("last_alert_output_id", str(history[0].id))
+        print("[ALERT RECONCILIATION READY] output history accessible using existing session")
+    except Exception as exc:
+        alert_output_entity = None
+        print(f"[ALERT RECONCILIATION UNAVAILABLE] exception={type(exc).__name__}")
+
+
+async def reconcile_unknown_alerts():
+    """Use the existing client; never blindly replay an uncertain Bot API send."""
+    if not alert_active or production_client is None:
+        return
+    global alert_publication_lock
+    if alert_publication_lock is None:
+        alert_publication_lock = asyncio.Lock()
+    generation = alert_generation
+    episode = state_store.load_operational_state("alert_episode_started_at") or ""
+    for channel, message_id, _ in state_store.pending_alert_reconciliations(episode):
+        if channel not in ALERT_FEED_CHANNELS:
+            continue
+        lock = alert_message_locks.setdefault((channel, message_id), asyncio.Lock())
+        if lock.locked():
+            continue
+        async with lock:
+            delivery = state_store.load_alert_message(channel, message_id)
+            if delivery.get("status") != "delivery_unknown":
+                continue
+            now = time.time()
+            if (delivery.get("episode") != episode or now >= delivery.get("deadline", 0)
+                    or not delivery.get("attempt_text") or delivery.get("reconciliation_checks", 0) >= 4):
+                delivery["status"] = "unresolved_delivery"
+                state_store.save_alert_message(channel, message_id, delivery)
+                print(f"[ALERT DELIVERY UNRESOLVED] @{channel} id={message_id}; no stale resend")
+                continue
+            delivery["next_reconcile"] = now + 10
+            delivery["reconciliation_checks"] = delivery.get("reconciliation_checks", 0) + 1
+            state_store.save_alert_message(channel, message_id, delivery)
+            try:
+                history = await asyncio.wait_for(production_client.get_messages(
+                    alert_output_entity or int(ALERT_OUTPUT_CHAT_ID), limit=100), timeout=5)
+            except Exception as exc:
+                print(f"[ALERT RECONCILE ERROR] @{channel} id={message_id} exception={type(exc).__name__}")
+                continue
+            after_id = delivery.get("attempt_after_id", 0)
+            started = delivery.get("send_started_at", now)
+            expected = html.unescape(delivery["attempt_text"])
+            valid = [m for m in history if isinstance(getattr(m, "date", None), datetime) and m.date.tzinfo]
+            edit_id = delivery.get("edit_target_id")
+            matches = [m for m in valid if (m.id == edit_id if edit_id else
+                       m.id > after_id and int(started) <= m.date.timestamp() <= now)
+                       and (m.text or "") == expected]
+            if len(matches) == 1 and (after_id or edit_id):
+                delivery.update(status="published", output_id=matches[0].id,
+                                translation=delivery["attempt_translation"], published_source=delivery["attempt_source"])
+                state_store.save_alert_message(channel, message_id, delivery)
+                state_store.set_alert_feed_cursor(channel, max(state_store.get_alert_feed_cursor(channel), message_id))
+                if alert_active and episode == state_store.load_operational_state("alert_episode_started_at"):
+                    remember_published_alert(delivery["attempt_source"], channel)
+                    remember_confirmed_translation(delivery["attempt_translation"], channel)
+                print(f"[ALERT DELIVERY RECONCILED] @{channel} id={message_id} output_id={matches[0].id}")
+                continue
+            # An empty/partial history or an ambiguous match is not evidence of
+            # absence. Require two complete reads after the original call ended.
+            complete = bool(valid) and any(m.id <= after_id and m.date.timestamp() < started for m in valid)
+            if matches or not complete or now - started < 20:
+                delivery.pop("absent_since", None)
+            elif "absent_since" not in delivery:
+                delivery["absent_since"] = now
+            elif now - delivery["absent_since"] >= 10 and delivery.get("delivery_attempts", 1) < 2:
+                async with alert_publication_lock:
+                    if (not alert_active or generation != alert_generation
+                            or episode != state_store.load_operational_state("alert_episode_started_at")
+                            or time.time() >= delivery["deadline"]):
+                        continue
+                    # Persist before retry, so a restart cannot create another send.
+                    indicator = "🟡" if alert_level == "YELLOW" else "🔴"
+                    delivery["attempt_text"] = re.sub(r"^[🟡🔴]", indicator, delivery["attempt_text"])
+                    delivery.update(delivery_attempts=2, send_started_at=time.time(),
+                                    next_reconcile=time.time() + 20)
+                    delivery.pop("absent_since", None)
+                    state_store.save_alert_message(channel, message_id, delivery)
+                    response = (await edit_message(ALERT_OUTPUT_CHAT_ID, edit_id, delivery["attempt_text"])) if edit_id else await safe_send(delivery["attempt_text"])
+                    if response:
+                        delivery.update(status="published", output_id=response.get("message_id"),
+                                        translation=delivery["attempt_translation"], published_source=delivery["attempt_source"])
+                        state_store.save_alert_message(channel, message_id, delivery)
+                        state_store.set_alert_feed_cursor(channel, max(state_store.get_alert_feed_cursor(channel), message_id))
+                        remember_published_alert(delivery["attempt_source"], channel)
+                        remember_confirmed_translation(delivery["attempt_translation"], channel)
+                        print(f"[ALERT DELIVERY RECOVERED] @{channel} id={message_id} output_id={delivery['output_id']}")
+            state_store.save_alert_message(channel, message_id, delivery)
 
 
 async def retry_failed_alerts():
@@ -2382,6 +2504,7 @@ async def main():
             channel: source_entities[channel] for channel in ALL_CONTENT_CHANNELS
         }
         await ensure_live_source_membership(client, source_entities)
+        await prepare_alert_reconciliation()
 
         # Establish the Telegram trigger state immediately from its latest explicit event.
         recent_trigger_messages = await client.get_messages(source_entities[ALERT_TRIGGER_CHANNEL], limit=100)
