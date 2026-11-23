@@ -183,11 +183,12 @@ ALERT_LEVEL_MESSAGES = {
 
 
 def build_all_clear_message():
-    """Include our news link only in the official all-clear, not source alerts."""
-    safe_link = html.escape(SUMMARY_CHAT_LINK or "", quote=True)
+    """Explain the news group's value below the official all-clear."""
     return (
         "✅ <b>ALL CLEAR — KYIV</b>\n\n"
-        f'<a href="{safe_link}">Join Kyiv News →</a>'
+        "📰 <b>Stay informed between alerts</b>\n"
+        "Power cuts, transport updates and key news from Kyiv and Ukraine.\n"
+        "Short briefings. In English."
     )
 
 # --- Cross-source categories (normal mode) ---
@@ -1637,13 +1638,16 @@ async def telegram_request(method, payload):
             return None
     return None
 
-async def send_message(chat_id, text):
-    return await telegram_request("sendMessage", {
+async def send_message(chat_id, text, *, reply_markup=None):
+    payload = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-    })
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return await telegram_request("sendMessage", payload)
 
 async def edit_message(chat_id, message_id, text):
     return await telegram_request("editMessageText", {
@@ -1656,7 +1660,12 @@ async def edit_message(chat_id, message_id, text):
 
 async def send_to_alert_channel(text):
     """Send alert lifecycle and real-time messages to the alert-only channel."""
-    result = await send_message(ALERT_OUTPUT_CHAT_ID, text)
+    if text == build_all_clear_message() and SUMMARY_CHAT_LINK:
+        result = await send_message(ALERT_OUTPUT_CHAT_ID, text, reply_markup={
+            "inline_keyboard": [[{"text": "Read Kyiv News Brief →", "url": SUMMARY_CHAT_LINK}]],
+        })
+    else:
+        result = await send_message(ALERT_OUTPUT_CHAT_ID, text)
     if result and result.get("message_id"):
         # A confirmed output ID bounds history reconciliation, excluding earlier
         # identical fragments about different targets. No extra network request.

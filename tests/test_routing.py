@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -64,6 +65,7 @@ def load_monitor():
 
 
 monitor = load_monitor()
+REAL_SEND_MESSAGE = monitor.send_message
 
 
 class FakeTelegramMessage:
@@ -363,11 +365,13 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.sent = []
+        self.sent_markup = []
         monitor.recent_alert_messages.clear()
         monitor.alert_publication_lock = asyncio.Lock()
 
-        async def fake_send_message(chat_id, text):
+        async def fake_send_message(chat_id, text, *, reply_markup=None):
             self.sent.append((chat_id, text))
+            self.sent_markup.append(reply_markup)
             return {"message_id": len(self.sent)}
 
         monitor.send_message = fake_send_message
@@ -409,9 +413,31 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         clear_text = self.sent[-1][1]
         self.assertEqual(self.sent[-1][0], ALERT_CHAT_ID)
         self.assertIn("✅ <b>ALL CLEAR — KYIV</b>", clear_text)
-        self.assertIn(f'<a href="{SUMMARY_CHAT_LINK}">Join Kyiv News →</a>', clear_text)
-        self.assertEqual(clear_text.count("href="), 1)
+        self.assertIn("Stay informed between alerts", clear_text)
+        self.assertIn("Power cuts, transport updates", clear_text)
+        self.assertIn("In English.", clear_text)
+        self.assertEqual(self.sent_markup[-1], {"inline_keyboard": [[
+            {"text": "Read Kyiv News Brief →", "url": SUMMARY_CHAT_LINK},
+        ]]})
+        self.assertIsNone(self.sent_markup[0])
         self.assertNotIn("Back to NORMAL mode", clear_text)
+
+    async def test_news_button_reaches_telegram_only_with_official_all_clear(self):
+        request = AsyncMock(return_value={"message_id": 100})
+        with patch.object(monitor, "send_message", REAL_SEND_MESSAGE), patch.object(monitor, "telegram_request", request):
+            await monitor.send_to_alert_channel(monitor.build_all_clear_message())
+            await monitor.send_to_alert_channel(monitor.ALERT_LEVEL_MESSAGES["YELLOW"])
+            await monitor.send_to_alert_channel(monitor.ALERT_LEVEL_MESSAGES["RED"])
+            await monitor.send_to_alert_channel("🟡 Currently clear near Kyiv.")
+            await monitor.send_to_summary_group(monitor.build_all_clear_message())
+        payloads = [call.args[1] for call in request.await_args_list]
+        self.assertEqual(len(payloads), 5)
+        self.assertEqual(payloads[0]["chat_id"], ALERT_CHAT_ID)
+        self.assertEqual(payloads[0]["reply_markup"]["inline_keyboard"], [[
+            {"text": "Read Kyiv News Brief →", "url": SUMMARY_CHAT_LINK},
+        ]])
+        self.assertTrue(payloads[0]["disable_web_page_preview"])
+        self.assertTrue(all("reply_markup" not in payload for payload in payloads[1:]))
 
     async def test_undated_api_level_cannot_override_official_telegram_level(self):
         original = (
