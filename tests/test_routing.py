@@ -365,13 +365,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.sent = []
-        self.sent_markup = []
         monitor.recent_alert_messages.clear()
         monitor.alert_publication_lock = asyncio.Lock()
 
-        async def fake_send_message(chat_id, text, *, reply_markup=None):
+        async def fake_send_message(chat_id, text):
             self.sent.append((chat_id, text))
-            self.sent_markup.append(reply_markup)
             return {"message_id": len(self.sent)}
 
         monitor.send_message = fake_send_message
@@ -413,14 +411,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         clear_text = self.sent[-1][1]
         self.assertEqual(self.sent[-1][0], ALERT_CHAT_ID)
         self.assertIn("✅ <b>ALL CLEAR — KYIV</b>", clear_text)
-        self.assertEqual(clear_text, '✅ <b>ALL CLEAR — KYIV</b>')
-        self.assertEqual(self.sent_markup[-1], {"inline_keyboard": [[{
-            "text": "👉 Don’t miss the latest from Ukraine 👈", "url": SUMMARY_CHAT_LINK,
-        }]]})
-        self.assertIsNone(self.sent_markup[0])
+        self.assertEqual(clear_text, '✅ <b>ALL CLEAR — KYIV</b>\n\n'
+                         f'<a href="{SUMMARY_CHAT_LINK}"><b>👉 Don’t miss the latest from Ukraine 👈</b></a>')
         self.assertNotIn("Back to NORMAL mode", clear_text)
 
-    async def test_plain_news_button_is_sent_only_with_official_all_clear(self):
+    async def test_news_link_is_sent_in_the_all_clear_without_extra_messages(self):
         request = AsyncMock(return_value={"message_id": 100})
         with patch.object(monitor, "send_message", REAL_SEND_MESSAGE), patch.object(monitor, "telegram_request", request):
             await monitor.send_to_alert_channel(monitor.build_all_clear_message())
@@ -431,13 +426,11 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         payloads = [call.args[1] for call in request.await_args_list]
         self.assertEqual(len(payloads), 5)
         self.assertEqual(payloads[0]["chat_id"], ALERT_CHAT_ID)
-        self.assertEqual(payloads[0]["reply_markup"]["inline_keyboard"], [[{
-            "text": "👉 Don’t miss the latest from Ukraine 👈", "url": SUMMARY_CHAT_LINK,
-        }]])
+        self.assertIn(f'<a href="{SUMMARY_CHAT_LINK}">', payloads[0]["text"])
         self.assertEqual(payloads[0]["parse_mode"], "HTML")
         self.assertTrue(payloads[0]["disable_web_page_preview"])
-        self.assertTrue(all("href=" not in payload["text"] and "<u>" not in payload["text"] for payload in payloads))
-        self.assertTrue(all("reply_markup" not in payload for payload in payloads[1:]))
+        self.assertTrue(all("href=" not in payload["text"] for payload in payloads[1:]))
+        self.assertTrue(all("reply_markup" not in payload for payload in payloads))
 
     async def test_undated_api_level_cannot_override_official_telegram_level(self):
         original = (
